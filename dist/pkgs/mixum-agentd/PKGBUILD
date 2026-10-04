@@ -1,0 +1,55 @@
+# mixum-agentd —— mixumOS 容器内守护进程(任务引擎/快照/显示 broker/WSS)。
+#
+# 【占位包】Rust 版(rust/crates/mixum-agentd)就绪前,二进制用
+# reference/(Go 参考实现)构建出的 mixumd 顶上——任务书允许:
+# 「在其 Rust 替代就绪前,它的二进制允许作为 PKGBUILD 的占位源」。
+# 替换方式:只改 build()/package() 的来源(crate 构建),包名、
+# systemd 单元、文件路径不变。占位期二进制沿用 reference 的历史名
+# mixumd(e2e 入口脚本按此名调用);Rust 版就绪后统一改名并同步 e2e。
+#
+# 二进制由 dist/repo/build-repo.sh 预先放到 $startdir/placeholder/mixumd,
+# 其 sha256 记录在 dist/out/BUILDINFO(占位源不进 source 数组,无校验和)。
+pkgname=mixum-agentd
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="mixumOS 容器内守护进程:任务引擎/快照引擎/显示 broker/WSS 服务"
+arch=(aarch64 x86_64)
+url="https://github.com/mixumos/mixumos"
+license=('LicenseRef-Proprietary')  # 仓库暂无 LICENSE 文件,定稿后替换
+depends=(glibc)  # Go 占位为静态二进制,不依赖;Rust 版动态链 glibc,保留声明
+optdepends=('criu: 内存快照(hybrid)支持')
+source=()
+sha256sums=()
+
+build() {
+	# 占位:待 mixum-agentd crate 就绪后替换为 crate 构建。
+	# 二进制已由构建脚本放进 $startdir/placeholder/,这里不动。
+	return 0
+}
+
+check() {
+	# 注意:check() 在 package() 之前跑,$pkgdir 还是空的,文件存在性
+	# 由 package() 的 install -D 保证;这里只冒烟占位二进制
+	# (Go flag 包对 -h/-help 打印用法后以 0 退出,2 视为用法退出也算活)。
+	if [ -f "$startdir/placeholder/mixumd" ]; then
+		rc=0
+		"$startdir/placeholder/mixumd" -h >/dev/null 2>&1 || rc=$?
+		if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+			echo "mixumd 冒烟失败(exit=$rc)" >&2
+			return 1
+		fi
+	else
+		warning "无占位二进制,check 仅确认单元文件源文件存在"
+		test -f "$startdir/mixumd.service"
+	fi
+}
+
+package() {
+	if [ -f "$startdir/placeholder/mixumd" ]; then
+		install -Dm755 "$startdir/placeholder/mixumd" "$pkgdir/usr/bin/mixumd"
+	else
+		warning "未找到 placeholder/mixumd,本包只装 systemd 单元(占位期过渡形态)"
+	fi
+	install -Dm644 "$startdir/mixumd.service" "$pkgdir/usr/lib/systemd/system/mixumd.service"
+	install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/mixum-agentd/README.md"
+}
