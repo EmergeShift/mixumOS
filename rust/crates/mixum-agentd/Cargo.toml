@@ -1,0 +1,36 @@
+[package]
+name = "mixum-agentd"
+description = "mixumOS 容器内 Rust 守护进程"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mixum-protocol = { path = "../mixum-protocol" }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen = { workspace = true }
+nix = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+mixum-snapshot = { path = "../mixum-snapshot", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[example]]
+name = "push_node"
+required-features = ["real-snapshot"]
+
+[features]
+# 接入真实快照引擎(mixum-snapshot crate);缺省用内存桩保证分支可独立构建。
+# 该 crate 由并行 agent 交付,合并 main 后可改为默认特性。
+real-snapshot = ["dep:mixum-snapshot"]
