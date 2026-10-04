@@ -143,7 +143,9 @@ impl Engine {
         node.arch = std::env::consts::ARCH.into();
         let do_disk = kind == KIND_DISK || kind == KIND_HYBRID;
         let do_mem = kind == KIND_MEMORY || kind == KIND_HYBRID;
-        if do_mem && self.criu.is_none() {
+        // pid=0(无任务运行或驱动未注册首领进程)时退化为 disk:
+        // CRIU 不接受 --tree 0;纯 memory 快照仍要求 CRIU 与 pid 就绪。
+        if kind == KIND_MEMORY && (self.criu.is_none() || self.task_pid.is_none()) {
             return Err(CriuError::Unavailable.into());
         }
         let mut action = || {
@@ -153,7 +155,7 @@ impl Engine {
                 node.chunks += m.chunks().len();
                 node.disk = Some(m);
             }
-            if do_mem {
+            if do_mem && self.criu.is_some() && self.task_pid.map(|p| p > 0) == Some(true) {
                 let dir = std::env::temp_dir().join(format!("mixum-criu-{}", node.id));
                 self.criu.as_ref().ok_or(CriuError::Unavailable)?.dump(
                     self.task_pid.unwrap_or(0),
