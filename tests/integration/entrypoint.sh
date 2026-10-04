@@ -18,14 +18,15 @@ for i in $(seq 1 50); do
 	sleep 0.2
 done
 
-# 2. mixcomp（连接 mixumd 控制通道）
-mixcomp --sock /run/mixum/display.sock --quality 70 &
+# 2. mixcomp（连接 mixumd 控制通道）。e2eclient（gorilla 默认读缓冲 4096）
+# 扛不住大帧， JPEG 质量压低以保单帧 <4KiB。
+mixcomp --sock /run/mixum/display.sock --quality 30 &
 MIXCOMP_PID=$!
 sleep 1.5
 
 # 3. GUI 应用（测试窗口流）：foot 跑一个长驻 shell
 if command -v foot >/dev/null 2>&1; then
-	foot --hold cat /etc/alpine-release &
+	foot --override=main.initial-window-size-pixels=300x200 --hold cat /etc/alpine-release &
 	sleep 1
 fi
 
