@@ -121,6 +121,9 @@ static const struct wl_seat_listener seat_listener = {
 	.name = NULL,
 };
 
+static void maybe_create_devices(struct mixcomp_server *s);
+static bool keymap_upload(struct mixcomp_server *s);
+
 static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
 		const char *iface, uint32_t version) {
 	struct mixcomp_server *s = data;
@@ -134,6 +137,32 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
 	} else if (strcmp(iface, "zwp_virtual_keyboard_manager_v1") == 0 && inj.kb_mgr == NULL) {
 		inj.kb_mgr = wl_registry_bind(reg, name, &kb_manager_interface, 1);
 	}
+	// 全异步：managers 就绪即在事件循环内创建设备，绝不阻塞合成器主循环。
+	maybe_create_devices(s);
+}
+
+static bool devices_created = false;
+
+static void maybe_create_devices(struct mixcomp_server *s) {
+	if (devices_created || inj.seat == NULL || inj.vp_mgr == NULL || inj.kb_mgr == NULL) {
+		return;
+	}
+	devices_created = true;
+	wlr_log(WLR_INFO, "创建虚拟输入设备: seat=%p vp_mgr=%p kb_mgr=%p",
+			(void *)inj.seat, (void *)inj.vp_mgr, (void *)inj.kb_mgr);
+	inj.pointer = wl_proxy_marshal_flags(inj.vp_mgr, 0, &vp_interface, 2, 0, inj.seat);
+	inj.keyboard = wl_proxy_marshal_flags(inj.kb_mgr, 0, &kb_interface, 1, 0, inj.seat);
+	if (inj.pointer == NULL || inj.keyboard == NULL) {
+		wlr_log(WLR_ERROR, "虚拟输入设备创建失败（pointer=%p keyboard=%p）",
+				(void *)inj.pointer, (void *)inj.keyboard);
+		devices_created = false;
+		return;
+	}
+	if (!keymap_upload(s)) {
+		wlr_log(WLR_ERROR, "keymap 上传失败，键盘注入不可用");
+	}
+	wl_display_flush(inj.display);
+	wlr_log(WLR_INFO, "注入客户端就绪：virtual pointer + keyboard 已创建");
 }
 
 static void registry_global_remove(void *data, struct wl_registry *reg, uint32_t name) {
@@ -419,30 +448,13 @@ bool input_init(struct mixcomp_server *s) {
 	s->inj_display = inj.display;
 	inj.registry = wl_display_get_registry(inj.display);
 	wl_registry_add_listener(inj.registry, &registry_listener, s);
-	wl_display_roundtrip(inj.display);
-	wl_display_roundtrip(inj.display); // 第二轮确保 managers 就绪
 
-	if (inj.vp_mgr != NULL) {
-		inj.pointer = wl_proxy_marshal_flags(inj.vp_mgr, 0, &vp_interface, 2, 0,
-				inj.seat);
-	}
-	if (inj.kb_mgr != NULL) {
-		inj.keyboard = wl_proxy_marshal_flags(inj.kb_mgr, 0, &kb_interface, 1, 0,
-				inj.seat);
-	}
-	if (inj.pointer == NULL || inj.keyboard == NULL) {
-		wlr_log(WLR_ERROR, "虚拟输入设备创建失败（pointer=%p keyboard=%p）",
-				(void *)inj.pointer, (void *)inj.keyboard);
-		return false;
-	}
-	if (!keymap_upload(s)) {
-		wlr_log(WLR_ERROR, "keymap 上传失败，键盘注入不可用");
-	}
+	// 注册事件源后由事件循环完成 registry/bind/设备创建（不阻塞）。
+	// 必须显式 flush 一次，get_registry 的请求才会发出去。
 	wl_display_flush(inj.display);
-
 	int fd = wl_display_get_fd(inj.display);
 	struct wl_event_loop *loop = wl_display_get_event_loop(s->display);
 	s->inj_src = wl_event_loop_add_fd(loop, fd, WL_EVENT_READABLE, inj_fd_cb, s);
-	wlr_log(WLR_INFO, "注入客户端就绪：virtual pointer + keyboard 已创建");
+	wlr_log(WLR_INFO, "注入客户端已连接，等待设备异步创建");
 	return true;
 }

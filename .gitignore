@@ -1,8 +1,2 @@
-node_modules/
-dist/
-*.log
-.DS_Store
-/work/
-*.test
-mixcomp/mixcomp
-mixcomp/src/*.o
+build/
+reference/build/
