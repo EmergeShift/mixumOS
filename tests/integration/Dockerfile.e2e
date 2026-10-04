@@ -9,11 +9,9 @@ RUN apk add --no-cache \
 	foot font-noto mesa-egl mesa-gles bash \
 	evtest 2>/dev/null; apk add --no-cache wlroots json-c libjpeg-turbo libxkbcommon foot font-noto mesa-egl mesa-gles
 
-# mixcomp 源码内构建（xdg-shell-protocol.h 需现场生成）
+# mixcomp 源码内构建（协议头由 Makefile 用 wayland-scanner 现场生成）
 WORKDIR /opt/mixcomp
 COPY mixcomp/ /opt/mixcomp/
-RUN [ -f /usr/include/wlroots-0.18/wlr/types/xdg-shell-protocol.h ] || \
-	wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/wlroots-0.18/wlr/types/xdg-shell-protocol.h
 RUN make && cp mixcomp /usr/local/bin/
 
 COPY build/mixumd-arm64 /usr/local/bin/mixumd

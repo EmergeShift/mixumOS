@@ -49,6 +49,13 @@ static void commit_cb(struct wl_listener *listener, void *data) {
 	if (x == NULL || x->surface == NULL) {
 		return;
 	}
+	// wlroots 0.18 语义：xdg_surface 的 initial commit 后合成器必须回一个
+	// 空 configure，客户端 ack 后才允许贴第一帧缓冲（tinywl 同款做法，
+	// 0,0 表示尺寸由客户端自选，mixcomp 不做摆放）。
+	if (x->initial_commit) {
+		wlr_xdg_toplevel_set_size(x->toplevel, 0, 0);
+		return;
+	}
 	int wpx = x->surface->current.width, hpx = x->surface->current.height;
 	if (wpx > 0 && hpx > 0 && (wpx != w->width || hpx != w->height)) {
 		w->width = wpx;

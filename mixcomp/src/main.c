@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_shm.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
@@ -114,14 +115,14 @@ static void new_input_cb(struct wl_listener *listener, void *data) {
 	}
 }
 
-static void new_surface_cb(struct wl_listener *listener, void *data) {
+// new_toplevel_cb —— xdg toplevel 就绪。wlroots 0.18 语义：new_surface 只在
+// get_xdg_surface 时发射一次且 role 必为 NONE，不能做窗口入口；带 role 的
+// 事件是 new_toplevel（tinywl 0.18 同款）。
+static void new_toplevel_cb(struct wl_listener *listener, void *data) {
 	(void)listener;
-	struct wlr_xdg_surface *xdg = data;
-	if (xdg->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
-		return;
-	}
+	struct wlr_xdg_toplevel *toplevel = data;
 	// 常规合成器在此摆放窗口；mixcomp 只做隔离捕获。
-	window_create(&server, xdg);
+	window_create(&server, toplevel->base);
 }
 
 // 控制通道轮询定时器（200ms）。
@@ -136,7 +137,10 @@ static int poll_timer_cb(int fd, uint32_t mask, void *data) {
 }
 
 int main(int argc, char **argv) {
-	wlr_log_init(WLR_INFO, NULL);
+	// 0.18 的 wlr_log_init 不再读环境变量；保留 WLR_LOG_LEVEL 覆盖能力，
+	// e2e 排障需要 DEBUG 级日志（如缓冲类型判定失败时的上下文）。
+	const char *log_lvl = getenv("WLR_LOG_LEVEL");
+	wlr_log_init(log_lvl != NULL ? (enum wlr_log_importance)atoi(log_lvl) : WLR_INFO, NULL);
 
 	const char *sock = "/run/mixum/display.sock";
 	int quality = 80;
@@ -179,25 +183,38 @@ int main(int argc, char **argv) {
 		wlr_log(WLR_ERROR, "渲染器创建失败");
 		return 1;
 	}
-	wl_display_init_shm(server.display);
+	// wlroots 0.18 已移除 wl_display_init_shm：若误调用会解析到
+	// libwayland-server 的遗留实现，其缓冲 wlroots 无法识别，客户端
+	// 一贴帧即被"Unknown buffer type"断连。必须用 wlroots 自己的 API。
+	if (wlr_shm_create_with_renderer(server.display, 2, server.renderer) == NULL) {
+		wlr_log(WLR_ERROR, "wl_shm 创建失败");
+		return 1;
+	}
 	// wl_compositor 是客户端连接的前提（缺它应用会报 no compositor）。
 	wlr_compositor_create(server.display, 6, server.renderer);
 	wlr_subcompositor_create(server.display);
 	wlr_viewporter_create(server.display);
 
 	server.xdg_shell = wlr_xdg_shell_create(server.display, 3);
-	server.new_surface.notify = new_surface_cb;
-	wl_signal_add(&server.xdg_shell->events.new_surface, &server.new_surface);
+	server.new_surface.notify = new_toplevel_cb;
+	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_surface);
 
 	// 常驻虚拟输出：为要求至少一个显示器的客户端（如终端）提供锚点。
 	// 捕获不经过它——每窗口直接读 client buffer。
+	// 注意：wlroots 0.18 起不再自动创建 wl_output 全局，合成器必须显式
+	// 调 wlr_output_create_global，否则客户端看不到任何显示器（foot 报
+	// "no monitors available" 即此因）。
 	struct wlr_output *anchor = wlr_headless_add_output(headless, 1280, 800);
 	if (anchor != NULL) {
 		struct wlr_output_state st;
 		wlr_output_state_init(&st);
 		wlr_output_state_set_custom_mode(&st, 1280, 800, 30000);
 		wlr_output_state_set_enabled(&st, true);
-		wlr_output_commit_state(anchor, &st);
+		if (wlr_output_commit_state(anchor, &st)) {
+			wlr_output_create_global(anchor, server.display);
+		} else {
+			wlr_log(WLR_ERROR, "anchor 输出 commit 失败");
+		}
 		wlr_output_state_finish(&st);
 	}
 

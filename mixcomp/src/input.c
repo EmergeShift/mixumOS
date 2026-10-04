@@ -3,6 +3,12 @@
 // zwlr_virtual_pointer_v1 创建虚拟设备；wlroots 为其生成标准输入事件，
 // main.c 把事件路由到目标窗口的 seat。只依赖公开协议，行为与外部
 // 输入工具（如 wtype/ydotool 的 wayland 路径）一致。
+//
+// 协议消息一律走 wayland-scanner 生成的桩函数（头文件由 Makefile 从
+// protocol/*.xml 现场生成），不再手搓 wl_interface 表：new_id 的变参
+// 占位（固定接口传 NULL）、opcode 顺序、签名串都由生成器保证与 XML
+// 逐字节一致。手搓表曾因 create_virtual_pointer 签名写反（"no"，上游
+// 是 "on"）导致越界读变参、在 wl_proxy_marshal_flags 里随机段错误。
 #include <errno.h>
 #include <fcntl.h>
 #include <json-c/json.h>
@@ -21,13 +27,14 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "mixcomp.h"
+#include "virtual-keyboard-client-protocol.h"
+#include "wlr-virtual-pointer-client-protocol.h"
 
 #define KEYMAP_FORMAT_XKB_V1 1
 #define POINTER_AXIS_VERTICAL 0
 #define AXIS_SOURCE_WHEEL 0
 #define KEY_STATE_RELEASED 0
 #define KEY_STATE_PRESSED 1
-#define POINTER_ENTER 1
 
 struct mixcomp_window;
 static struct mixcomp_window *find_window(struct mixcomp_server *s, int id);
@@ -42,63 +49,16 @@ static struct mixcomp_window *find_window(struct mixcomp_server *s, int id) {
 	return NULL;
 }
 
-// ---------- 手工协议接口声明（与上游 XML 逐字段对齐） ----------
-
-static const struct wl_message vp_requests[] = {
-	{ "motion", "uff", NULL },
-	{ "motion_absolute", "uuuuu", NULL },
-	{ "button", "uuu", NULL },
-	{ "axis", "uuf", NULL },
-	{ "axis_source", "u", NULL },
-	{ "axis_stop", "uu", NULL },
-	{ "axis_discrete", "uui", NULL },
-	{ "frame", "", NULL },
-	{ "destroy", "", NULL },
-};
-static const struct wl_interface vp_interface = {
-	"zwlr_virtual_pointer_v1", 2, 9, vp_requests, 0, NULL,
-};
-
-static const struct wl_message vp_manager_requests[] = {
-	{ "create_virtual_pointer", "no", (const struct wl_interface *[]){ (struct wl_interface *)&wl_seat_interface, (struct wl_interface *)&vp_interface } },
-	{ "create_virtual_pointer_with_output", "noo", (const struct wl_interface *[]){ (struct wl_interface *)&wl_seat_interface, NULL, (struct wl_interface *)&vp_interface } },
-	{ "destroy", "", NULL },
-};
-static const struct wl_interface vp_manager_interface = {
-	"zwlr_virtual_pointer_manager_v1", 2, 3, vp_manager_requests, 0, NULL,
-};
-
-static const struct wl_message kb_requests[] = {
-	{ "keymap", "ihu", NULL },
-	{ "key", "uuu", NULL },
-	{ "modifiers", "uiiii", NULL },
-	{ "destroy", "", NULL },
-};
-static const struct wl_interface kb_interface = {
-	"zwp_virtual_keyboard_v1", 1, 4, kb_requests, 0, NULL,
-};
-
-static const struct wl_message kb_manager_requests[] = {
-	{ "create_virtual_keyboard", "no", (const struct wl_interface *[]){ (struct wl_interface *)&wl_seat_interface, (struct wl_interface *)&kb_interface } },
-	{ "destroy", "", NULL },
-};
-static const struct wl_interface kb_manager_interface = {
-	"zwp_virtual_keyboard_manager_v1", 1, 2, kb_manager_requests, 0, NULL,
-};
-
-// create_virtual_pointer/keyboard 的 new_id 在上游 XML 中已标注接口，
-// 因此 wl_proxy_marshal_flags 传目标接口；变参只有 seat。
-
 // ---------- 客户端状态 ----------
 
 struct inj_client {
 	struct wl_display *display;
 	struct wl_registry *registry;
 	struct wl_seat *seat;
-	struct wl_proxy *vp_mgr;
-	struct wl_proxy *kb_mgr;
-	struct wl_proxy *pointer;  // zwlr_virtual_pointer_v1
-	struct wl_proxy *keyboard; // zwp_virtual_keyboard_v1
+	struct zwlr_virtual_pointer_manager_v1 *vp_mgr;
+	struct zwp_virtual_keyboard_manager_v1 *kb_mgr;
+	struct zwlr_virtual_pointer_v1 *pointer;
+	struct zwp_virtual_keyboard_v1 *keyboard;
 	struct xkb_context *xkb_ctx;
 	struct xkb_keymap *xkb_keymap;
 	struct xkb_state *xkb_state;
@@ -116,9 +76,15 @@ static void seat_capabilities(void *data, struct wl_seat *seat, uint32_t caps) {
 	(void)data; (void)seat; (void)caps; // 注入不需要 seat 能力协商
 }
 
+// seat v5 起服务端必发 name 事件；libwayland 1.22+ 对 NULL 监听器槽位
+// 直接 abort（wl_closure_invoke），必须挂处理函数。
+static void seat_name(void *data, struct wl_seat *seat, const char *name) {
+	(void)data; (void)seat; (void)name;
+}
+
 static const struct wl_seat_listener seat_listener = {
 	.capabilities = seat_capabilities,
-	.name = NULL,
+	.name = seat_name,
 };
 
 static void maybe_create_devices(struct mixcomp_server *s);
@@ -131,11 +97,18 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
 		inj.seat = wl_registry_bind(reg, name, &wl_seat_interface,
 				version < 5 ? version : 5);
 		wl_seat_add_listener(inj.seat, &seat_listener, s);
-	} else if (strcmp(iface, "zwlr_virtual_pointer_manager_v1") == 0 && inj.vp_mgr == NULL) {
-		uint32_t v = version < 2 ? version : 2;
-		inj.vp_mgr = wl_registry_bind(reg, name, &vp_manager_interface, v);
-	} else if (strcmp(iface, "zwp_virtual_keyboard_manager_v1") == 0 && inj.kb_mgr == NULL) {
-		inj.kb_mgr = wl_registry_bind(reg, name, &kb_manager_interface, 1);
+	} else if (strcmp(iface, zwlr_virtual_pointer_manager_v1_interface.name) == 0 &&
+			inj.vp_mgr == NULL) {
+		uint32_t v = version < (uint32_t)zwlr_virtual_pointer_manager_v1_interface.version ?
+				version : (uint32_t)zwlr_virtual_pointer_manager_v1_interface.version;
+		inj.vp_mgr = wl_registry_bind(reg, name,
+				&zwlr_virtual_pointer_manager_v1_interface, v);
+	} else if (strcmp(iface, zwp_virtual_keyboard_manager_v1_interface.name) == 0 &&
+			inj.kb_mgr == NULL) {
+		uint32_t v = version < (uint32_t)zwp_virtual_keyboard_manager_v1_interface.version ?
+				version : (uint32_t)zwp_virtual_keyboard_manager_v1_interface.version;
+		inj.kb_mgr = wl_registry_bind(reg, name,
+				&zwp_virtual_keyboard_manager_v1_interface, v);
 	}
 	// 全异步：managers 就绪即在事件循环内创建设备，绝不阻塞合成器主循环。
 	maybe_create_devices(s);
@@ -150,8 +123,11 @@ static void maybe_create_devices(struct mixcomp_server *s) {
 	devices_created = true;
 	wlr_log(WLR_INFO, "创建虚拟输入设备: seat=%p vp_mgr=%p kb_mgr=%p",
 			(void *)inj.seat, (void *)inj.vp_mgr, (void *)inj.kb_mgr);
-	inj.pointer = wl_proxy_marshal_flags(inj.vp_mgr, 0, &vp_interface, 2, 0, inj.seat);
-	inj.keyboard = wl_proxy_marshal_flags(inj.kb_mgr, 0, &kb_interface, 1, 0, inj.seat);
+	// 生成桩内部按 new_id 惯例创建代理并填参，版本取 manager 协商值。
+	inj.pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
+			inj.vp_mgr, inj.seat);
+	inj.keyboard = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(
+			inj.kb_mgr, inj.seat);
 	if (inj.pointer == NULL || inj.keyboard == NULL) {
 		wlr_log(WLR_ERROR, "虚拟输入设备创建失败（pointer=%p keyboard=%p）",
 				(void *)inj.pointer, (void *)inj.keyboard);
@@ -201,9 +177,12 @@ static bool keymap_upload(struct mixcomp_server *s) {
 		return false;
 	}
 	lseek(fd, 0, SEEK_SET);
-	// keymap(fd, size, format) —— fd 经 SCM_RIGHTS 传递，须在 flush 前有效。
-	wl_proxy_marshal(inj.keyboard, 0, fd, (uint32_t)size, (uint32_t)KEYMAP_FORMAT_XKB_V1);
-	close(fd); // libwayland 已在 sendmsg 时 dup
+	// keymap(format, fd, size)。libwayland 在封送（wl_closure_marshal）时
+	// 就会 dup 该 fd，因此请求发出后立即 close 是安全的；此前曾把 close
+	// 提前/参数错序，dup 拿到错误 fd 导致 keymap 请求被丢弃。
+	zwp_virtual_keyboard_v1_keymap(inj.keyboard, KEYMAP_FORMAT_XKB_V1, fd,
+			(uint32_t)size);
+	close(fd);
 	inj.xkb_state = xkb_state_new(inj.xkb_keymap);
 	wl_display_flush(s->inj_display);
 	return inj.xkb_state != NULL;
@@ -238,8 +217,7 @@ static void send_modifiers(struct mixcomp_server *s) {
 	uint32_t lat = xkb_state_serialize_mods(inj.xkb_state, XKB_STATE_MODS_LATCHED);
 	uint32_t loc = xkb_state_serialize_mods(inj.xkb_state, XKB_STATE_MODS_LOCKED);
 	uint32_t grp = xkb_state_serialize_layout(inj.xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
-	wl_proxy_marshal(inj.keyboard, 2, now_ms(), (int32_t)dep, (int32_t)lat,
-			(int32_t)loc, (int32_t)grp);
+	zwp_virtual_keyboard_v1_modifiers(inj.keyboard, dep, lat, loc, grp);
 	wl_display_flush(s->inj_display);
 }
 
@@ -250,8 +228,8 @@ static void key_event(struct mixcomp_server *s, uint32_t evdev_key, bool press) 
 	uint32_t t = now_ms();
 	xkb_state_update_key(inj.xkb_state, (xkb_keycode_t)(evdev_key + 8),
 			press ? XKB_KEY_DOWN : XKB_KEY_UP);
-	wl_proxy_marshal(inj.keyboard, 1, t, evdev_key,
-			(uint32_t)(press ? KEY_STATE_PRESSED : KEY_STATE_RELEASED));
+	zwp_virtual_keyboard_v1_key(inj.keyboard, t, evdev_key,
+			press ? KEY_STATE_PRESSED : KEY_STATE_RELEASED);
 	send_modifiers(s);
 }
 
@@ -281,9 +259,9 @@ static void inject_motion(struct mixcomp_server *s, struct mixcomp_window *w,
 	s->focus_window = w; // 事件路由目标
 	s->inj_width = w->width;
 	s->inj_height = w->height;
-	wl_proxy_marshal(inj.pointer, 1, now_ms(), (uint32_t)x, (uint32_t)y,
-			(uint32_t)w->width, (uint32_t)w->height); // motion_absolute
-	wl_proxy_marshal(inj.pointer, 7); // frame
+	zwlr_virtual_pointer_v1_motion_absolute(inj.pointer, now_ms(),
+			(uint32_t)x, (uint32_t)y, (uint32_t)w->width, (uint32_t)w->height);
+	zwlr_virtual_pointer_v1_frame(inj.pointer);
 	wl_display_flush(s->inj_display);
 }
 
@@ -297,12 +275,12 @@ static void inject_button(struct mixcomp_server *s, struct mixcomp_window *w,
 			strcmp(button, "middle") == 0 ? BTN_MIDDLE : BTN_LEFT;
 	uint32_t t = now_ms();
 	if (strcmp(action, "press") == 0 || strcmp(action, "click") == 0) {
-		wl_proxy_marshal(inj.pointer, 2, t, code, (uint32_t)1);
-		wl_proxy_marshal(inj.pointer, 7);
+		zwlr_virtual_pointer_v1_button(inj.pointer, t, code, KEY_STATE_PRESSED);
+		zwlr_virtual_pointer_v1_frame(inj.pointer);
 	}
 	if (strcmp(action, "release") == 0 || strcmp(action, "click") == 0) {
-		wl_proxy_marshal(inj.pointer, 2, t, code, (uint32_t)0);
-		wl_proxy_marshal(inj.pointer, 7);
+		zwlr_virtual_pointer_v1_button(inj.pointer, t, code, KEY_STATE_RELEASED);
+		zwlr_virtual_pointer_v1_frame(inj.pointer);
 	}
 	wl_display_flush(s->inj_display);
 }
@@ -315,12 +293,12 @@ static void inject_axis(struct mixcomp_server *s, struct mixcomp_window *w,
 	s->focus_window = w;
 	double delta = strcmp(action, "scroll_up") == 0 ? -1.0 : 1.0;
 	uint32_t t = now_ms();
-	wl_proxy_marshal(inj.pointer, 4, (uint32_t)AXIS_SOURCE_WHEEL);
-	wl_proxy_marshal(inj.pointer, 3, t, (uint32_t)POINTER_AXIS_VERTICAL,
+	zwlr_virtual_pointer_v1_axis_source(inj.pointer, AXIS_SOURCE_WHEEL);
+	zwlr_virtual_pointer_v1_axis(inj.pointer, t, POINTER_AXIS_VERTICAL,
 			wl_fixed_from_double(delta));
-	wl_proxy_marshal(inj.pointer, 6, t, (uint32_t)POINTER_AXIS_VERTICAL,
-			(int32_t)(delta * 10));
-	wl_proxy_marshal(inj.pointer, 7);
+	zwlr_virtual_pointer_v1_axis_discrete(inj.pointer, t, POINTER_AXIS_VERTICAL,
+			wl_fixed_from_double(delta), (int32_t)(delta * 10));
+	zwlr_virtual_pointer_v1_frame(inj.pointer);
 	wl_display_flush(s->inj_display);
 }
 
