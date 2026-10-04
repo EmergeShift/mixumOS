@@ -84,6 +84,9 @@ pub struct Server {
     tasks: Arc<Engine>,
     broker: Broker,
     snapshots: Arc<dyn SnapshotEngine>,
+    /// 真实快照引擎就绪时提供跨节点同步;内存桩下为 None。
+    #[cfg(feature = "real-snapshot")]
+    pub sync: Option<Arc<crate::sync::SyncBackend>>,
 }
 
 impl Server {
@@ -100,6 +103,8 @@ impl Server {
             tasks,
             broker,
             snapshots,
+            #[cfg(feature = "real-snapshot")]
+            sync: None,
         })
     }
 
@@ -108,6 +113,14 @@ impl Server {
         addr: impl Into<SocketAddr>,
     ) -> Result<(), ServerError> {
         let listener = TcpListener::bind(addr.into()).await?;
+        self.serve_plain_listener(listener).await
+    }
+
+    /// 在已绑定的 listener 上提供明文 WS 服务(测试用 0 端口回环)。
+    pub async fn serve_plain_listener(
+        self: Arc<Self>,
+        listener: TcpListener,
+    ) -> Result<(), ServerError> {
         loop {
             let (stream, _) = listener.accept().await?;
             let this = self.clone();
@@ -159,6 +172,8 @@ impl Server {
             claims: None,
             limiter: RateLimiter::new(50.0, 100.0),
             id: mixum_protocol::envelope::new_id(),
+            #[cfg(feature = "real-snapshot")]
+            sync_stage: None,
         };
         while let Some(message) = source.next().await {
             match message? {
@@ -198,6 +213,9 @@ pub struct Session {
     claims: Option<mixum_protocol::token::Claims>,
     limiter: RateLimiter,
     id: String,
+    /// 远端导入暂存:一次 import 对账到 commit 之间有效(协议 §6)。
+    #[cfg(feature = "real-snapshot")]
+    sync_stage: Option<crate::sync::ImportStage>,
 }
 
 impl Session {
@@ -248,9 +266,9 @@ impl Session {
             ops::op::SNAP_FORK => self.snap_fork(&env).await,
             ops::op::SNAP_DELETE => self.snap_delete(&env).await,
             ops::op::SNAP_GC => self.snap_gc(&env).await,
-            ops::op::SNAP_PUSH | ops::op::SNAP_PULL | "snap.push.import" | "snap.push.commit" => {
-                self.snap_sync(&env).await
-            }
+            ops::op::SNAP_PUSH => self.snap_push(&env).await,
+            "snap.push.import" => self.snap_push_import(&env).await,
+            "snap.push.commit" => self.snap_push_commit(&env).await,
             ops::op::DISPLAY_LIST => self.display_list(&env).await,
             ops::op::DISPLAY_ATTACH => self.display_attach(&env).await,
             ops::op::DISPLAY_DETACH => self.display_detach(&env).await,
@@ -259,7 +277,7 @@ impl Session {
             ops::op::DISPLAY_INPUT => self.display_input(&env).await,
             _ => {
                 self.send_raw(
-                    env.error_reply(ErrCode::Unsupported, "不支持的操作")
+                    env.error_reply(ErrCode::Unsupported, &format!("未知操作: {}", env.op))
                         .to_json(),
                 )
                 .await
@@ -267,9 +285,34 @@ impl Session {
         }
     }
     async fn handle_binary(&mut self, binary: &[u8]) {
-        if self.claims.is_none() || binary.first() != Some(&mixum_protocol::frames::chan::CHUNK) {
-            self.send_raw(error_envelope(None, ErrCode::BadRequest, "未知二进制通道"))
-                .await;
+        if binary.is_empty() {
+            return;
+        }
+        if !self.limiter.allow() {
+            self.send_raw(
+                Envelope::new(
+                    "session.err",
+                    Some(json!({"code": ErrCode::RateLimited, "message": "请求过于频繁"})),
+                )
+                .to_json(),
+            )
+            .await;
+            return;
+        }
+        match binary[0] {
+            mixum_protocol::frames::chan::CHUNK => self.handle_chunk_frame(binary).await,
+            _ => {
+                self.send_raw(error_envelope(None, ErrCode::BadRequest, "未知二进制通道"))
+                    .await
+            }
+        }
+    }
+    #[cfg(not(feature = "real-snapshot"))]
+    async fn handle_chunk_frame(&mut self, _frame: &[u8]) {}
+    #[cfg(feature = "real-snapshot")]
+    async fn handle_chunk_frame(&mut self, frame: &[u8]) {
+        if let (Some(backend), Some(stage)) = (&self.server.sync, self.sync_stage.as_mut()) {
+            backend.store_chunk(stage, frame);
         }
     }
     async fn hello(&mut self, env: &Envelope) {
@@ -310,7 +353,7 @@ impl Session {
             return;
         }
         let windows = self.server.broker.list().await.len();
-        self.reply(env, json!({"server":"mixumd/0.1.0","arch":std::env::consts::ARCH,"kernel":kernel_name(),"os":"Arch Linux","hostname":self.server.config.hostname,"caps":self.claims.as_ref().map(|c| &c.caps),"snapshotBackend":"memory","criuAvailable":false,"compositor":self.server.broker.online().await,"windows":windows})).await;
+        self.reply(env, json!({"server":"mixumd/0.1.0","arch":std::env::consts::ARCH,"kernel":kernel_name(),"os":"Arch Linux","hostname":self.server.config.hostname,"caps":self.claims.as_ref().map(|c| &c.caps),"snapshotBackend":self.server.snapshots.backend_name(),"criuAvailable":self.server.snapshots.criu_available(),"compositor":self.server.broker.online().await,"windows":windows})).await;
     }
     async fn task_submit(&mut self, env: &Envelope) {
         if !self.require(env, Cap::TaskRun).await {
@@ -464,10 +507,7 @@ impl Session {
             .await
         {
             Ok(node) => self.reply(env, serde_json::to_value(node).unwrap()).await,
-            Err(e) => {
-                self.err(env, ErrCode::SnapshotInvalid, &e.to_string())
-                    .await
-            }
+            Err(e) => self.err(env, ErrCode::Internal, &e.to_string()).await,
         }
     }
     async fn snap_tree(&mut self, env: &Envelope) {
@@ -501,10 +541,7 @@ impl Session {
             .await
         {
             Ok(branch) => self.reply(env, json!({"branch":branch})).await,
-            Err(e) => {
-                self.err(env, ErrCode::SnapshotInvalid, &e.to_string())
-                    .await
-            }
+            Err(e) => self.err(env, ErrCode::NotFound, &e.to_string()).await,
         }
     }
     async fn snap_delete(&mut self, env: &Envelope) {
@@ -519,7 +556,7 @@ impl Session {
             .to_owned();
         match self.server.snapshots.delete(&node).await {
             Ok(_) => self.reply(env, json!({"deleted":node})).await,
-            Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
+            Err(e) => self.err(env, ErrCode::BadRequest, &e.to_string()).await,
         }
     }
     async fn snap_gc(&mut self, env: &Envelope) {
@@ -531,12 +568,132 @@ impl Session {
             Err(e) => self.err(env, ErrCode::Internal, &e.to_string()).await,
         }
     }
-    async fn snap_sync(&mut self, env: &Envelope) {
+    // ---------- 跨节点快照同步(协议 §6) ----------
+    // snap.pull 无服务端处理器(与 reference 一致):拉取 = 反向调用对方 push,
+    // 由客户端发起,未识别的 op 走「未知操作」分支。
+
+    #[cfg(not(feature = "real-snapshot"))]
+    async fn snap_push(&mut self, env: &Envelope) {
         if !self.require(env, Cap::SnapSync).await {
             return;
         }
         self.err(env, ErrCode::Unsupported, "内存快照后端不支持跨节点块同步")
             .await;
+    }
+
+    #[cfg(not(feature = "real-snapshot"))]
+    async fn snap_push_import(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::SnapSync).await {
+            return;
+        }
+        self.err(env, ErrCode::Unsupported, "内存快照后端不支持跨节点块同步")
+            .await;
+    }
+
+    #[cfg(not(feature = "real-snapshot"))]
+    async fn snap_push_commit(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::SnapSync).await {
+            return;
+        }
+        self.err(env, ErrCode::Unsupported, "内存快照后端不支持跨节点块同步")
+            .await;
+    }
+
+    #[cfg(feature = "real-snapshot")]
+    async fn snap_push(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::SnapSync).await {
+            return;
+        }
+        let Some(backend) = self.server.sync.clone() else {
+            self.err(env, ErrCode::Unsupported, "快照同步后端未启用")
+                .await;
+            return;
+        };
+        let p = payload_value(env);
+        let node = p
+            .get("node")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let remote = p
+            .get("remote")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let token = p
+            .get("token")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        match crate::sync::push_node(
+            backend.engine(),
+            &node,
+            &remote,
+            &token,
+            &self.server.config.hostname,
+        )
+        .await
+        {
+            Ok(stats) => {
+                self.reply(env, serde_json::to_value(stats).unwrap())
+                    .await
+            }
+            Err(crate::sync::SyncError::NotFound(m)) => self.err(env, ErrCode::NotFound, &m).await,
+            Err(crate::sync::SyncError::Unsupported(m)) => {
+                self.err(env, ErrCode::Unsupported, &m).await
+            }
+            Err(e) => self.err(env, ErrCode::Internal, &format!("推送失败: {e}")).await,
+        }
+    }
+
+    #[cfg(feature = "real-snapshot")]
+    async fn snap_push_import(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::SnapSync).await {
+            return;
+        }
+        let Some(backend) = self.server.sync.clone() else {
+            self.err(env, ErrCode::Unsupported, "快照同步后端未启用")
+                .await;
+            return;
+        };
+        let request: crate::sync::ImportRequest = match payload(env) {
+            Ok(request) => request,
+            Err(e) => {
+                self.err(env, ErrCode::BadRequest, &e).await;
+                return;
+            }
+        };
+        let stage = backend.stage_import(request);
+        self.reply(
+            env,
+            serde_json::to_value(crate::sync::MissingResponse {
+                missing: stage.missing().to_vec(),
+            })
+            .unwrap(),
+        )
+        .await;
+        self.sync_stage = Some(stage);
+    }
+
+    #[cfg(feature = "real-snapshot")]
+    async fn snap_push_commit(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::SnapSync).await {
+            return;
+        }
+        let Some(backend) = self.server.sync.clone() else {
+            self.err(env, ErrCode::Unsupported, "快照同步后端未启用")
+                .await;
+            return;
+        };
+        // 无进行中的导入时静默返回(与 reference handleRemoteCommit 一致)。
+        let Some(stage) = self.sync_stage.take() else {
+            return;
+        };
+        match backend.commit(stage) {
+            Ok(node) => self.reply(env, json!({"node": node})).await,
+            Err(crate::sync::SyncError::Conflict(m)) => self.err(env, ErrCode::Conflict, &m).await,
+            Err(e) => self.err(env, ErrCode::Internal, &e.to_string()).await,
+        }
     }
     async fn display_list(&mut self, env: &Envelope) {
         if !self.require(env, Cap::DisplayView).await {

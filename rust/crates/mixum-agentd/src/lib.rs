@@ -10,4 +10,8 @@ pub mod snapshot;
 pub mod task;
 pub mod wire;
 
+/// 跨节点快照同步(协议 §6),依赖真实快照引擎。
+#[cfg(feature = "real-snapshot")]
+pub mod sync;
+
 pub use server::{Config, Server};
