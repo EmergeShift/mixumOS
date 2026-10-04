@@ -15,3 +15,8 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
 rand = "0.8"
 thiserror = "1"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+zstd = "0.13"
+sled = "0.34"
