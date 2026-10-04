@@ -172,6 +172,11 @@ fn load_known(path: &Path) -> Result<HashMap<String, String>, Error> {
     serde_json::from_str(&text).map_err(Error::from)
 }
 
+/// 查询某地址在 known-hosts 中已固定的指纹；没有记录时返回 None。
+pub fn known_pin(path: &Path, addr: &str) -> Option<String> {
+    load_known(path).ok()?.get(addr).cloned()
+}
+
 pub fn save_known(path: &Path, addr: &str, fingerprint: &str) -> Result<(), Error> {
     let mut hosts = load_known(path)?;
     hosts.insert(addr.to_owned(), fingerprint.to_owned());

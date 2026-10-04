@@ -98,7 +98,7 @@ fn connection_options(
     let addr = addr
         .cloned()
         .or_else(|| cli.addr.clone())
-        .or(config.remote)
+        .or_else(|| config.remote.clone())
         .ok_or_else(|| Error::Config("请提供 --addr 或先执行 connect".into()))?;
     let token_path = config
         .token_path
@@ -112,15 +112,41 @@ fn connection_options(
                 .and_then(|p| std::fs::read_to_string(p).ok().map(|s| s.trim().to_owned()))
         })
         .ok_or_else(|| Error::Config("请提供 --token 或配置 token_path".into()))?;
+    let pinned = transport::known_pin(&known_hosts_path(), &addr);
+    let fingerprint = resolve_fingerprint(
+        fingerprint
+            .map(ToOwned::to_owned)
+            .or(cli.fingerprint.clone()),
+        pinned,
+        config.fingerprint,
+        config.remote.as_deref(),
+        &addr,
+    );
     Ok(ConnectionOptions {
         addr,
         token,
-        fingerprint: fingerprint
-            .map(ToOwned::to_owned)
-            .or(cli.fingerprint.clone())
-            .or(config.fingerprint),
+        fingerprint,
         known_hosts: known_hosts_path(),
         device: cli.device.clone(),
+    })
+}
+
+/// 指纹解析顺序:显式 --fingerprint、known-hosts 按地址记录、config 中已配对
+/// 设备的指纹。config 指纹只对 config.remote 生效,避免多节点场景下
+/// 一个地址的配对信息污染另一个地址的校验与首次学习。
+fn resolve_fingerprint(
+    explicit: Option<String>,
+    pinned: Option<String>,
+    configured: Option<String>,
+    config_remote: Option<&str>,
+    addr: &str,
+) -> Option<String> {
+    explicit.or(pinned).or_else(|| {
+        if config_remote == Some(addr) {
+            configured
+        } else {
+            None
+        }
     })
 }
 
@@ -237,4 +263,45 @@ fn print_json(value: Option<serde_json::Value>) {
         "{}",
         serde_json::to_string_pretty(&value.unwrap_or(serde_json::Value::Null)).expect("JSON 输出")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_fingerprint;
+
+    const ADDR_A: &str = "wss://127.0.0.1:17601";
+    const ADDR_B: &str = "wss://127.0.0.1:17602";
+
+    #[test]
+    fn explicit_fingerprint_wins() {
+        let resolved = resolve_fingerprint(
+            Some("aa".into()),
+            Some("bb".into()),
+            Some("cc".into()),
+            Some(ADDR_A),
+            ADDR_A,
+        );
+        assert_eq!(resolved.as_deref(), Some("aa"));
+    }
+
+    #[test]
+    fn per_address_pin_beats_configured_device() {
+        // known-hosts 中 A 地址的记录优先于 config 里 B 设备的指纹。
+        let resolved = resolve_fingerprint(
+            None,
+            Some("bb".into()),
+            Some("cc".into()),
+            Some(ADDR_B),
+            ADDR_A,
+        );
+        assert_eq!(resolved.as_deref(), Some("bb"));
+    }
+
+    #[test]
+    fn configured_fingerprint_applies_only_to_paired_remote() {
+        let paired = resolve_fingerprint(None, None, Some("cc".into()), Some(ADDR_A), ADDR_A);
+        assert_eq!(paired.as_deref(), Some("cc"));
+        let other = resolve_fingerprint(None, None, Some("cc".into()), Some(ADDR_A), ADDR_B);
+        assert_eq!(other, None);
+    }
 }
