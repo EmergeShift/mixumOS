@@ -4,3 +4,5 @@ dist/
 .DS_Store
 /work/
 *.test
+mixcomp/mixcomp
+mixcomp/src/*.o
