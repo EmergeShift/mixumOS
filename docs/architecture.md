@@ -110,3 +110,44 @@ mixumos/
 - 多用户/多租户隔离(v1 单用户多设备;租户模型在 gateway 层后置);
 - 图形协议的 H.264/AV1 硬编(v1 用 JPEG,WebCodecs 升级路径已留);
 - 非容器形态(裸机安装器);Windows/macOS 作为容器宿主(只作为客户端)。
+
+## Rust 实现记录
+
+`rust/crates/mixum-agentd` 已按本文件与 `docs/protocol.md` 落地守护进程：
+WSS（TLS 1.3）、能力令牌握手、请求路由、50/s（突发 100）限速、任务引擎、
+external 行分隔 JSON 桥、窗口 broker,均使用协议 crate 的类型。
+快照后端已接入 `rust/crates/mixum-snapshot`（目录 CAS + 树,经
+`real-snapshot` 特性装配,缺省内存桩保证分支可独立构建）；跨节点同步
+（协议 §6）已实现:push.import 对账、0x03 块流哈希校验落 CAS、commit
+落树与远端根标记,推送端为 wss 客户端（自签证书跳过校验,同
+reference client.go）。
+
+| 行为 | Go 参考实现 | Rust 实现 | 差异 |
+|------|-------------|-----------|------|
+| envelope、令牌、视频帧头 | `reference/internal/wire`、`auth` | `mixum-protocol` | |
+| 任务状态与事件 | `reference/internal/task` | `mixum-agentd::task` | |
+| 快照树 | `reference/internal/snap` | `mixum-snapshot` 适配（`RealSnapshotEngine`） | |
+| 跨节点同步 | `handlers_snap.go`、`client.go` | `mixum-agentd::sync` | `snap.pull` 同 reference 不设处理器（拉取=反向调用对方 push） |
+| 显示控制通道 | `reference/internal/display` | `mixum-agentd::display` | |
+| 管理 REST／指标 | 后置能力 | 未实现 | 任务书明确排除 |
+
+装配语义对齐 reference/cmd/mixumd:`--config` 支持空格与等号两种形式,
+空配置文件回退默认值;快照引擎 dataDir=`dataDir/snapshots`、
+root=`workRoot`、skip=`.mixum`;bootstrap 管理令牌 10 年;
+快照冻结回调冻结全部任务进程组。
+
+验证记录（2026-10-05）:
+
+- e2e:`tests/integration/Dockerfile.e2e-rust`（mixum-agentd + mixcomp +
+  foot,musl arm64）,容器内 Go e2eclient 全链路通过——握手/系统信息
+  （backend=directory）/窗口流 ≥3 帧/任务/快照树/回退/fork。原版
+  e2eclient 在有窗口时 task.submit 超时为其自身并发读缺陷（已在
+  wayland-magic.md §8.7 记录,Go 服务端同样复现）,修复版客户端
+  （单读循环）对 Rust 与 Go 服务端均 `E2E PASS`;
+- 真实文件回退:容器内落文件 → snap.create（chunks=1,size=19）→
+  回退 genesis → 文件消失;
+- 跨实现推送:Rust 推送端把 Rust 引擎创建的节点推入 Go 参考容器,
+  节点出现在 Go 树上（id/分支保持,根节点无远端根标记）;双节点
+  回环见 `rust/crates/mixum-agentd/tests/sync_loopback.rs`;
+- 单元测试 42 项（含真实引擎）＋协议 crate 18 项全绿;clippy
+  `-D warnings` 双配置干净。
