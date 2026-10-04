@@ -1,7 +1,8 @@
 # mixcomp:魔改 Wayland 合成器设计
 
-> 状态:C 实现编译通过(wlroots 0.18,aarch64);运行时调通进行中。
-> 本文档记录「魔改了什么、为什么、边界在哪」。
+> 状态:C 实现编译通过并在 e2e 容器内运行时调通(wlroots 0.18,aarch64);
+> 窗口流、输入注入、接管语义验收通过。本文档记录「魔改了什么、为什么、
+> 边界在哪」,末节为运行时调通记录。
 
 ## 1. 要解决的问题
 
@@ -96,3 +97,91 @@ mixcomp 主动连 `/run/mixum/display.sock`(mixumd 监听)。
   stream.start 按订阅者动态调节(阶段 4 做自适应);
 - X11 应用:经 XWayland 后置(v1 只承诺 Wayland 原生应用,Chromium 合格);
 - wlroots 0.19 升级:捕获管线在 client buffer 层,受 API 变动影响小。
+
+## 8. 运行时调通记录(2026-10-04)
+
+mixcomp 在 e2e 容器(Alpine 3.21 + wlroots 0.18.1,aarch64)内稳定运行:
+e2eclient 输出「窗口流正常(≥3 帧)」;tests/integration/displaytest 十二项
+全过——帧头光标坐标随 pointer_motion 注入可观测变化((20,10)→(100,50)),
+接管 claim/release/未知动作 conflict/不存在窗口错误码全部符合预期。
+编译警告 -Wall -Wextra 清零。以下为逐项根因,后人勿再踩。
+
+### 8.1 注入客户端段错误(手搓协议表签名错序)
+
+gdb 定位崩溃在注册表回调创建虚拟 pointer 的 `wl_proxy_marshal_flags`。
+根因:input.c 手搓的 `zwlr_virtual_pointer_manager_v1` 协议表把
+create_virtual_pointer 签名写成 `"no"`,上游 XML 是 `"on"`(seat 在前,
+new_id 在后)。libwayland 的 `wl_argument_from_va_list` 对 `'n'`(new_id)
+也消费一个变参(生成桩传 NULL 占位,随后由 create_outgoing_proxy 覆写),
+错序后 `'o'` 槽位越界读到寄存器残留垃圾;序列化解引用垃圾指针,垃圾内容
+随寄存器状态而变——恰好为 NULL 时走 err_null 干净失败,非 NULL 可解引用
+时直接段错误,这解释了「时崩时不崩」。同表还有:管理器 destroy 的 opcode
+错位(上游在 1 而非 2)、frame/axis_source 的 opcode 对调、keymap 写成
+"ihu" 且调用传 (fd,size,format)——libwayland 按 "ihu" 把 size 当 fd 去
+复制,EBADF,keymap 请求被丢弃。
+
+修复:弃用手搓协议表,Makefile 用 wayland-scanner 从
+`mixcomp/protocol/*.xml` 生成客户端头文件与私有码,注入调用全部改走
+生成桩函数,new_id 变参占位与 opcode 顺序由生成器保证。XML 与
+wlroots 0.18.2 的 protocol/ 目录同源——上游 wayland-protocols 已移除
+virtual-keyboard,Alpine 3.21 亦无任何包携带该 XML,vendor 是唯一稳定
+来源。keymap 的 fd 在封送时已被 libwayland 复制,close 放在请求发出后
+即可(注释里的「sendmsg 时 dup」说法有误,已订正)。
+
+### 8.2 wl_seat name 事件触发 wl_abort
+
+注入客户端绑定 wl_seat v5+,服务端必发 name 事件;libwayland 1.22 起
+`wl_closure_invoke` 对 NULL 监听器槽位直接 abort(旧版仅告警跳过)。
+此前监听器 `.name = NULL`,注入客户端在第一次 dispatch 即整体崩溃。
+修复:补 no-op name 处理函数。
+
+### 8.3 foot「no monitors available」(wl_output 全局不再自动创建)
+
+wlroots 0.18 起输出使能后不再自动创建 wl_output 全局,合成器必须显式
+调用 `wlr_output_create_global`。anchor 输出建了但客户端看不见。
+修复:commit 成功后显式创建全局。
+
+### 8.4 客户端贴帧即被断连(「Unknown buffer type」)
+
+wlroots 0.18 移除了 `wl_display_init_shm`,但该符号仍由 libwayland-server
+以兼容名义导出(遗留实现)。mixcomp 误调它,创建出的 wl_shm 全局发出的
+缓冲实现指针落在 libwayland 内,wlroots 的 `wlr_buffer_try_from_resource`
+只认自家实现,报 Unknown buffer type 并断开客户端连接。最小 xdg 客户端
+能把链路走到 configure,故该问题只在与 wlroots 有深度交互的真实客户端
+(foot)上暴露。修复:改用 `wlr_shm_create_with_renderer`。
+
+### 8.5 窗口永不注册、configure 永不出现
+
+两处 0.17→0.18 语义变化叠加:
+
+1. `xdg_shell.events.new_surface` 现在只在 get_xdg_surface 时发射一次,
+   且此时 role 必为 NONE;带 role 的入口是 `new_toplevel` 信号(tinywl
+   0.18 同款)。此前按 `role == TOPLEVEL` 过滤 new_surface,所有窗口
+   被静默丢弃;
+2. initial commit 后合成器必须主动回一个空 configure,客户端 ack 并
+   贴上首帧缓冲后才算映射完成(0.18 不再代发首次 configure)。
+
+修复:改挂 new_toplevel,窗口 commit 回调对 `initial_commit` 调
+`wlr_xdg_toplevel_set_size(xdg_toplevel, 0, 0)`(尺寸由客户端自选,
+符合 mixcomp 不做摆放的定位)。
+
+### 8.6 注入事件无人接收、坐标恒为 0
+
+1. 0.18 的虚拟 pointer/keyboard 设备不经 backend 的 new_input,须分别
+   监听两个 manager 的 `new_virtual_pointer` / `new_virtual_keyboard`
+   信号。此前误挂 backend new_input,路由监听从未挂上;
+2. `wlr_pointer_motion_absolute_event` 的坐标从布局绝对值改为 [0,1]
+   归一化值(事件不再携带 extent),路由时按窗口尺寸换算回窗口内坐标。
+
+### 8.7 e2e 测试链路的客户端侧约束
+
+reference 的 e2eclient(gorilla/websocket)默认读缓冲 4096,单帧超过
+即触发宿主侧 bufio 越界 panic,且其帧循环的读截止会让连接失效;帧循环
+与应答循环并发读同一 ws 亦不可靠。约束规避:entrypoint 以
+`initial-window-size-pixels=300x200` 起小窗口 foot,单帧约 1.5KiB;
+注入/接管验收改用 tests/integration/displaytest(单读循环、1MiB 读缓冲、
+wire 层按 protocol.md 手写,兼作协议交叉验证)。displaytest 顺带确认:
+reference 的 handlers_display 把 Inject 的所有错误一律映射为 conflict
+(按 §4 语义「窗口不存在」应为 not_found),agent 模式亦无调用方接线
+(SetAgentMode 无人调用)——两者属 agentd 范围,见 goals/notes/mixcomp.md。
+
