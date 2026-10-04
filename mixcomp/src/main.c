@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_shm.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
@@ -33,7 +34,10 @@ static void route_motion_absolute(struct wl_listener *l, void *data) {
 	if (w == NULL || w->surface == NULL) {
 		return;
 	}
-	double x = (double)ev->x, y = (double)ev->y;
+	// wlroots 0.18 起事件坐标为 [0,1] 归一化值（0.17 是布局绝对坐标），
+	// 事件不含 extent，按窗口尺寸换算回窗口内坐标（注入时 extent 即窗口尺寸）。
+	double x = ev->x * (double)w->width;
+	double y = ev->y * (double)w->height;
 	if (s->seat->pointer_state.focused_surface != w->surface) {
 		wlr_seat_pointer_notify_enter(s->seat, w->surface, x, y);
 	}
@@ -81,47 +85,46 @@ static void route_modifiers(struct wl_listener *l, void *data) {
 	wlr_seat_keyboard_notify_modifiers(s->seat, &kb->modifiers);
 }
 
-// new_input_cb —— 虚拟设备就绪：接 seat、挂事件路由。
-static void new_input_cb(struct wl_listener *listener, void *data) {
+// 虚拟设备事件路由。注意：wlroots 0.18 的虚拟 pointer/keyboard 不经过
+// backend 的 new_input，必须分别监听两个 manager 的 new_virtual_* 信号
+// （此前误挂 backend new_input，注入事件无人接收）。
+static void new_virtual_pointer_cb(struct wl_listener *listener, void *data) {
 	(void)listener;
-	struct wlr_input_device *dev = data;
-	switch (dev->type) {
-	case WLR_INPUT_DEVICE_KEYBOARD: {
-		struct wlr_keyboard *kb = wlr_keyboard_from_input_device(dev);
-		wlr_seat_set_keyboard(server.seat, kb);
-		if (server.inj_key.notify == NULL) {
-			server.inj_key.notify = route_key;
-			wl_signal_add(&kb->events.key, &server.inj_key);
-			server.inj_mods.notify = route_modifiers;
-			wl_signal_add(&kb->events.modifiers, &server.inj_mods);
-		}
-		break;
-	}
-	case WLR_INPUT_DEVICE_POINTER: {
-		struct wlr_pointer *ptr = wlr_pointer_from_input_device(dev);
-		if (server.inj_motion.notify == NULL) {
-			server.inj_motion.notify = route_motion_absolute;
-			wl_signal_add(&ptr->events.motion_absolute, &server.inj_motion);
-			server.inj_button.notify = route_button;
-			wl_signal_add(&ptr->events.button, &server.inj_button);
-			server.inj_axis.notify = route_axis;
-			wl_signal_add(&ptr->events.axis, &server.inj_axis);
-		}
-		break;
-	}
-	default:
-		break;
-	}
-}
-
-static void new_surface_cb(struct wl_listener *listener, void *data) {
-	(void)listener;
-	struct wlr_xdg_surface *xdg = data;
-	if (xdg->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
+	struct wlr_virtual_pointer_v1_new_pointer_event *ev = data;
+	struct wlr_pointer *ptr = &ev->new_pointer->pointer;
+	if (server.inj_motion.notify != NULL) {
 		return;
 	}
+	server.inj_motion.notify = route_motion_absolute;
+	wl_signal_add(&ptr->events.motion_absolute, &server.inj_motion);
+	server.inj_button.notify = route_button;
+	wl_signal_add(&ptr->events.button, &server.inj_button);
+	server.inj_axis.notify = route_axis;
+	wl_signal_add(&ptr->events.axis, &server.inj_axis);
+}
+
+static void new_virtual_keyboard_cb(struct wl_listener *listener, void *data) {
+	(void)listener;
+	struct wlr_virtual_keyboard_v1 *vk = data;
+	struct wlr_keyboard *kb = &vk->keyboard;
+	wlr_seat_set_keyboard(server.seat, kb);
+	if (server.inj_key.notify != NULL) {
+		return;
+	}
+	server.inj_key.notify = route_key;
+	wl_signal_add(&kb->events.key, &server.inj_key);
+	server.inj_mods.notify = route_modifiers;
+	wl_signal_add(&kb->events.modifiers, &server.inj_mods);
+}
+
+// new_toplevel_cb —— xdg toplevel 就绪。wlroots 0.18 语义：new_surface 只在
+// get_xdg_surface 时发射一次且 role 必为 NONE，不能做窗口入口；带 role 的
+// 事件是 new_toplevel（tinywl 0.18 同款）。
+static void new_toplevel_cb(struct wl_listener *listener, void *data) {
+	(void)listener;
+	struct wlr_xdg_toplevel *toplevel = data;
 	// 常规合成器在此摆放窗口；mixcomp 只做隔离捕获。
-	window_create(&server, xdg);
+	window_create(&server, toplevel->base);
 }
 
 // 控制通道轮询定时器（200ms）。
@@ -136,7 +139,10 @@ static int poll_timer_cb(int fd, uint32_t mask, void *data) {
 }
 
 int main(int argc, char **argv) {
-	wlr_log_init(WLR_INFO, NULL);
+	// 0.18 的 wlr_log_init 不再读环境变量；保留 WLR_LOG_LEVEL 覆盖能力，
+	// e2e 排障需要 DEBUG 级日志（如缓冲类型判定失败时的上下文）。
+	const char *log_lvl = getenv("WLR_LOG_LEVEL");
+	wlr_log_init(log_lvl != NULL ? (enum wlr_log_importance)atoi(log_lvl) : WLR_INFO, NULL);
 
 	const char *sock = "/run/mixum/display.sock";
 	int quality = 80;
@@ -172,38 +178,61 @@ int main(int argc, char **argv) {
 		wlr_log(WLR_ERROR, "headless 后端创建失败");
 		return 1;
 	}
-	server.new_input.notify = new_input_cb;
-	wl_signal_add(&server.backend->events.new_input, &server.new_input);
 	server.renderer = wlr_renderer_autocreate(server.backend);
 	if (server.renderer == NULL) {
 		wlr_log(WLR_ERROR, "渲染器创建失败");
 		return 1;
 	}
-	wl_display_init_shm(server.display);
+	// wlroots 0.18 已移除 wl_display_init_shm：若误调用会解析到
+	// libwayland-server 的遗留实现，其缓冲 wlroots 无法识别，客户端
+	// 一贴帧即被"Unknown buffer type"断连。必须用 wlroots 自己的 API。
+	if (wlr_shm_create_with_renderer(server.display, 2, server.renderer) == NULL) {
+		wlr_log(WLR_ERROR, "wl_shm 创建失败");
+		return 1;
+	}
 	// wl_compositor 是客户端连接的前提（缺它应用会报 no compositor）。
 	wlr_compositor_create(server.display, 6, server.renderer);
 	wlr_subcompositor_create(server.display);
 	wlr_viewporter_create(server.display);
 
 	server.xdg_shell = wlr_xdg_shell_create(server.display, 3);
-	server.new_surface.notify = new_surface_cb;
-	wl_signal_add(&server.xdg_shell->events.new_surface, &server.new_surface);
+	server.new_surface.notify = new_toplevel_cb;
+	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_surface);
 
 	// 常驻虚拟输出：为要求至少一个显示器的客户端（如终端）提供锚点。
 	// 捕获不经过它——每窗口直接读 client buffer。
+	// 注意：wlroots 0.18 起不再自动创建 wl_output 全局，合成器必须显式
+	// 调 wlr_output_create_global，否则客户端看不到任何显示器（foot 报
+	// "no monitors available" 即此因）。
 	struct wlr_output *anchor = wlr_headless_add_output(headless, 1280, 800);
 	if (anchor != NULL) {
 		struct wlr_output_state st;
 		wlr_output_state_init(&st);
 		wlr_output_state_set_custom_mode(&st, 1280, 800, 30000);
 		wlr_output_state_set_enabled(&st, true);
-		wlr_output_commit_state(anchor, &st);
+		if (wlr_output_commit_state(anchor, &st)) {
+			wlr_output_create_global(anchor, server.display);
+		} else {
+			wlr_log(WLR_ERROR, "anchor 输出 commit 失败");
+		}
 		wlr_output_state_finish(&st);
 	}
 
 	// 虚拟输入管理器：注入客户端经协议创建设备。
-	wlr_virtual_pointer_manager_v1_create(server.display);
-	wlr_virtual_keyboard_manager_v1_create(server.display);
+	// 虚拟输入管理器：注入客户端经协议创建设备；设备就绪事件从
+	// manager 的 new_virtual_* 信号取（不经 backend new_input）。
+	struct wlr_virtual_pointer_manager_v1 *vp_mgr =
+		wlr_virtual_pointer_manager_v1_create(server.display);
+	if (vp_mgr != NULL) {
+		server.new_input.notify = new_virtual_pointer_cb;
+		wl_signal_add(&vp_mgr->events.new_virtual_pointer, &server.new_input);
+	}
+	struct wlr_virtual_keyboard_manager_v1 *kb_mgr =
+		wlr_virtual_keyboard_manager_v1_create(server.display);
+	if (kb_mgr != NULL) {
+		server.new_keyboard.notify = new_virtual_keyboard_cb;
+		wl_signal_add(&kb_mgr->events.new_virtual_keyboard, &server.new_keyboard);
+	}
 
 	// seat：指针 + 键盘能力。
 	server.seat = wlr_seat_create(server.display, "seat0");
