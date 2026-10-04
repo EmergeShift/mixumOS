@@ -13,7 +13,9 @@
 DOCKER_CONTEXT ?= colima-mixumos
 export DOCKER_CONTEXT
 
-ARCH ?= aarch64
+# 默认双架构(验收口径:make dist 产出双架构包 + 双仓库 db + OCI);
+# 快速构建用 make dist ARCH=aarch64
+ARCH ?= aarch64 x86_64
 
 .PHONY: dist dist-repo dist-image dist-e2e dist-clean
 
