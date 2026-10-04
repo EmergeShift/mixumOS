@@ -1,0 +1,5 @@
+*.o
+mixcomp
+src/*-client-protocol.h
+src/xdg-shell-protocol.h
+src/*-protocol.c

@@ -109,7 +109,6 @@ void stream_poll_control(struct mixcomp_server *s);
 
 // input.c —— 内建注入客户端。
 bool input_init(struct mixcomp_server *s);
-void input_dispatch(struct mixcomp_server *s); // 事件循环回调
 void input_handle_json(struct mixcomp_server *s, const char *json, size_t len);
 
 #endif
