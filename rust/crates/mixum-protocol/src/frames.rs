@@ -66,22 +66,22 @@ pub fn unmarshal_video(buf: &[u8]) -> Result<VideoFrame<'_>, TruncatedFrame> {
     let b = &buf[1..];
     let rd_u32 = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     let rd_u16 = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
-    let flags = rd_u16(17 - 1);
-    let size = rd_u32(13 - 1) as usize;
+    let flags = rd_u16(16);
+    let size = rd_u32(12) as usize;
     let data_start = VIDEO_HEADER_SIZE;
     if size > buf.len() - data_start {
         return Err(TruncatedFrame);
     }
     Ok(VideoFrame {
-        window_id: rd_u32(1 - 1),
-        width: rd_u32(5 - 1),
-        height: rd_u32(9 - 1),
+        window_id: rd_u32(0),
+        width: rd_u32(4),
+        height: rd_u32(8),
         keyframe: flags & FRAME_FLAG_KEYFRAME != 0,
         has_cursor: flags & FRAME_FLAG_HAS_CURSOR != 0,
-        cursor_x: rd_u16(19 - 1) as i16,
-        cursor_y: rd_u16(21 - 1) as i16,
-        cursor_w: rd_u16(23 - 1),
-        cursor_h: rd_u16(25 - 1),
+        cursor_x: rd_u16(18) as i16,
+        cursor_y: rd_u16(20) as i16,
+        cursor_w: rd_u16(22),
+        cursor_h: rd_u16(24),
         data: &buf[data_start..data_start + size],
     })
 }

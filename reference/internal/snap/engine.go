@@ -125,7 +125,9 @@ func (e *Engine) snapshotLocked(kind, label string, auto bool, parent *string) (
 			node.SizeBytes += stats.BytesLogical
 			node.Chunks = len(ManifestChunks(m))
 		}
-		if doMem {
+		// pid=0 表示无任务运行(或驱动未注册首领进程):退化为 disk,
+		// 与构造注释的文档语义一致;CRIU 不接受 --tree 0。
+		if doMem && derefInt(e.taskPid) > 0 {
 			imgDir := filepath.Join(os.TempDir(), "mixum-criu-"+node.ID)
 			defer os.RemoveAll(imgDir)
 			if err := e.Criu.Dump(derefInt(e.taskPid), imgDir, false); err != nil {

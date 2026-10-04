@@ -912,6 +912,7 @@ impl RateLimiter {
 pub fn generate_tls_config(
     hosts: &[String],
 ) -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    crate::auth::ensure_crypto_provider();
     let certified = rcgen::generate_simple_self_signed(hosts.to_vec())?;
     let cert = rustls::pki_types::CertificateDer::from(certified.cert.der().to_vec());
     let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(

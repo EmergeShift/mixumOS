@@ -31,6 +31,6 @@ name = "push_node"
 required-features = ["real-snapshot"]
 
 [features]
-# 接入真实快照引擎(mixum-snapshot crate);缺省用内存桩保证分支可独立构建。
-# 该 crate 由并行 agent 交付,合并 main 后可改为默认特性。
+default = ["real-snapshot"]
+# 接入真实快照引擎(mixum-snapshot crate);内存桩保留,--no-default-features 可用。
 real-snapshot = ["dep:mixum-snapshot"]

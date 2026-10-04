@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use std::sync::atomic::Ordering;
 use tokio::sync::{broadcast, Mutex};
 
 pub type DriverError = Box<dyn Error + Send + Sync>;
@@ -543,6 +544,8 @@ impl AgentDriver for NamedExternalDriver {
     }
 }
 
+type ActiveChangeCallback = std::sync::RwLock<Option<Arc<dyn Fn(bool) + Send + Sync>>>;
+
 pub struct Engine {
     registry: Arc<Registry>,
     sandbox: Arc<dyn Sandbox>,
@@ -550,6 +553,10 @@ pub struct Engine {
     tasks: Arc<Mutex<Vec<Arc<Task>>>>,
     events: broadcast::Sender<TaskEvent>,
     sequence: std::sync::atomic::AtomicU64,
+    active: std::sync::atomic::AtomicUsize,
+    /// 活跃任务计数变化回调:0→非 0 传 true(任务开始占用窗口),
+    /// 非 0→0 传 false(全部回 free)。由装配层接到显示 broker。
+    on_active_change: ActiveChangeCallback,
 }
 
 impl Engine {
@@ -569,7 +576,22 @@ impl Engine {
             tasks: Arc::new(Mutex::new(Vec::new())),
             events,
             sequence: std::sync::atomic::AtomicU64::new(1),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            on_active_change: std::sync::RwLock::new(None),
         })
+    }
+    /// 设置活跃任务回调(装配层接显示 broker 的接管状态机)。
+    pub fn set_active_change_callback(&self, cb: Arc<dyn Fn(bool) + Send + Sync>) {
+        if let Ok(mut slot) = self.on_active_change.write() {
+            *slot = Some(cb);
+        }
+    }
+    fn active_changed(&self, active: bool) {
+        if let Ok(slot) = self.on_active_change.read() {
+            if let Some(cb) = slot.as_ref() {
+                cb(active);
+            }
+        }
     }
     pub fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
         self.events.subscribe()
@@ -594,6 +616,17 @@ impl Engine {
         Ok(task)
     }
     async fn run(self: Arc<Self>, task: Arc<Task>, driver: Arc<dyn AgentDriver>) {
+        // 活跃计数 0→1 通知「任务占用窗口」;所有退出路径保证 1→0 通知。
+        if self.active.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.active_changed(true);
+        }
+        let _ = self.clone().run_inner(task, driver).await;
+        if self.active.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.active_changed(false);
+        }
+    }
+
+    async fn run_inner(self: Arc<Self>, task: Arc<Task>, driver: Arc<dyn AgentDriver>) -> Result<(), String> {
         let mut cancel = task.cancel_receiver();
         self.emit_state(&task, QUEUED).await;
         if let Some(policy) = &task.snapshot_policy {
@@ -625,7 +658,12 @@ impl Engine {
         let result = tokio::select! {
             result = &mut driver_run => result,
             changed = cancel.changed() => {
-                if changed.is_ok() && *cancel.borrow() { task.set_state(CANCELED).await; task.ended().await; self.emit_state(&task, CANCELED).await; return; }
+                if changed.is_ok() && *cancel.borrow() {
+                    task.set_state(CANCELED).await;
+                    task.ended().await;
+                    self.emit_state(&task, CANCELED).await;
+                    return Ok(());
+                }
                 Err("任务取消通道关闭".into())
             }
         };
@@ -633,7 +671,7 @@ impl Engine {
             task.set_state(CANCELED).await;
             task.ended().await;
             self.emit_state(&task, CANCELED).await;
-            return;
+            return Ok(());
         }
         match result {
             Ok(()) => {
@@ -667,6 +705,7 @@ impl Engine {
                 self.emit_state(&task, FAILED).await;
             }
         }
+        Ok(())
     }
     async fn emit_state(&self, task: &Task, state: &str) {
         let _ = self.events.send(TaskEvent {
@@ -714,7 +753,7 @@ fn set_process_group(_command: &mut Command) {}
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -820,7 +859,7 @@ mod tests {
 
     #[allow(dead_code)]
     fn _atomic_is_used() {
-        let a = AtomicUsize::new(0);
+        let a = std::sync::atomic::AtomicUsize::new(0);
         a.fetch_add(1, Ordering::Relaxed);
     }
 }

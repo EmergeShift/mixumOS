@@ -13,6 +13,14 @@ pub struct Identity {
     pub fingerprint: String,
 }
 
+/// 安装进程级 rustls CryptoProvider。
+/// workspace 的 rustls 关掉 default-features 只启用 ring,而 rcgen 可能带入
+/// aws-lc-rs:两个都在时 rustls 无法自动选择,这里显式钉住 ring。
+/// install_default 全进程幂等,重复调用返回 Err,忽略即可。
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub fn load_or_create_identity(
     data_dir: impl AsRef<Path>,
     hosts: &[String],
@@ -38,6 +46,7 @@ pub fn load_or_create_identity(
         std::fs::write(&cert_path, cert.cert.pem())?;
         std::fs::write(&key_path, cert.key_pair.serialize_pem())?;
     }
+    ensure_crypto_provider();
     let cert_bytes = std::fs::read(&cert_path)?;
     let key_bytes = std::fs::read(&key_path)?;
     let mut cert_reader = &cert_bytes[..];

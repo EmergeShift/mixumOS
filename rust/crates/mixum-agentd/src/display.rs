@@ -97,6 +97,8 @@ pub struct Broker {
     comp: Arc<Mutex<Option<mpsc::Sender<CompMessage>>>>,
     window_events: broadcast::Sender<Window>,
     socket_path: PathBuf,
+    /// 任务引擎是否活跃:活跃时新窗口归 agent 模式(用户接管需 claim)。
+    tasks_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -112,6 +114,7 @@ impl Broker {
             comp: Arc::new(Mutex::new(None)),
             window_events,
             socket_path: path.into(),
+            tasks_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
     pub fn socket_path(&self) -> &Path {
@@ -148,11 +151,47 @@ impl Broker {
     pub fn subscribe_windows(&self) -> broadcast::Receiver<Window> {
         self.window_events.subscribe()
     }
+    /// 任务引擎活跃状态切换:开始→现有 free 窗口转 agent;结束→agent 窗口回 free。
+    /// 用户已接管(user)的窗口不受影响。
+    pub async fn set_tasks_active(&self, active: bool) {
+        self.tasks_active
+            .store(active, std::sync::atomic::Ordering::SeqCst);
+        let mut changed = Vec::new();
+        {
+            let mut all = self.windows.lock().await;
+            for st in all.values_mut() {
+                let target = if active {
+                    (st.window.mode.is_empty() || st.window.mode == MODE_FREE)
+                        .then_some(MODE_AGENT)
+                } else {
+                    (st.window.mode == MODE_AGENT).then_some(MODE_FREE)
+                };
+                if let Some(m) = target {
+                    st.window.mode = m.into();
+                    changed.push(st.window.clone());
+                }
+            }
+        }
+        for w in changed {
+            let _ = self.window_events.send(w);
+        }
+    }
+
     pub async fn open_or_update(&self, window: Window) {
         let mut all = self.windows.lock().await;
-        let entry = all.entry(window.id).or_insert_with(|| WindowState {
-            window: window.clone(),
-            subscribers: HashMap::new(),
+        let tasks_active = self
+            .tasks_active
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let entry = all.entry(window.id).or_insert_with(|| {
+            // 任务运行中打开的窗口归 agent:用户可见,接管需 display.takeover。
+            let mut w = window.clone();
+            if tasks_active && w.mode.is_empty() {
+                w.mode = MODE_AGENT.into();
+            }
+            WindowState {
+                window: w,
+                subscribers: HashMap::new(),
+            }
         });
         let mode = entry.window.mode.clone();
         entry.window = Window {

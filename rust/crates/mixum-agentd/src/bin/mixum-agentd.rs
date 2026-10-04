@@ -103,6 +103,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let engine = Engine::with_snapshots(registry, sandbox, Some(snapshots.clone()));
     let broker = Broker::new("/run/mixum/display.sock");
     let _ = broker.start().await;
+    // 接管状态机接线:任务运行→新窗口归 agent(接管需 claim);任务清零→回 free。
+    let broker_for_tasks = broker.clone();
+    engine.set_active_change_callback(Arc::new(move |active| {
+        let b = broker_for_tasks.clone();
+        tokio::spawn(async move { b.set_tasks_active(active).await });
+    }));
     #[cfg_attr(not(feature = "real-snapshot"), allow(unused_mut))]
     let mut server = Server::new(config.clone(), authorizer, engine, broker, snapshots);
     #[cfg(feature = "real-snapshot")]
