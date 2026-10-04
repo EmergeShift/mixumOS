@@ -242,7 +242,8 @@ impl Registry {
 }
 
 pub struct LocalSandbox {
-    pgids: Arc<Mutex<Vec<i32>>>,
+    // std 锁:冻结钩子在同步上下文(FreezeFn)里也要读进程组,锁内无 await。
+    pgids: Arc<std::sync::Mutex<Vec<i32>>>,
 }
 
 impl Default for LocalSandbox {
@@ -253,7 +254,23 @@ impl Default for LocalSandbox {
 impl LocalSandbox {
     pub fn new() -> Self {
         Self {
-            pgids: Arc::new(Mutex::new(Vec::new())),
+            pgids: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// 冻结/解冻全部任务进程组(快照引擎的 Freeze 回调,对齐 reference FreezeAll)。
+    pub fn freeze_all(&self, stop: bool) {
+        let signal = if stop {
+            nix::libc::SIGSTOP
+        } else {
+            nix::libc::SIGCONT
+        };
+        let Ok(signal) = nix::sys::signal::Signal::try_from(signal) else {
+            return;
+        };
+        let pgids = self.pgids.lock().expect("sandbox 进程组锁").clone();
+        for pgid in pgids {
+            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pgid), signal);
         }
     }
 }
@@ -334,13 +351,13 @@ impl Sandbox for LocalSandbox {
         let pgids = self.pgids.clone();
         tokio::spawn(async move {
             let _ = child.wait().await;
-            pgids.lock().await.retain(|current| *current != pid as i32);
+            pgids.lock().expect("sandbox 进程组锁").retain(|current| *current != pid as i32);
         });
         Ok(pid)
     }
 
     async fn signal(&self, _task: &Task, signal: Signal) -> Result<(), DriverError> {
-        let pgids = self.pgids.lock().await.clone();
+        let pgids = self.pgids.lock().expect("sandbox 进程组锁").clone();
         let sig = match signal {
             Signal::Stop => nix::libc::SIGSTOP,
             Signal::Continue => nix::libc::SIGCONT,
@@ -357,12 +374,15 @@ impl Sandbox for LocalSandbox {
     }
 
     async fn set_task_pid(&self, task: &Task, pid: i32) {
-        self.pgids.lock().await.push(pid);
+        self.pgids.lock().expect("sandbox 进程组锁").push(pid);
         task.inner.lock().await.pgids.push(pid);
     }
 
     async fn release_task_pid(&self, task: &Task, pid: i32) {
-        self.pgids.lock().await.retain(|current| *current != pid);
+        self.pgids
+            .lock()
+            .expect("sandbox 进程组锁")
+            .retain(|current| *current != pid);
         task.inner
             .lock()
             .await
