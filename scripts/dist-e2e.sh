@@ -45,7 +45,7 @@ done
 echo "==> READY token=${TOKEN:0:12}…"
 
 echo "==> e2eclient:任务/快照链路"
-cd "$ROOT"
-go run ./reference/cmd/e2eclient -addr "wss://127.0.0.1:$PORT" -token "$TOKEN" -insecure
+# go.mod 在 reference/ 里,模块上下文必须在那个目录
+(cd "$ROOT/reference" && go run ./cmd/e2eclient -addr "wss://127.0.0.1:$PORT" -token "$TOKEN" -insecure)
 
 echo "==> PASS:任务/快照链路验证通过(窗口流视 mixcomp 运行时状态,容器日志 docker logs $NAME)"

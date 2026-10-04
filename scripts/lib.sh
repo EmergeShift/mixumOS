@@ -63,10 +63,11 @@ ensure_build_container() {
 		{ echo "拿不到 linux/$DARCH 的 Arch 容器镜像" >&2; return 1; }
 
 	if ! docker container inspect "$CN" >/dev/null 2>&1; then
-		# seccomp=unconfined:pacman 6.1+ 的 Landlock 沙箱在默认 seccomp
-		# 下报 Operation not permitted(构建容器,开发 VM 内可接受)
+		# privileged:pacstrap 组装 rootfs 需要 mount /proc /sys /dev 进
+		# chroot(默认容器被 Docker 拦),也顺带覆盖 pacman Landlock
+		# 沙箱的 seccomp 问题;构建容器跑在专用开发 VM 内,可接受
 		docker create --name "$CN" --entrypoint sleep \
-			--security-opt seccomp=unconfined \
+			--privileged \
 			-v "$ROOT:/build/mixumos:ro" \
 			-v "$ROOT/dist/out:/out" \
 			-e http_proxy="$PROXY" -e https_proxy="$PROXY" \
