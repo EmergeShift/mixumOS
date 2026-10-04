@@ -21,6 +21,9 @@ sha256sums=('SKIP')
 
 build() {
 	cd "$pkgname/mixcomp"
+	# 源码树里混有历史误提交的 .o 文件(架构不定),先清场再编,
+	# 避免跨架构构建链到错误架构的目标文件
+	make clean >/dev/null 2>&1 || true
 	# xdg-shell-protocol.h 由 wlroots 头文件按相对路径引用,部分发行版的
 	# wlroots 包不带它(e2e 的 Dockerfile 是生成进系统头文件目录);
 	# 这里生成进源码树,用 CPATH 交给 gcc,不写系统目录。

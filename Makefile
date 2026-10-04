@@ -19,11 +19,14 @@ ARCH ?= aarch64
 
 dist: dist-repo dist-image
 
+# 环境变量 ARCHS 优先,否则用 ARCH 变量(默认 aarch64)
+export ARCHS ?= $(ARCH)
+
 dist-repo:
-	ARCHS="$(ARCH)" bash dist/repo/build-repo.sh
+	bash dist/repo/build-repo.sh
 
 dist-image:
-	ARCHS="$(ARCH)" bash dist/os/build-image.sh
+	bash dist/os/build-image.sh
 
 dist-e2e:
 	bash scripts/dist-e2e.sh $(firstword $(ARCH))

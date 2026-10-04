@@ -24,16 +24,25 @@ MIXUMD_BIN="/out/build/mixumd-$GOARCH"
 echo "==> [container] 架构 $ARCH,commit ${COMMIT:0:12}"
 
 # ---- 0. 沙箱与密钥环(幂等;ALARM rootfs 的 keyring 未初始化,必须先做) --
-# 容器里 pacman 的 Landlock 沙箱可能被 seccomp 拦,双保险关掉沙箱
-if ! grep -q '^DisableSandbox' /etc/pacman.conf; then
+# 容器(尤其 qemu 模拟)里 pacman 的沙箱起不来:6.x 用整开关,7.x 起拆成
+# Filesystem/Syscalls 两个细粒度开关,分别处理
+PACMAN_MAJOR="$(pacman -Q pacman | sed 's/^pacman \([0-9]*\).*/\1/')"
+if [ "$PACMAN_MAJOR" -lt 7 ] && ! grep -q '^DisableSandbox$' /etc/pacman.conf; then
 	sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+fi
+if [ "$PACMAN_MAJOR" -ge 7 ]; then
+	sed -i -E 's/^#+DisableSandboxSyscalls/DisableSandboxSyscalls/' /etc/pacman.conf
+	grep -q '^DisableSandboxFilesystem' /etc/pacman.conf ||
+		sed -i '/^\[options\]/a DisableSandboxFilesystem' /etc/pacman.conf
 fi
 mkdir -p /etc/pacman.d/gnupg
 if [ ! -f /etc/pacman.d/gnupg/pubring.kbx ] && [ ! -f /etc/pacman.d/gnupg/pubring.gpg ]; then
-	pacman-key --init
+	# qemu 模拟下 gpg 建钥偶发瞬时失败,重试一次
+	pacman-key --init || { sleep 2; pacman-key --init; }
 fi
 for kr in /usr/share/pacman/keyrings/*.gpg; do
-	pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null
+	pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null ||
+		{ sleep 2; pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null; }
 done
 pacman -Syu --noconfirm --needed base-devel git >/dev/null
 git config --system --add safe.directory "$GIT_SRC"
@@ -129,15 +138,15 @@ echo "==> [container] makepkg mixum-base"
 
 # ---- 产物核验:动态依赖可解析、无 vendored 库 ----------------------------
 TMPV="$(mktemp -d)"
-bsdtar -xf "$BUILD/mixcomp/"mixcomp-*.pkg.tar.* -C "$TMPV" usr/bin/mixcomp
+bsdtar -xf "$BUILD/mixcomp/"mixcomp-[0-9]*.pkg.tar.* -C "$TMPV" usr/bin/mixcomp
 if ldd "$TMPV/usr/bin/mixcomp" | grep -q 'not found'; then
 	echo "mixcomp 存在未解析的动态依赖:" >&2
 	ldd "$TMPV/usr/bin/mixcomp" | grep 'not found' >&2
 	exit 1
 fi
-if bsdtar -tf "$BUILD/mixcomp/"mixcomp-*.pkg.tar.* | grep -Eq '\.(a|so)(\.|$)'; then
+if bsdtar -tf "$BUILD/mixcomp/"mixcomp-[0-9]*.pkg.tar.* | grep -Eq '\.(a|so)(\.|$)'; then
 	echo "mixcomp 包内出现库文件(应动态链接系统库,不许 vendored):" >&2
-	bsdtar -tf "$BUILD/mixcomp/"mixcomp-*.pkg.tar.* | grep -E '\.(a|so)(\.|$)' >&2
+	bsdtar -tf "$BUILD/mixcomp/"mixcomp-[0-9]*.pkg.tar.* | grep -E '\.(a|so)(\.|$)' >&2
 	exit 1
 fi
 rm -rf "$TMPV"

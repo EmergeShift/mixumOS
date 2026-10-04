@@ -20,10 +20,12 @@ if ! grep -q '^DisableSandbox' /etc/pacman.conf; then
 fi
 mkdir -p /etc/pacman.d/gnupg
 if [ ! -f /etc/pacman.d/gnupg/pubring.kbx ] && [ ! -f /etc/pacman.d/gnupg/pubring.gpg ]; then
-	pacman-key --init
+	# qemu 模拟下 gpg 建钥偶发瞬时失败,重试一次
+	pacman-key --init || { sleep 2; pacman-key --init; }
 fi
 for kr in /usr/share/pacman/keyrings/*.gpg; do
-	pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null
+	pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null ||
+		{ sleep 2; pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null; }
 done
 pacman -Syu --noconfirm --needed arch-install-scripts zstd python >/dev/null
 
@@ -80,6 +82,9 @@ EOF
 
 # ---- 容器侧引导配置( pacstrap 读容器的 /etc/pacman.conf) ---------------
 write_pacman_conf "file://$REPO" "$IS_ALARM" > /etc/pacman.conf
+# 引导用 conf 关掉 Syscalls 沙箱(qemu 模拟下 pacman 起不来;无条件关,
+# 对引导无害;烤进镜像的 target conf 不在此列,真机上沙箱照常)
+sed -i -E 's/^#+DisableSandboxSyscalls/DisableSandboxSyscalls/' /etc/pacman.conf
 pacman -Sy >/dev/null
 rm -rf "$TARGET" && mkdir -p "$TARGET"
 
