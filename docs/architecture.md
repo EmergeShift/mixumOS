@@ -110,3 +110,19 @@ mixumos/
 - 多用户/多租户隔离(v1 单用户多设备;租户模型在 gateway 层后置);
 - 图形协议的 H.264/AV1 硬编(v1 用 JPEG,WebCodecs 升级路径已留);
 - 非容器形态(裸机安装器);Windows/macOS 作为容器宿主(只作为客户端)。
+
+## Rust 实现记录
+
+`rust/crates/mixum-agentd` 已按本文件与 `docs/protocol.md` 落地守护进程骨架：
+WSS（TLS 1.3）、能力令牌握手、请求路由、50/s（突发 100）限速、任务引擎、
+external 行分隔 JSON 桥、窗口 broker 和快照 trait 桩均使用协议 crate 的类型。
+
+| 行为 | Go 参考实现 | Rust 实现 | 差异 |
+|------|-------------|-----------|------|
+| envelope、令牌、视频帧头 | `reference/internal/wire`、`auth` | `mixum-protocol` | |
+| 任务状态与事件 | `reference/internal/task` | `mixum-agentd::task` | |
+| 快照树 | `reference/internal/snap` | `SnapshotEngine` 内存桩 | 真实块存储待 `mixum-snapshot` 接口稳定后接入 |
+| 显示控制通道 | `reference/internal/display` | `mixum-agentd::display` | |
+| 管理 REST／指标 | 后置能力 | 未实现 | 任务书明确排除 |
+
+Rust 服务已用 Go `reference/cmd/e2eclient` 实跑协议链路并通过 `E2E PASS`；该结果使用内存快照桩，窗口帧部分在无 mixcomp 窗口时按客户端约定跳过。
