@@ -15,7 +15,37 @@ use std::time::SystemTime;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::{rustls, TlsAcceptor};
-use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{accept_hdr_async, tungstenite::Message, WebSocketStream};
+
+/// WS 子协议协商:服务端必须应答 mixum.v1(否则守协议的客户端会拒绝连接)。
+fn accept_with_subprotocol<S>(
+    stream: S,
+) -> impl std::future::Future<Output = Result<WebSocketStream<S>, tokio_tungstenite::tungstenite::Error>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    // 回调错误类型为 tungstenite 约定的 Response<Option<String>>;
+    // 未请求 mixum.v1 的客户端不报错、仅不回子协议头。
+    let cb = |req: &Request, resp: Response| -> Result<Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse> {
+        let requested = req
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .map(|p| p.split(',').any(|s| s.trim() == "mixum.v1"))
+            .unwrap_or(false);
+        let (mut parts, body) = resp.into_parts();
+        if requested {
+            if let Ok(v) = "mixum.v1".parse() {
+                parts.headers.insert("Sec-WebSocket-Protocol", v);
+            }
+        }
+        Ok(Response::from_parts(parts, body))
+    };
+    accept_hdr_async(stream, cb)
+}
+
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,7 +155,7 @@ impl Server {
             let (stream, _) = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = this.handle_stream(accept_async(stream).await).await;
+                let _ = this.handle_stream(accept_with_subprotocol(stream).await).await;
             });
         }
     }
@@ -143,7 +173,7 @@ impl Server {
             let this = self.clone();
             tokio::spawn(async move {
                 if let Ok(tls) = acceptor.accept(stream).await {
-                    let _ = this.handle_stream(accept_async(tls).await).await;
+                    let _ = this.handle_stream(accept_with_subprotocol(tls).await).await;
                 }
             });
         }

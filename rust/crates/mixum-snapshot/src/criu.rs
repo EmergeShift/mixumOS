@@ -59,9 +59,10 @@ impl Criu {
     ) -> Result<(), CriuError> {
         std::fs::create_dir_all(dir.as_ref())?;
         let mut cmd = Command::new(&self.binary);
+        // --shell-job:任务进程用进程组托管而非会话首,转储必须带此参数。
         cmd.args(["dump", "--tree", &pid.to_string(), "--images-dir"])
             .arg(dir.as_ref())
-            .args(["-v4", "-o", "dump.log"]);
+            .args(["--shell-job", "-v4", "-o", "dump.log"]);
         if leave_running {
             cmd.arg("--leave-running");
         }

@@ -23,6 +23,7 @@ import (
 type client struct {
 	conn    *websocket.Conn
 	pending map[string]chan *wire.Envelope
+	frames  chan *wire.VideoFrame
 }
 
 func dial(addr, token, fingerprint string, insecure bool) (*client, error) {
@@ -50,7 +51,11 @@ func dial(addr, token, fingerprint string, insecure bool) (*client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &client{conn: conn, pending: map[string]chan *wire.Envelope{}}
+	c := &client{
+		conn:    conn,
+		pending: map[string]chan *wire.Envelope{},
+		frames:  make(chan *wire.VideoFrame, 64),
+	}
 	go c.readLoop()
 	env, _ := wire.NewEnvelope(wire.OpHello, wire.HelloRequest{
 		Token:  token,
@@ -68,23 +73,35 @@ func dial(addr, token, fingerprint string, insecure bool) (*client, error) {
 	return c, nil
 }
 
+// readLoop 是唯一的读循环:文本帧按应答分发,二进制帧解包进通道。
+// 严禁在别处直接 conn.ReadMessage——那会把应答或帧吃掉(历史 bug)。
 func (c *client) readLoop() {
 	for {
 		mt, data, err := c.conn.ReadMessage()
 		if err != nil {
+			close(c.frames)
 			return
 		}
-		if mt != websocket.TextMessage {
-			continue
-		}
-		env, err := wire.Decode(data)
-		if err != nil {
-			continue
-		}
-		if env.ReplyTo != "" {
-			if ch, ok := c.pending[env.ReplyTo]; ok {
-				ch <- env
-				delete(c.pending, env.ReplyTo)
+		switch mt {
+		case websocket.TextMessage:
+			env, err := wire.Decode(data)
+			if err != nil {
+				continue
+			}
+			if env.ReplyTo != "" {
+				if ch, ok := c.pending[env.ReplyTo]; ok {
+					ch <- env
+					delete(c.pending, env.ReplyTo)
+				}
+			}
+		case websocket.BinaryMessage:
+			if len(data) > 0 && data[0] == wire.ChanVideo {
+				if f, err := wire.UnmarshalVideo(data); err == nil {
+					select {
+					case c.frames <- f:
+					default: // 慢消费丢帧,实时性优先
+					}
+				}
 			}
 		}
 	}
@@ -167,29 +184,31 @@ func main() {
 				var ar wire.DisplayAttachResponse
 				_ = att.ParsePayload(&ar)
 				_ = ar
-				// 收几帧
+				// 收几帧(经单读循环分发,不再直读连接)
 				frames := 0
-				deadline := time.Now().Add(6 * time.Second)
-				for frames < 3 && time.Now().Before(deadline) {
-					c.conn.SetReadDeadline(deadline)
-					mt, data, err := c.conn.ReadMessage()
-					if err != nil {
-						break
-					}
-					if mt == websocket.BinaryMessage && len(data) > 0 && data[0] == wire.ChanVideo {
-						f, err := wire.UnmarshalVideo(data)
-						if err == nil && f.WindowID == w.ID {
-							frames++
-							if f.HasCursor {
-								fmt.Printf("  帧 %d: %dx%d 光标=(%d,%d) 字节=%d\n",
-									frames, f.Width, f.Height, f.CursorX, f.CursorY, len(f.Data))
-							} else {
-								fmt.Printf("  帧 %d: %dx%d 字节=%d\n", frames, f.Width, f.Height, len(f.Data))
-							}
+				deadline := time.After(6 * time.Second)
+			frameLoop:
+				for frames < 3 {
+					select {
+					case f, ok := <-c.frames:
+						if !ok {
+							break frameLoop
 						}
+						if f.WindowID != w.ID {
+							continue
+						}
+						frames++
+						if f.HasCursor {
+							fmt.Printf("  帧 %d: %dx%d 光标=(%d,%d) 字节=%d\n",
+								frames, f.Width, f.Height, f.CursorX, f.CursorY, len(f.Data))
+						} else {
+							fmt.Printf("  帧 %d: %dx%d 字节=%d\n", frames, f.Width, f.Height, len(f.Data))
+						}
+					case <-deadline:
+						break frameLoop
 					}
 				}
-				c.conn.SetReadDeadline(time.Time{})
+				_, _ = c.op(wire.OpDisplayDetach, wire.DisplayAttachRequest{Window: w.ID})
 				if frames >= 3 {
 					fmt.Println("✓ 窗口流正常（≥3 帧）")
 				} else {

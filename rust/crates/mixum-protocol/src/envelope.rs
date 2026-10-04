@@ -31,6 +31,7 @@ pub struct Envelope {
         skip_serializing_if = "String::is_empty"
     )]
     pub reply_to: String,
+    #[serde(default)]
     pub ts: i64,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "payload")]
     pub payload: Option<Value>,
