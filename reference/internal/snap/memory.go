@@ -33,7 +33,8 @@ func (c *Criu) Dump(pid int, dir string, leaveRunning bool) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	args := []string{"dump", "--tree", fmt.Sprint(pid), "--images-dir", dir, "-v4", "-o", "dump.log"}
+	args := []string{"dump", "--tree", fmt.Sprint(pid), "--images-dir", dir,
+		"--shell-job", "-v4", "-o", "dump.log"}
 	if leaveRunning {
 		args = append(args, "--leave-running")
 	}

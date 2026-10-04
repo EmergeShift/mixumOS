@@ -45,6 +45,9 @@ func (s *LocalSandbox) Exec(ctx context.Context, name string, args []string, env
 		s.trackPgid(cmd, false)
 		return -1, err
 	}
+	// 注册首领进程:任务运行中的 hybrid 快照才知道 dump 谁(短命令结束时
+	// 引擎按 pid=0 退化为 disk)。
+	s.SetTaskPid(cmd.Process.Pid)
 	// setpgid 后进程组 id 等于子进程 pid
 	wg := sync.WaitGroup{}
 	wg.Add(1)

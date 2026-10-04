@@ -389,7 +389,7 @@ impl RemoteClient {
         let envelope = Envelope::new(op_name, Some(payload));
         let id = envelope.id.clone();
         self.sink
-            .send(Message::Text(envelope.to_json()))
+            .send(Message::Text(envelope.to_json().into()))
             .await
             .map_err(|e| CallError::Io(e.to_string()))?;
         let reply = tokio::time::timeout(timeout, self.next_reply())
@@ -427,7 +427,7 @@ impl RemoteClient {
 
     async fn send_binary(&mut self, frame: Vec<u8>) -> Result<(), SyncError> {
         self.sink
-            .send(Message::Binary(frame))
+            .send(Message::Binary(frame.into()))
             .await
             .map_err(|e| SyncError::Protocol(e.to_string()))
     }
@@ -498,6 +498,7 @@ impl ServerCertVerifier for SkipServerVerification {
 }
 
 fn insecure_tls_client() -> rustls::ClientConfig {
+    crate::auth::ensure_crypto_provider();
     rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
