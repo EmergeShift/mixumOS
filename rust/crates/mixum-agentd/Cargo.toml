@@ -1,0 +1,26 @@
+[package]
+name = "mixum-agentd"
+description = "mixumOS 容器内 Rust 守护进程"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mixum-protocol = { path = "../mixum-protocol" }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rcgen = { workspace = true }
+nix = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
