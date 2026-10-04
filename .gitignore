@@ -2,3 +2,5 @@ build/
 reference/build/
 rust/target/
 dist/out/
+console/node_modules/
+console/dist/
