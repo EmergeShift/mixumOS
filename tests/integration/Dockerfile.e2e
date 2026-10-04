@@ -6,8 +6,7 @@ RUN apk add --no-cache \
 	make build-base pkgconf wlroots-dev json-c-dev libxkbcommon-dev \
 	libjpeg-turbo-dev wayland-protocols \
 	wlroots json-c libjpeg-turbo libxkbcommon \
-	foot font-noto mesa-egl mesa-gles bash \
-	evtest 2>/dev/null; apk add --no-cache wlroots json-c libjpeg-turbo libxkbcommon foot font-noto mesa-egl mesa-gles
+	foot font-noto mesa-egl mesa-gles bash
 
 # mixcomp 源码内构建（协议头由 Makefile 用 wayland-scanner 现场生成）
 WORKDIR /opt/mixcomp
