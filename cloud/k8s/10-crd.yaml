@@ -1,0 +1,101 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mixumtasks.mixumos.io
+spec:
+  group: mixumos.io
+  scope: Namespaced
+  names:
+    kind: MixumTask
+    listKind: MixumTaskList
+    plural: mixumtasks
+    singular: mixumtask
+    shortNames:
+      - mtask
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: State
+          type: string
+          jsonPath: .status.state
+        - name: Agent
+          type: string
+          jsonPath: .spec.agent
+        - name: Arch
+          type: string
+          jsonPath: .spec.arch
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [instruction]
+              properties:
+                instruction:
+                  type: string
+                  description: 用户指令,原样传给容器内 agent runner
+                agent:
+                  type: string
+                  default: shell
+                  description: AgentDriver 名(shell/external/嵌入 agent)
+                arch:
+                  type: string
+                  default: ""
+                  enum: ["", "arm64", "amd64"]
+                  description: 目标节点架构;空 = 不限
+                runnerImage:
+                  type: string
+                  default: ghcr.io/mixumos/mixumos:latest
+                  description: mixumOS 容器镜像(make dist 产出,OCI 双架构)
+                snapshotPVC:
+                  type: string
+                  description: >
+                    工作区与快照存储挂载的 PVC。跨 Pod 指向同一 PVC
+                    即实现任务在云端接力(配合 snap.push/pull)。
+                snapshotPolicy:
+                  type: object
+                  properties:
+                    pre:
+                      type: boolean
+                      default: true
+                    kind:
+                      type: string
+                      default: disk
+                      enum: [disk, memory, hybrid]
+                    onFailure:
+                      type: string
+                      default: none
+                      enum: [none, restore]
+                ttlSecondsAfterFinished:
+                  type: integer
+                  default: 3600
+                env:
+                  type: array
+                  description: 注入容器的额外环境变量
+                  items:
+                    type: object
+                    required: [name]
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+            status:
+              type: object
+              properties:
+                state:
+                  type: string
+                  enum: [pending, running, completed, failed, canceled]
+                podName:
+                  type: string
+                startedAt:
+                  type: string
+                finishedAt:
+                  type: string
+                message:
+                  type: string

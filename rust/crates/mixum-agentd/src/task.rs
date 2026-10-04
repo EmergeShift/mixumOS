@@ -26,6 +26,7 @@ pub const FAILED: &str = "failed";
 pub const CANCELED: &str = "canceled";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct TaskSpec {
     pub instruction: String,
     #[serde(default)]
