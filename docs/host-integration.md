@@ -4,6 +4,8 @@
 
 首次连接会计算服务器端实体证书的 SHA-256 指纹，保存到 `~/.mixum/known-hosts`，文件权限为 0600。之后同一地址必须提供相同指纹；`--fingerprint` 可在首次配对时显式指定指纹。令牌文件同样按 0600 配置，客户端不把令牌写入日志。
 
+指纹按地址固定，解析顺序为：显式 `--fingerprint`、known-hosts 中该地址的记录、配置文件里已配对设备（`remote`）的指纹。多节点使用时，`connect` 到新节点不会影响其它地址的校验；证书轮换后对目标地址重新执行带 `--fingerprint` 的 `connect` 即完成重新配对。
+
 合盖迁移链路是：电力事件或 `mixum-ctl power --simulate-sleep` 调用 `snap.create`（`hybrid`、`auto=true`），再调用 `snap.push` 将节点和缺失块送到远端。块传输的去重与落树由对端按协议 §6 完成，第二次推送不应产生块流量。
 
 手动跨节点推送时，源节点令牌使用全局 `--token`，目标节点令牌使用 `snap push ... --remote-token <token>`，避免两个端点的令牌混淆。
