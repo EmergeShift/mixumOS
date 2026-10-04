@@ -1,0 +1,11 @@
+{
+  "expect": {
+    "caps": [
+      "task.run",
+      "snap.sync"
+    ],
+    "sub": "cross-vector"
+  },
+  "seed_hex": "abababababababababababababababababababababababababababababababab",
+  "token": "mixum1.eyJzdWIiOiJjcm9zcy12ZWN0b3IiLCJjYXBzIjpbInRhc2sucnVuIiwic25hcC5zeW5jIl0sImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxNzAwMDAwMDAwLCJqdGkiOiIwMWExMDYwMC1iNDY0LTc3MWMtOTJkMS0wNDVmZTMyZGNmNGYifQ.dV8IJC8TZB3yav699e1f04qOAjS0fpMz2zypoImeboOz1EVWpG_PBfCn1_InEvxoZoW7Ci8_mxYS-ss5097hBg"
+}
