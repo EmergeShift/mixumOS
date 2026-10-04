@@ -112,3 +112,19 @@ Rust 版可加「保护最近 N 分钟的块」避免与进行中的推送竞态
 | 后端探测 | internal/snap/backend.go |
 | 推送/导入(协议侧) | internal/server/handlers_snap.go |
 | 行为测试 | internal/snap/engine_test.go, internal/server/server_test.go |
+
+## 9. Rust 实现记录
+
+Rust 实现位于 `rust/crates/mixum-snapshot`，并以本节与本文规格为准。树的持久化后端选用 **sled**：它提供嵌入式有序 KV、事务式单键更新和跨平台文件存储，接口比 bbolt 的事务回调更适合 Rust；快照节点、分支 head 和当前分支分别存放在 `nodes`、`heads`、`meta` 树中。阶段 1 不依赖外部数据库服务。
+
+与 Go 参考实现的对应关系如下：
+
+| 能力 | Rust 实现 | 说明 |
+|------|-----------|------|
+| CAS | `store.rs` | zstd、明文 SHA-256、可选 AES-256-GCM；HKDF 盐、`chunk-aead` info、AAD 与 Go 一致 |
+| 清单 | `manifest.rs` | 固定 1 MiB 分块、目录/符号链接、原子落地、路径穿越拒绝、diff |
+| 树 DAG | `tree.rs` | genesis、head、回退、fork 自动编号、叶子删除、分支改名 |
+| 引擎 | `engine.rs` | disk/memory/hybrid、冻结 hook、恢复、GC；纯 memory 恢复拒绝 |
+| CRIU | `criu.rs` | 启动时探测 `criu`，非 Linux 仍可编译；不可用时返回明确错误 |
+
+Rust 节点 ID 使用本地随机十六进制后缀，时间字段仍为 Unix 毫秒；JSON 字段使用协议规定的 camelCase。Go 侧 bbolt 的事务存储和 Rust 侧 sled 的文件格式不互通，但节点/清单/块的线格式与语义由交叉向量测试锁定。最近 N 分钟 GC 保护、推送竞态保护等演进项仍未实现。
