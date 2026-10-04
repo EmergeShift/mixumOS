@@ -249,6 +249,8 @@ void stream_poll_control(struct mixcomp_server *s) {
 			return;
 		}
 		if (type == REC_CONTROL) {
+			wlr_log(WLR_DEBUG, "控制消息: %.*s", (int)(len > 120 ? 120 : len),
+					(const char *)payload);
 			json_object *root = json_tokener_parse((const char *)payload);
 			if (root != NULL) {
 				json_object *jt;
