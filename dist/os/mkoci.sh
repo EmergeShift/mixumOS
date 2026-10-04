@@ -60,7 +60,7 @@ else
 	# ---------- 多架构合并 ----------
 	shift
 	[ "$(($# % 2))" -eq 1 ] || { echo "--merge 参数须为 <layout> <arch> 成对 + 输出" >&2; exit 1; }
-	OUT_TAR="${*: -1}"
+	OCI_TAR="${*: -1}"
 	set -- "${@:1:$#-1}"
 	LAYOUT="$(mktemp -d)"
 	trap 'rm -rf "$LAYOUT"' EXIT
