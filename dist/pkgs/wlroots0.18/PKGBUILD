@@ -1,0 +1,55 @@
+# wlroots0.18 —— mixum 仓库自建包。
+# 背景(2026-10):Arch 官方源与 Arch Linux ARM 源都已只到 wlroots0.20,
+# 而 mixcomp 按 0.18 API 编写(mixcomp/ 目录只读)。0.18 的 ABI 由本包
+# 钉在我们自己的仓库里:依赖库升级时按「升一个 so」的哲学单独重打,
+# 不跟随上游 0.19/0.20 的破坏性变更。
+# 构建为最小化配置:仅 headless 后端 + pixman 渲染器(容器内 CPU 捕获
+# 路径够用),不拉 DRM/libinput/X11/EGL 依赖。
+pkgname=wlroots0.18
+pkgver=0.18.2
+pkgrel=1
+pkgdesc="模块化 Wayland 合成器库 0.18.2(mixum 自建,headless + pixman 最小化)"
+arch=(aarch64 x86_64)
+url="https://gitlab.freedesktop.org/wlroots/wlroots"
+license=('MIT')
+depends=(glibc wayland libdrm libxkbcommon pixman lcms2)
+makedepends=(meson ninja wayland-protocols)
+source=("https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/$pkgver/wlroots-$pkgver.tar.gz")
+sha256sums=('703c515917d9eb258e44296795f8626190e119b0ee8bfb32fe9f834dab1a1462')
+
+build() {
+	cd "$srcdir/wlroots-$pkgver"
+	meson setup build . \
+		--prefix=/usr \
+		--buildtype=plain \
+		-Dwerror=false \
+		-Drenderers= \
+		-Dbackends= \
+		-Dallocators= \
+		-Dsession=disabled \
+		-Dxwayland=disabled \
+		-Dxcb-errors=disabled \
+		-Dlibliftoff=disabled \
+		-Dexamples=false \
+		-Dcolor-management=enabled
+	meson compile -C build
+}
+
+check() {
+	cd "$srcdir/wlroots-$pkgver"
+	# 冒烟:动态库与版本化 pc 文件已产出(mixcomp 按 wlroots-0.18 探测)
+	test -n "$(ls build/libwlroots-0.18.so.*)"
+	test -f build/meson-private/wlroots-0.18.pc
+}
+
+package() {
+	cd "$srcdir/wlroots-$pkgver"
+	meson install -C build --destdir "$pkgdir"
+	# 上游不安装构建期生成的协议头,而 wlr_xdg_shell.h 以相对路径
+	#include "xdg-shell-protocol.h";发行方补上(mixcomp 与 e2e 依赖)
+	install -Dm644 /dev/null "$pkgdir/usr/include/wlroots-0.18/wlr/types/xdg-shell-protocol.h"
+	wayland-scanner server-header \
+		/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+		"$pkgdir/usr/include/wlroots-0.18/wlr/types/xdg-shell-protocol.h"
+	install -Dm644 LICENSE "$pkgdir/usr/share/licenses/wlroots0.18/LICENSE"
+}

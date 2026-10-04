@@ -28,11 +28,19 @@ build() {
 }
 
 check() {
-	# systemd 单元随包;二进制存在时做一次 --help 冒烟
-	# (Go flag 包对 --help 打印用法后以 0 退出)。
-	test -f "$pkgdir/usr/lib/systemd/system/mixumd.service"
-	if [ -f "$pkgdir/usr/bin/mixumd" ]; then
-		"$pkgdir/usr/bin/mixumd" -h >/dev/null 2>&1
+	# 注意:check() 在 package() 之前跑,$pkgdir 还是空的,文件存在性
+	# 由 package() 的 install -D 保证;这里只冒烟占位二进制
+	# (Go flag 包对 -h/-help 打印用法后以 0 退出,2 视为用法退出也算活)。
+	if [ -f "$startdir/placeholder/mixumd" ]; then
+		rc=0
+		"$startdir/placeholder/mixumd" -h >/dev/null 2>&1 || rc=$?
+		if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+			echo "mixumd 冒烟失败(exit=$rc)" >&2
+			return 1
+		fi
+	else
+		warning "无占位二进制,check 仅确认单元文件源文件存在"
+		test -f "$startdir/mixumd.service"
 	fi
 }
 
@@ -42,6 +50,6 @@ package() {
 	else
 		warning "未找到 placeholder/mixumd,本包只装 systemd 单元(占位期过渡形态)"
 	fi
-	install -Dm644 mixumd.service "$pkgdir/usr/lib/systemd/system/mixumd.service"
-	install -Dm644 README.md "$pkgdir/usr/share/doc/mixum-agentd/README.md"
+	install -Dm644 "$startdir/mixumd.service" "$pkgdir/usr/lib/systemd/system/mixumd.service"
+	install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/mixum-agentd/README.md"
 }
