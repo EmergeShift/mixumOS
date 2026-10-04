@@ -54,12 +54,13 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	cfg := defaultConfig()
-	if b, err := os.ReadFile(*cfgPath); err == nil {
+	b, readErr := os.ReadFile(*cfgPath)
+	if readErr == nil && len(b) > 0 {
 		if err := json.Unmarshal(b, &cfg); err != nil {
 			log.Error("配置文件解析失败", "err", err)
 			os.Exit(1)
 		}
-	} else if *cfgPath != "" {
+	} else if readErr != nil && *cfgPath != "/dev/null" {
 		log.Warn("配置文件不存在，使用默认配置", "path", *cfgPath)
 	}
 	if cfg.Hostname == "" {

@@ -1,0 +1,24 @@
+# e2e 测试镜像：mixumd + mixcomp + foot(wayland 终端)。
+# 仅用于本地集成测试；正式镜像见 os/image/Dockerfile。
+FROM alpine:3.21
+
+RUN apk add --no-cache \
+	make build-base pkgconf wlroots-dev json-c-dev libxkbcommon-dev \
+	libjpeg-turbo-dev wayland-protocols \
+	wlroots json-c libjpeg-turbo libxkbcommon \
+	foot font-noto mesa-egl mesa-gles bash \
+	evtest 2>/dev/null; apk add --no-cache wlroots json-c libjpeg-turbo libxkbcommon foot font-noto mesa-egl mesa-gles
+
+# mixcomp 源码内构建（xdg-shell-protocol.h 需现场生成）
+WORKDIR /opt/mixcomp
+COPY mixcomp/ /opt/mixcomp/
+RUN [ -f /usr/include/wlroots-0.18/wlr/types/xdg-shell-protocol.h ] || \
+	wayland-scanner server-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/wlroots-0.18/wlr/types/xdg-shell-protocol.h
+RUN make && cp mixcomp /usr/local/bin/
+
+COPY build/mixumd-arm64 /usr/local/bin/mixumd
+COPY tests/integration/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 7601
+ENTRYPOINT ["/entrypoint.sh"]

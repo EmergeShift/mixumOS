@@ -8,9 +8,14 @@
 #include <unistd.h>
 
 #include <wlr/backend.h>
+#include <wlr/backend/headless.h>
+#include <wlr/backend/multi.h>
 #include <wlr/render/wlr_renderer.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
@@ -144,9 +149,7 @@ int main(int argc, char **argv) {
 	}
 
 	// 容器内 headless；无 GPU 时 pixman 渲染（CPU 捕获路径）。
-	setenv("WLR_BACKENDS", "headless", 0);
 	setenv("WLR_RENDERER", "pixman", 0);
-	setenv("WLR_LIBINPUT_NO_DEVICES", "1", 0);
 
 	server.jpeg_quality = quality;
 	server.sock_fd = -1;
@@ -160,9 +163,13 @@ int main(int argc, char **argv) {
 	}
 	struct wl_event_loop *loop = wl_display_get_event_loop(server.display);
 
-	server.backend = wlr_backend_autocreate(loop, NULL);
-	if (server.backend == NULL) {
-		wlr_log(WLR_ERROR, "后端创建失败（需要 headless 支持）");
+	// multi + headless 子后端：virtual-pointer/keyboard 的设备事件经 multi
+	// 转发（与 sway 同构），anchor 输出建在 headless 子后端上。
+	server.backend = wlr_multi_backend_create(loop);
+	struct wlr_backend *headless = wlr_headless_backend_create(loop);
+	if (server.backend == NULL || headless == NULL ||
+			!wlr_multi_backend_add(server.backend, headless)) {
+		wlr_log(WLR_ERROR, "headless 后端创建失败");
 		return 1;
 	}
 	server.new_input.notify = new_input_cb;
@@ -173,10 +180,26 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	wl_display_init_shm(server.display);
+	// wl_compositor 是客户端连接的前提（缺它应用会报 no compositor）。
+	wlr_compositor_create(server.display, 6, server.renderer);
+	wlr_subcompositor_create(server.display);
+	wlr_viewporter_create(server.display);
 
 	server.xdg_shell = wlr_xdg_shell_create(server.display, 3);
 	server.new_surface.notify = new_surface_cb;
 	wl_signal_add(&server.xdg_shell->events.new_surface, &server.new_surface);
+
+	// 常驻虚拟输出：为要求至少一个显示器的客户端（如终端）提供锚点。
+	// 捕获不经过它——每窗口直接读 client buffer。
+	struct wlr_output *anchor = wlr_headless_add_output(headless, 1280, 800);
+	if (anchor != NULL) {
+		struct wlr_output_state st;
+		wlr_output_state_init(&st);
+		wlr_output_state_set_custom_mode(&st, 1280, 800, 30000);
+		wlr_output_state_set_enabled(&st, true);
+		wlr_output_commit_state(anchor, &st);
+		wlr_output_state_finish(&st);
+	}
 
 	// 虚拟输入管理器：注入客户端经协议创建设备。
 	wlr_virtual_pointer_manager_v1_create(server.display);
