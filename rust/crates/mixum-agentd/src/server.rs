@@ -483,7 +483,7 @@ impl Session {
                     ops::op::TASK_EVENT,
                     Some(serde_json::to_value(event).unwrap()),
                 )) {
-                    let _ = tx.send(Message::Text(message)).await;
+                    let _ = tx.send(Message::Text(message.into())).await;
                 }
             }
         });
@@ -732,7 +732,7 @@ impl Session {
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
                     while let Some(frame) = frames.recv().await {
-                        let _ = tx.send(Message::Binary(frame)).await;
+                        let _ = tx.send(Message::Binary(frame.into())).await;
                     }
                 });
                 self.reply(
@@ -772,7 +772,7 @@ impl Session {
                     ops::op::DISPLAY_WINDOWS,
                     Some(serde_json::to_value(window).unwrap_or(Value::Null)),
                 );
-                let _ = tx.send(Message::Text(envelope.to_json())).await;
+                let _ = tx.send(Message::Text(envelope.to_json().into())).await;
             }
         });
     }
@@ -844,7 +844,7 @@ impl Session {
             .await;
     }
     async fn send_raw(&self, raw: String) {
-        let _ = self.tx.send(Message::Text(raw)).await;
+        let _ = self.tx.send(Message::Text(raw.into())).await;
     }
 }
 
