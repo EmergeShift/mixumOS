@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::spawn(async move { b.set_tasks_active(active).await });
     }));
     #[cfg_attr(not(feature = "real-snapshot"), allow(unused_mut))]
-    let mut server = Server::new(config.clone(), authorizer, engine, broker, snapshots);
+    let mut server = Server::new(config.clone(), authorizer, engine.clone(), broker, snapshots);
     #[cfg(feature = "real-snapshot")]
     {
         let assembled = Arc::get_mut(&mut server).expect("server 刚构造,无共享引用");
@@ -141,6 +141,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     eprintln!("mixum-agentd listening on {}", config.listen);
     eprintln!("fingerprint: {}", identity.fingerprint);
     eprintln!("bootstrap token: {token}");
+
+    // 云端一次性任务模式(MixumTask → Pod):提交指令,等终态,容器退出。
+    // 由 k8s operator 注入 MIXUM_RUN_ONCE / MIXUM_INSTRUCTION / MIXUM_AGENT。
+    if std::env::var("MIXUM_RUN_ONCE").as_deref() == Ok("1") {
+        let instruction = std::env::var("MIXUM_INSTRUCTION").unwrap_or_default();
+        let agent = std::env::var("MIXUM_AGENT").unwrap_or_default();
+        if instruction.is_empty() {
+            return Err("MIXUM_RUN_ONCE=1 但未设置 MIXUM_INSTRUCTION".into());
+        }
+        let task = engine
+            .clone()
+            .submit(mixum_agentd::task::TaskSpec {
+                instruction: instruction.clone(),
+                agent,
+                ..Default::default()
+            })
+            .await?;
+        eprintln!("run-once 任务已提交: {} 「{instruction}」", task.id);
+        let mut events = engine.subscribe();
+        loop {
+            match events.recv().await {
+                Ok(ev) if ev.task_id == task.id && ev.event_type == "state" => {
+                    let state = ev
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    eprintln!("run-once 状态: {state}");
+                    if matches!(
+                        state.as_str(),
+                        "completed" | "failed" | "canceled"
+                    ) {
+                        return match state.as_str() {
+                            "completed" => Ok(()),
+                            s => Err(format!("任务终态: {s}").into()),
+                        };
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("run-once 事件积压丢弃 {n} 条");
+                }
+                Err(e) => return Err(format!("事件通道中断: {e}").into()),
+            }
+        }
+    }
+
     let listener: std::net::SocketAddr = config.listen.parse()?;
     tokio::select! { result = server.serve_tls(listener, identity.tls) => result.map_err(Into::into), _ = tokio::signal::ctrl_c() => Ok(()) }
 }

@@ -1,0 +1,84 @@
+# 常驻容器形态:设备长期配对一台 mixumOS(个人/mac 场景)。
+# 快照与工作区挂独立 PVC——跨节点迁移与「云端接力」都靠这块卷。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mixumos-server
+  namespace: mixumos
+  labels:
+    app.kubernetes.io/name: mixumos-server
+    app.kubernetes.io/part-of: mixumos
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # 工作区卷 RWO,避免双挂
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mixumos-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mixumos-server
+    spec:
+      # 指定架构池时取消注释(mixumos.io/arch 由节点标签提供):
+      # nodeSelector:
+      #   mixumos.io/arch: arm64
+      containers:
+        - name: mixumos
+          image: ghcr.io/mixumos/mixumos:latest # OCI index,arm64+amd64
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: wss
+              containerPort: 7601
+          env:
+            - name: MIXUM_LISTEN
+              value: 0.0.0.0:7601
+          # 能力令牌经 Secret 注入文件,agentd 启动时读取生成 bootstrap;
+          # 或首次启动自动生成后由 mixum-ctl 取回。二选一,清单给自动路径。
+          volumeMounts:
+            - name: work
+              mountPath: /var/lib/mixum/work
+            - name: snapshots
+              mountPath: /var/lib/mixum/snapshots
+          readinessProbe:
+            # agentd 无 HTTP 端点时用 TCP 探测(协议层健康由客户端心跳保证)
+            tcpSocket:
+              port: 7601
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: work
+          persistentVolumeClaim:
+            claimName: mixumos-work
+        - name: snapshots
+          persistentVolumeClaim:
+            claimName: mixumos-snapshots
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mixumos-work
+  namespace: mixumos
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mixumos-snapshots
+  namespace: mixumos
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
