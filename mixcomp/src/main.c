@@ -34,7 +34,10 @@ static void route_motion_absolute(struct wl_listener *l, void *data) {
 	if (w == NULL || w->surface == NULL) {
 		return;
 	}
-	double x = (double)ev->x, y = (double)ev->y;
+	// wlroots 0.18 起事件坐标为 [0,1] 归一化值（0.17 是布局绝对坐标），
+	// 事件不含 extent，按窗口尺寸换算回窗口内坐标（注入时 extent 即窗口尺寸）。
+	double x = ev->x * (double)w->width;
+	double y = ev->y * (double)w->height;
 	if (s->seat->pointer_state.focused_surface != w->surface) {
 		wlr_seat_pointer_notify_enter(s->seat, w->surface, x, y);
 	}
@@ -82,37 +85,36 @@ static void route_modifiers(struct wl_listener *l, void *data) {
 	wlr_seat_keyboard_notify_modifiers(s->seat, &kb->modifiers);
 }
 
-// new_input_cb —— 虚拟设备就绪：接 seat、挂事件路由。
-static void new_input_cb(struct wl_listener *listener, void *data) {
+// 虚拟设备事件路由。注意：wlroots 0.18 的虚拟 pointer/keyboard 不经过
+// backend 的 new_input，必须分别监听两个 manager 的 new_virtual_* 信号
+// （此前误挂 backend new_input，注入事件无人接收）。
+static void new_virtual_pointer_cb(struct wl_listener *listener, void *data) {
 	(void)listener;
-	struct wlr_input_device *dev = data;
-	switch (dev->type) {
-	case WLR_INPUT_DEVICE_KEYBOARD: {
-		struct wlr_keyboard *kb = wlr_keyboard_from_input_device(dev);
-		wlr_seat_set_keyboard(server.seat, kb);
-		if (server.inj_key.notify == NULL) {
-			server.inj_key.notify = route_key;
-			wl_signal_add(&kb->events.key, &server.inj_key);
-			server.inj_mods.notify = route_modifiers;
-			wl_signal_add(&kb->events.modifiers, &server.inj_mods);
-		}
-		break;
+	struct wlr_virtual_pointer_v1_new_pointer_event *ev = data;
+	struct wlr_pointer *ptr = &ev->new_pointer->pointer;
+	if (server.inj_motion.notify != NULL) {
+		return;
 	}
-	case WLR_INPUT_DEVICE_POINTER: {
-		struct wlr_pointer *ptr = wlr_pointer_from_input_device(dev);
-		if (server.inj_motion.notify == NULL) {
-			server.inj_motion.notify = route_motion_absolute;
-			wl_signal_add(&ptr->events.motion_absolute, &server.inj_motion);
-			server.inj_button.notify = route_button;
-			wl_signal_add(&ptr->events.button, &server.inj_button);
-			server.inj_axis.notify = route_axis;
-			wl_signal_add(&ptr->events.axis, &server.inj_axis);
-		}
-		break;
+	server.inj_motion.notify = route_motion_absolute;
+	wl_signal_add(&ptr->events.motion_absolute, &server.inj_motion);
+	server.inj_button.notify = route_button;
+	wl_signal_add(&ptr->events.button, &server.inj_button);
+	server.inj_axis.notify = route_axis;
+	wl_signal_add(&ptr->events.axis, &server.inj_axis);
+}
+
+static void new_virtual_keyboard_cb(struct wl_listener *listener, void *data) {
+	(void)listener;
+	struct wlr_virtual_keyboard_v1 *vk = data;
+	struct wlr_keyboard *kb = &vk->keyboard;
+	wlr_seat_set_keyboard(server.seat, kb);
+	if (server.inj_key.notify != NULL) {
+		return;
 	}
-	default:
-		break;
-	}
+	server.inj_key.notify = route_key;
+	wl_signal_add(&kb->events.key, &server.inj_key);
+	server.inj_mods.notify = route_modifiers;
+	wl_signal_add(&kb->events.modifiers, &server.inj_mods);
 }
 
 // new_toplevel_cb —— xdg toplevel 就绪。wlroots 0.18 语义：new_surface 只在
@@ -176,8 +178,6 @@ int main(int argc, char **argv) {
 		wlr_log(WLR_ERROR, "headless 后端创建失败");
 		return 1;
 	}
-	server.new_input.notify = new_input_cb;
-	wl_signal_add(&server.backend->events.new_input, &server.new_input);
 	server.renderer = wlr_renderer_autocreate(server.backend);
 	if (server.renderer == NULL) {
 		wlr_log(WLR_ERROR, "渲染器创建失败");
@@ -219,8 +219,20 @@ int main(int argc, char **argv) {
 	}
 
 	// 虚拟输入管理器：注入客户端经协议创建设备。
-	wlr_virtual_pointer_manager_v1_create(server.display);
-	wlr_virtual_keyboard_manager_v1_create(server.display);
+	// 虚拟输入管理器：注入客户端经协议创建设备；设备就绪事件从
+	// manager 的 new_virtual_* 信号取（不经 backend new_input）。
+	struct wlr_virtual_pointer_manager_v1 *vp_mgr =
+		wlr_virtual_pointer_manager_v1_create(server.display);
+	if (vp_mgr != NULL) {
+		server.new_input.notify = new_virtual_pointer_cb;
+		wl_signal_add(&vp_mgr->events.new_virtual_pointer, &server.new_input);
+	}
+	struct wlr_virtual_keyboard_manager_v1 *kb_mgr =
+		wlr_virtual_keyboard_manager_v1_create(server.display);
+	if (kb_mgr != NULL) {
+		server.new_keyboard.notify = new_virtual_keyboard_cb;
+		wl_signal_add(&kb_mgr->events.new_virtual_keyboard, &server.new_keyboard);
+	}
 
 	// seat：指针 + 键盘能力。
 	server.seat = wlr_seat_create(server.display, "seat0");

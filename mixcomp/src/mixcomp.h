@@ -71,8 +71,9 @@ struct mixcomp_server {
 	// 内建 wayland 客户端（virtual pointer/keyboard 的注入通道）。
 	struct wl_display *inj_display;
 	struct wl_event_source *inj_src;
-	// 注入事件路由（new_input 时挂接，见 main.c）。
+	// 虚拟设备管理器就绪（new_virtual_*）与注入事件路由（见 main.c）。
 	struct wl_listener new_input;
+	struct wl_listener new_keyboard;
 	struct wl_listener inj_motion;
 	struct wl_listener inj_button;
 	struct wl_listener inj_axis;
