@@ -1,0 +1,801 @@
+/* mixumOS 控制台:手写样式,平实工具风,无组件库。 */
+
+:root {
+  --bg: #f4f4f2;
+  --panel: #ffffff;
+  --panel-2: #fafaf8;
+  --border: #dcdcd6;
+  --border-soft: #e8e8e2;
+  --text: #22221f;
+  --muted: #77776e;
+  --accent: #3a6ea5;
+  --accent-soft: #e3ecf5;
+  --ok: #3f7d44;
+  --warn: #a5703a;
+  --err: #a53a3a;
+  --gray: #8a8a82;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'PingFang SC', 'Segoe UI', sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  height: 46px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.conn .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--gray);
+}
+
+.conn.status-connected .dot {
+  background: var(--ok);
+}
+
+.conn.status-connecting .dot {
+  background: var(--warn);
+}
+
+.conn.status-disconnected .dot {
+  background: var(--gray);
+}
+
+.server-info {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar .btn {
+  margin-left: auto;
+}
+
+/* ---------- 三栏布局 ---------- */
+
+.columns {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(320px, 25%) minmax(0, 1fr) minmax(320px, 27%);
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+
+.col:last-child {
+  border-right: none;
+}
+
+.col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-weight: 600;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border-soft);
+  flex: none;
+}
+
+.col-head-meta {
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.col-head .btn {
+  margin-left: auto;
+}
+
+.col-head-meta + .btn {
+  margin-left: 0;
+}
+
+.col-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.empty {
+  padding: 18px 12px;
+  color: var(--muted);
+}
+
+/* ---------- 表单 ---------- */
+
+.task-form {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--panel-2);
+}
+
+textarea,
+input,
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  width: 100%;
+}
+
+textarea:focus,
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+textarea {
+  resize: vertical;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field > span,
+.field-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.form-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.param-rows {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.param-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr 28px;
+  gap: 6px;
+  align-items: center;
+}
+
+.snap-policy {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.check input {
+  width: auto;
+}
+
+/* ---------- 按钮 ---------- */
+
+.btn {
+  font: inherit;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  color: #fff;
+  background: #32619a;
+}
+
+.btn-small {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-icon {
+  padding: 3px 0;
+  width: 28px;
+  text-align: center;
+}
+
+/* ---------- 任务列表 ---------- */
+
+.task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+}
+
+.task-item:hover {
+  background: var(--panel-2);
+}
+
+.task-item.selected {
+  background: var(--accent-soft);
+}
+
+.task-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-instruction {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.state-badge {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #fff;
+  background: var(--gray);
+}
+
+.state-queued .state-badge {
+  background: var(--gray);
+}
+
+.state-running .state-badge {
+  background: var(--accent);
+}
+
+.state-suspended .state-badge {
+  background: var(--warn);
+}
+
+.state-completed .state-badge {
+  background: var(--ok);
+}
+
+.state-failed .state-badge {
+  background: var(--err);
+}
+
+.state-canceled .state-badge {
+  background: var(--gray);
+}
+
+/* ---------- 事件流 ---------- */
+
+.event-panel {
+  flex: none;
+  height: 40%;
+  min-height: 140px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+
+.event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  font-weight: 600;
+  font-size: 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.event-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.event {
+  display: flex;
+  gap: 8px;
+  padding: 1px 12px;
+  line-height: 1.5;
+}
+
+.ev-ts {
+  color: var(--muted);
+  flex: none;
+}
+
+.ev-type {
+  color: var(--accent);
+  flex: none;
+  min-width: 64px;
+}
+
+.ev-log .ev-data,
+.ev-error .ev-data {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.ev-error .ev-type,
+.ev-error .ev-data {
+  color: var(--err);
+}
+
+.ev-window .ev-data {
+  color: var(--warn);
+}
+
+/* ---------- 窗口 ---------- */
+
+.win-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 34%;
+  overflow-y: auto;
+  flex: none;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.win-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-soft);
+  min-width: 0;
+}
+
+.win-item:hover {
+  background: var(--panel-2);
+}
+
+.win-item.selected {
+  background: var(--accent-soft);
+}
+
+.win-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.win-meta {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mode-badge {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #fff;
+  background: var(--gray);
+}
+
+.mode-agent {
+  background: var(--warn);
+}
+
+.mode-user {
+  background: var(--accent);
+}
+
+.mode-free {
+  background: var(--gray);
+}
+
+.canvas-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.canvas-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.canvas-title {
+  font-weight: 600;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-meta {
+  color: var(--muted);
+  font-size: 12px;
+  flex: 1;
+  text-align: right;
+}
+
+.canvas-head .btn {
+  flex: none;
+}
+
+.canvas-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #2b2b28;
+  position: relative;
+  overflow: hidden;
+}
+
+.canvas-wrap canvas {
+  max-width: 100%;
+  max-height: 100%;
+  outline: none;
+}
+
+.canvas-wrap canvas.input-active {
+  cursor: none;
+}
+
+.canvas-hint {
+  position: absolute;
+  color: #d0d0c8;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 6px 12px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.canvas-error {
+  padding: 8px 12px;
+  color: var(--err);
+  background: #f7e8e8;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.canvas-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+/* ---------- 快照树 ---------- */
+
+.snap-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--panel-2);
+}
+
+.tree-svg {
+  display: block;
+}
+
+.snap-node {
+  cursor: pointer;
+}
+
+.node-box {
+  fill: var(--panel);
+  stroke-width: 1.5;
+}
+
+.snap-node.selected .node-box {
+  stroke-width: 2.5;
+}
+
+.snap-node.head .node-box {
+  stroke-width: 2.5;
+}
+
+.node-label {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.node-branch {
+  font-size: 10px;
+}
+
+.node-meta {
+  font-size: 10px;
+  fill: var(--muted);
+}
+
+.node-head-mark {
+  font-size: 9px;
+  font-weight: 700;
+  fill: var(--accent);
+  text-anchor: end;
+}
+
+.snap-detail {
+  flex: none;
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--panel);
+}
+
+.snap-detail-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.snap-detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* ---------- 弹层 ---------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(30, 30, 28, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 16px;
+}
+
+.modal {
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 18px;
+  width: 460px;
+  max-width: 100%;
+  max-height: 90dvh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+.modal-small {
+  width: 380px;
+}
+
+.modal h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ---------- 提示条 ---------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  background: #2b2b28;
+  color: #f4f4f2;
+  padding: 8px 16px;
+  border-radius: 5px;
+  z-index: 60;
+  max-width: 80%;
+  font-size: 13px;
+}
+
+.toast.error {
+  background: var(--err);
+}
+
+/* ---------- 窄屏(手机):三栏变三页签 ---------- */
+
+.tabs {
+  display: none;
+  flex: none;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.tab {
+  flex: 1;
+  font: inherit;
+  padding: 11px 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  border-right: 1px solid var(--border-soft);
+}
+
+.tab:last-child {
+  border-right: none;
+}
+
+.tab.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+@media (max-width: 980px) {
+  .columns {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  .col {
+    display: none;
+    border-right: none;
+  }
+
+  .columns.view-tasks .col-tasks,
+  .columns.view-windows .col-windows,
+  .columns.view-snaps .col-snaps {
+    display: flex;
+  }
+
+  .tabs {
+    display: flex;
+  }
+
+  .server-info {
+    display: none;
+  }
+
+  .event-panel {
+    height: 46%;
+  }
+}

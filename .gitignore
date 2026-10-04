@@ -1,2 +1,4 @@
 build/
 reference/build/
+console/node_modules/
+console/dist/
