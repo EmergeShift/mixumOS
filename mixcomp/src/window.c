@@ -131,13 +131,20 @@ static int timer_cb(void *data) {
 					if (wlr_texture_read_pixels(tex, &opts)) {
 						stream_send_frame(w->server, w, frame_buf,
 								(int)width * 4, width, height, fmt);
+					} else {
+						wlr_log(WLR_ERROR, "窗口 %u 读像素失败 fmt=%d", w->id, (int)fmt);
 					}
 					if (owned != NULL) {
 						wlr_texture_destroy(owned);
 					}
+				} else {
+					wlr_log(WLR_ERROR, "窗口 %u 无可读纹理", w->id);
 				}
 			}
 		}
+	} else if (w->want_stream) {
+		wlr_log(WLR_ERROR, "窗口 %u 捕获跳过: buffer=%p mapped=%d", w->id,
+				(void *)w->surface->buffer, w->surface->mapped);
 	}
 	return 0; // 继续按既有间隔触发
 }
