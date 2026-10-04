@@ -1,0 +1,29 @@
+# mixum-ctl —— mixumOS 主机侧 CLI(电力钩子/快照推送/本地视图)。
+#
+# 【占位包】Rust 版(rust/crates/mixum-ctl)就绪前先占住发行版包位,
+# 包内只带说明文档;就绪后只改 build()/package()(crate 构建,
+# /usr/bin/mixum-ctl + 补全),其余不动。
+pkgname=mixum-ctl
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="mixumOS 主机侧 CLI(占位包,待 Rust crate 就绪)"
+arch=(aarch64 x86_64)
+url="https://github.com/mixumos/mixumos"
+license=('LicenseRef-Proprietary')  # 仓库暂无 LICENSE 文件,定稿后替换
+depends=(glibc)
+source=()
+sha256sums=()
+
+build() {
+	# 占位:待 mixum-ctl crate 就绪后替换为 cargo 构建。
+	return 0
+}
+
+check() {
+	# 占位包无二进制,文档文件存在性即检查项。
+	test -f README.md
+}
+
+package() {
+	install -Dm644 README.md "$pkgdir/usr/share/doc/mixum-ctl/README.md"
+}
