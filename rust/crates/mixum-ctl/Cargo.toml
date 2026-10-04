@@ -1,0 +1,26 @@
+[package]
+name = "mixum-ctl"
+description = "mixumOS 主机侧 CLI、连接管理与本地窗口视图"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+dirs = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+http = { workspace = true }
+mixum-protocol = { path = "../mixum-protocol" }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[[bin]]
+name = "mixum-ctl"
+path = "src/main.rs"
