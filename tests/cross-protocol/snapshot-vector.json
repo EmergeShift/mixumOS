@@ -1,0 +1,55 @@
+{
+  "chunks": {
+    "6d2d864da96b9b3c4716d994a68598c3be272197074273d56b0e5757917117aa": {
+      "name": "data.bin",
+      "plain_hex": "e59bbae5ae9ae59d97e58685e5aeb9efbc9a7631"
+    },
+    "9daeec4ad73647b1ed59251dd950f4870c75a6e41d2bc47655479a31fd03a461": {
+      "name": "hello.txt",
+      "plain_hex": "6d6978756d20736e617073686f742063726f737320766563746f720a"
+    }
+  },
+  "expect": {
+    "caps": [
+      "task.run",
+      "snap.sync"
+    ],
+    "sub": "cross-vector"
+  },
+  "gcm": {
+    "ciphertext_hex": "000102030405060708090a0bf74ce6df81ab59fc3ab8aa6f55ff718d8328a83fbf02a9a8205df95d777c24aebd0842bb92faf0bdf6f4cbca3061a9451958dc96b34e9654f8",
+    "hash": "9daeec4ad73647b1ed59251dd950f4870c75a6e41d2bc47655479a31fd03a461",
+    "master_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "nonce_hex": "000102030405060708090a0b",
+    "store_id": "vector-store"
+  },
+  "manifest": {
+    "dirs": [
+      {
+        "mode": 493,
+        "path": "docs"
+      }
+    ],
+    "files": [
+      {
+        "chunks": [
+          "6d2d864da96b9b3c4716d994a68598c3be272197074273d56b0e5757917117aa"
+        ],
+        "mode": 420,
+        "path": "data.bin",
+        "size": 20
+      },
+      {
+        "chunks": [
+          "9daeec4ad73647b1ed59251dd950f4870c75a6e41d2bc47655479a31fd03a461"
+        ],
+        "mode": 420,
+        "path": "hello.txt",
+        "size": 28
+      }
+    ],
+    "version": 1
+  },
+  "seed_hex": "abababababababababababababababababababababababababababababababab",
+  "token": "mixum1.eyJzdWIiOiJjcm9zcy12ZWN0b3IiLCJjYXBzIjpbInRhc2sucnVuIiwic25hcC5zeW5jIl0sImV4cCI6NDEwMjQ0NDgwMCwiaWF0IjoxNzAwMDAwMDAwLCJqdGkiOiIwMWExMDY1Ny1iY2MyLTcxYTAtOWJiMS0yZjJkYjMyNzBiMjUifQ.CvkaS2vrZUOdVWQ46QgY5xGw6h89R_Hd3LBaSZibbx3PHf0oVnLF6ieF4tXrJ3MeUz4n8FhQL-EVU-iKzKpMDA"
+}
