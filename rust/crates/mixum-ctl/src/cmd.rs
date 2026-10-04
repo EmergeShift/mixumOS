@@ -151,7 +151,11 @@ pub fn submit_payload(
     agent: &Option<String>,
     values: &[(String, String)],
 ) -> Value {
-    let mut payload = json!({ "instruction": instruction, "params": params(values) });
+    let mut payload = json!({
+        "instruction": instruction,
+        "params": params(values),
+        "snapshotPolicy": { "pre": true, "kind": "disk" }
+    });
     if let Some(agent) = agent {
         payload["agent"] = Value::String(agent.clone());
     }
@@ -172,5 +176,7 @@ mod tests {
         assert_eq!(value["instruction"], "执行");
         assert_eq!(value["agent"], "shell");
         assert_eq!(value["params"]["cmd"], "true");
+        assert_eq!(value["snapshotPolicy"]["pre"], true);
+        assert_eq!(value["snapshotPolicy"]["kind"], "disk");
     }
 }

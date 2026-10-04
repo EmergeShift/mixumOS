@@ -12,7 +12,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
@@ -59,7 +59,7 @@ pub struct Client {
     tx: mpsc::Sender<Message>,
     pending: Pending,
     events: Arc<tokio::sync::Mutex<mpsc::Receiver<Envelope>>>,
-    frames: Arc<tokio::sync::Mutex<mpsc::Receiver<BinaryFrame>>>,
+    frames: broadcast::Sender<BinaryFrame>,
     token: String,
     pub fingerprint: String,
 }
@@ -235,9 +235,10 @@ impl Client {
         let (mut write, mut read) = stream.split();
         let (tx, mut outgoing) = mpsc::channel::<Message>(64);
         let (event_tx, event_rx) = mpsc::channel(128);
-        let (frame_tx, frame_rx) = mpsc::channel(128);
+        let (frame_tx, _) = broadcast::channel(128);
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let reader_pending = Arc::clone(&pending);
+        let reader_frames = frame_tx.clone();
         tokio::spawn(async move {
             while let Some(message) = read.next().await {
                 match message {
@@ -259,7 +260,7 @@ impl Client {
                         Err(_) => {}
                     },
                     Ok(Message::Binary(data)) => {
-                        let _ = frame_tx.send(BinaryFrame(data.to_vec())).await;
+                        let _ = reader_frames.send(BinaryFrame(data.to_vec()));
                     }
                     Ok(Message::Close(_)) | Err(_) => break,
                     _ => {}
@@ -277,7 +278,7 @@ impl Client {
             tx,
             pending,
             events: Arc::new(tokio::sync::Mutex::new(event_rx)),
-            frames: Arc::new(tokio::sync::Mutex::new(frame_rx)),
+            frames: frame_tx,
             token: options.token.clone(),
             fingerprint,
         };
@@ -327,8 +328,8 @@ impl Client {
         self.events.lock().await.recv().await
     }
 
-    pub async fn next_frame(&self) -> Option<BinaryFrame> {
-        self.frames.lock().await.recv().await
+    pub fn subscribe_frames(&self) -> broadcast::Receiver<BinaryFrame> {
+        self.frames.subscribe()
     }
 
     pub fn token(&self) -> &str {
@@ -353,6 +354,7 @@ impl From<EnvelopeError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::broadcast;
 
     #[test]
     fn fingerprint_is_colon_separated_sha256() {
@@ -370,5 +372,15 @@ mod tests {
         assert!(content.contains("wss://example.test:7601"));
         assert!(content.contains("AA:BB"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn frame_subscriptions_are_independent() {
+        let (sender, _) = broadcast::channel(4);
+        let mut first = sender.subscribe();
+        let mut second = sender.subscribe();
+        sender.send(BinaryFrame(vec![1, 2, 3])).unwrap();
+        assert_eq!(first.recv().await.unwrap().0, vec![1, 2, 3]);
+        assert_eq!(second.recv().await.unwrap().0, vec![1, 2, 3]);
     }
 }
