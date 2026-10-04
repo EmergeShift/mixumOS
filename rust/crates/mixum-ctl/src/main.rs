@@ -40,17 +40,27 @@ async fn run() -> Result<(), Error> {
     }
     if let Command::Power(args) = &cli.command {
         if args.watch {
+            let configured_remote = power::load()?.remote;
             let options = connection_options(&cli, None, None, None)?;
-            return power::watch_sleep(options, args.remote.clone(), args.remote_token.clone())
-                .await;
+            return power::watch_sleep(
+                options,
+                args.remote.clone().or(configured_remote),
+                args.remote_token.clone(),
+            )
+            .await;
         }
         if !args.simulate_sleep {
             println!("{}", power::PLATFORM_NOTES);
             return Ok(());
         }
+        let configured_remote = power::load()?.remote;
         let options = connection_options(&cli, None, None, None)?;
-        return power::simulate_sleep(options, args.remote.clone(), args.remote_token.clone())
-            .await;
+        return power::simulate_sleep(
+            options,
+            args.remote.clone().or(configured_remote),
+            args.remote_token.clone(),
+        )
+        .await;
     }
     let client = Client::connect(connection_options(&cli, None, None, None)?).await?;
     match cli.command {
@@ -121,6 +131,8 @@ async fn task_command(client: &Client, command: TaskSubcommand) -> Result<(), Er
             agent,
             params,
         } => {
+            // 先订阅再提交，避免极快任务在 task.submit 与 task.events 之间丢事件。
+            let _ = client.call("task.events", serde_json::json!({})).await;
             let reply = client
                 .call(
                     "task.submit",
@@ -128,9 +140,11 @@ async fn task_command(client: &Client, command: TaskSubcommand) -> Result<(), Er
                 )
                 .await?;
             let task = reply.payload.unwrap_or_default();
-            let id = task["id"].as_str().unwrap_or_default().to_owned();
+            let id = task["id"]
+                .as_str()
+                .ok_or_else(|| Error::Protocol("task.submit 未返回任务 id".into()))?
+                .to_owned();
             print_json(Some(task));
-            let _ = client.call("task.events", serde_json::json!({})).await;
             loop {
                 let status = tokio::select! {
                     event = client.next_event() => {

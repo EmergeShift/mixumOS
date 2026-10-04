@@ -44,7 +44,8 @@ pub async fn serve(client: Client, bind: &str) -> Result<(), Error> {
                                 serde_json::json!({ "window": window, "fps": 10 }),
                             )
                             .await;
-                        while let Some(frame) = client.next_frame().await {
+                        let mut frames = client.subscribe_frames();
+                        while let Ok(frame) = frames.recv().await {
                             let matches = unmarshal_video(&frame.0)
                                 .map(|video| video.window_id == window)
                                 .unwrap_or(false);
@@ -54,6 +55,9 @@ pub async fn serve(client: Client, bind: &str) -> Result<(), Error> {
                                 break;
                             }
                         }
+                        let _ = client
+                            .call("display.detach", serde_json::json!({ "window": window }))
+                            .await;
                     }
                 }
                 return;
@@ -99,11 +103,12 @@ pub async fn record(
         .await?;
     std::fs::create_dir_all(out)?;
     let mut saved = 0;
+    let mut frames = client.subscribe_frames();
     while saved < count {
-        let frame = client
-            .next_frame()
+        let frame = frames
+            .recv()
             .await
-            .ok_or_else(|| Error::WebSocket("帧流已关闭".into()))?;
+            .map_err(|e| Error::WebSocket(format!("帧流已关闭: {e}")))?;
         let parsed = unmarshal_video(&frame.0).map_err(|e| Error::Protocol(e.to_string()))?;
         if parsed.window_id != window {
             continue;
