@@ -1,0 +1,21 @@
+[Unit]
+# mixumd 服务单元。
+# 装配顺序:mixumd 先于 compositor(mixcomp 以客户端身份连接它的
+# display.sock);工作目录 /var/lib/mixum(状态目录由 StateDirectory
+# 建,属主 mixum,用户由 mixum-base 的 sysusers.d 创建)。
+Description=mixumOS agent daemon(任务引擎/快照引擎/显示 broker/WSS)
+After=network-online.target
+Wants=network-online.target
+# compositor 依赖本服务的 display.sock,先于它启动
+Before=mixcomp.service
+
+[Service]
+User=mixum
+StateDirectory=mixum
+WorkingDirectory=/var/lib/mixum
+ExecStart=/usr/bin/mixumd --config /etc/mixum/mixumd.json
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
