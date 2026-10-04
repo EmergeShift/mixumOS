@@ -1,0 +1,55 @@
+# mixum-base —— mixumOS 元包:一次装齐 mixum 组件,并布好系统布局
+# (mixum 系统用户、/var/lib/mixum 目录、默认配置)。
+# 镜像组装时以本包为装配锚点(pacstrap base + mixum-base)。
+pkgname=mixum-base
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="mixumOS 元包:mixum 组件集合 + 系统用户/目录/默认配置"
+arch=(aarch64 x86_64)
+url="https://github.com/mixumos/mixumos"
+license=('LicenseRef-Proprietary')  # 仓库暂无 LICENSE 文件,定稿后替换
+depends=(mixum-agentd mixcomp mixum-ctl)
+checkdepends=(python)  # check() 用 python 做 JSON 语法校验
+backup=('etc/mixum/mixumd.json')
+source=()
+sha256sums=()
+
+build() {
+	# 元包,无构建步骤。
+	return 0
+}
+
+check() {
+	# check 先于 package 跑,$pkgdir 为空:JSON 校验对源文件做,
+	# sysusers/tmpfiles 的存在性由 package() 的 install 保证。
+	# 字段与 reference/cmd/mixumd 的默认配置对齐(改协议时同步)。
+	python3 - "$startdir/mixumd.json" <<'EOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    cfg = json.load(f)
+for key in ("listen", "dataDir", "workRoot", "tokenTtlSec"):
+    assert key in cfg, f"缺少字段 {key}"
+print("mixumd.json 字段校验通过")
+EOF
+}
+
+package() {
+	# sysusers.d:mixum 系统用户(属主目录见 tmpfiles.d)
+	install -Dm644 /dev/null "$pkgdir/usr/lib/sysusers.d/mixum.conf"
+	printf '%s\n' \
+		'u mixum - "mixumOS agent runtime" /var/lib/mixum' \
+		> "$pkgdir/usr/lib/sysusers.d/mixum.conf"
+
+	# tmpfiles.d:/var/lib/mixum 布局;work/ 是被快照的工作区根,
+	# k8s 场景挂独立卷(快照引擎 skip 列表已排除自身存储)。
+	install -Dm644 /dev/null "$pkgdir/usr/lib/tmpfiles.d/mixum.conf"
+	printf '%s\n' \
+		'd /var/lib/mixum 0750 mixum mixum -' \
+		'd /var/lib/mixum/work 0750 mixum mixum -' \
+		'd /run/mixum 0750 mixum mixum -' \
+		> "$pkgdir/usr/lib/tmpfiles.d/mixum.conf"
+
+	# 默认配置(字段与 reference/cmd/mixumd defaultConfig 一致;
+	# Rust 版就绪后随 mixum-protocol 核对)
+	install -Dm644 "$startdir/mixumd.json" "$pkgdir/etc/mixum/mixumd.json"
+}
