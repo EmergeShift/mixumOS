@@ -5,7 +5,7 @@
 # 见 docs/distro.md「版本与发布」。
 pkgname=mixcomp
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2  # 第二版:同源重打,用于 pacman -Syu 单包升级场景验证(见 goals/notes/dist.md)
 pkgdesc="mixumOS 的魔改 Wayland 合成器:每窗口独立虚拟输出,JPEG 帧流 + 输入注入"
 arch=(aarch64 x86_64)
 url="https://github.com/mixumos/mixumos"
