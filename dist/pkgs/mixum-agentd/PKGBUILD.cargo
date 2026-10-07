@@ -1,0 +1,49 @@
+# mixum-agentd —— mixumOS 容器内守护进程(任务引擎/快照/显示 broker/WSS)。
+#
+# Rust 版 PKGBUILD:从 rust/crates/mixum-agentd 构建,启用 real-snapshot
+# 特性(真实 CAS+树快照引擎; criu 为 optdepends)。二进制沿用历史名
+# mixumd(e2e 入口脚本按此名调用)。
+#
+# 构建前提(见 goals/notes/agentd.md):
+#   - rustup 目标 = 宿主架构(native 构建,交叉仍走 VM 内同架构容器)
+#   - real-snapshot 依赖 aws-lc-sys:Arch 构建容器需 pacman -S cmake perl
+#   - 源码布局:makepkg 在 rust/ 工作区内执行 cargo(本文件位于
+#     dist/pkgs/mixum-agentd/,由 build-repo.sh 把 rust/ 树同步到 $startdir)
+pkgname=mixum-agentd
+pkgver=0.1.0
+pkgrel=2
+pkgdesc="mixumOS 容器内守护进程:任务引擎/快照引擎/显示 broker/WSS 服务"
+arch=(aarch64 x86_64)
+url="https://github.com/mixumos/mixumos"
+license=('LicenseRef-Proprietary')  # 仓库暂无 LICENSE 文件,定稿后替换
+depends=(glibc gcc-libs)
+makedepends=(rust clang cmake perl)
+optdepends=('criu: 内存快照(hybrid)支持')
+source=()
+sha256sums=()
+
+prepare() {
+	export CARGO_HOME="$startdir/.cargo-home"
+	cd "$startdir/rust"
+	cargo fetch --locked 2>/dev/null || cargo fetch
+}
+
+build() {
+	export CARGO_HOME="$startdir/.cargo-home"
+	cd "$startdir/rust"
+	cargo build --release --locked -p mixum-agentd --features real-snapshot \
+		2>/dev/null || cargo build --release -p mixum-agentd --features real-snapshot
+}
+
+check() {
+	export CARGO_HOME="$startdir/.cargo-home"
+	cd "$startdir/rust"
+	cargo test --release -p mixum-protocol -q
+}
+
+package() {
+	install -Dm755 "$startdir/rust/target/release/mixum-agentd" \
+		"$pkgdir/usr/bin/mixumd"
+	install -Dm644 "$startdir/mixumd.service" "$pkgdir/usr/lib/systemd/system/mixumd.service"
+	install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/mixum-agentd/README.md"
+}
