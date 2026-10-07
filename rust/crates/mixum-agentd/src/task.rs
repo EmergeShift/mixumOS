@@ -466,7 +466,15 @@ impl AgentDriver for ExternalDriver {
             .clone()
             .or_else(|| task.params.get("agentCmd").cloned())
             .ok_or("external 驱动：未指定 agent 可执行文件")?;
-        let mut command = Command::new(&command);
+        // command 串允许带参数（如 "cli --agent-bridge"）：经 sh -c 执行，
+        // 避免把整串当作单个可执行路径导致 ENOENT。
+        let mut command = if command.contains(' ') {
+            let mut inner = Command::new("sh");
+            inner.arg("-c").arg(&command);
+            inner
+        } else {
+            Command::new(&command)
+        };
         command
             .kill_on_drop(true)
             .env("MIXUM_INSTRUCTION", &task.instruction)
