@@ -131,7 +131,7 @@ Makefile            make dist / dist-repo / dist-image / dist-e2e / dist-clean
    dist/out/BUILDINFO);mixum-ctl 纯文档占位。Rust 版就绪后只换
    build()/package() 的来源,包名与路径不变。
 8. **mixcomp 的 check() 对已知启动段错误默认宽限**(虚拟 pointer 创建
-   时序,goals/mixcomp-runtime.md 在修),`MIXCOMP_SMOKE_STRICT=1` 收紧;
+   时序,在修),`MIXCOMP_SMOKE_STRICT=1` 收紧;
    修复合入后应把默认值翻成严格。另:源码树里混有历史误提交的 .o 文件,
    build() 先 make clean 兜底。
 

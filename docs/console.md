@@ -96,7 +96,7 @@ fakecomp 演示容器、`scripts/e2e-check.mjs` 冒烟脚本。
 边界:本模块只新增 `console/` 与本文档;`reference/`、`mixcomp/`、
 `rust/`、`dist/`、`tests/` 只读。
 
-遗留(详见 `goals/notes/console.md`):
+遗留:
 
 - 纯浏览器端无法做 TOFU 指纹固定(平台限制),待 mixum-ctl 托管方案;
 - 快照树无推送,新快照需手动刷新;

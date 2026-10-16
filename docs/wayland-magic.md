@@ -183,5 +183,5 @@ reference 的 e2eclient(gorilla/websocket)默认读缓冲 4096,单帧超过
 wire 层按 protocol.md 手写,兼作协议交叉验证)。displaytest 顺带确认:
 reference 的 handlers_display 把 Inject 的所有错误一律映射为 conflict
 (按 §4 语义「窗口不存在」应为 not_found),agent 模式亦无调用方接线
-(SetAgentMode 无人调用)——两者属 agentd 范围,见 goals/notes/mixcomp.md。
+(SetAgentMode 无人调用)——两者属 agentd 范围。
 
