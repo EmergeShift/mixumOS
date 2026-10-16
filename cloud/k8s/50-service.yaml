@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mixumos-server
+  namespace: mixumos
+  labels:
+    app.kubernetes.io/name: mixumos-server
+spec:
+  selector:
+    app.kubernetes.io/name: mixumos-server
+  ports:
+    - name: wss
+      port: 7601
+      targetPort: wss
+---
+# WSS 入口。两种配置:
+# 1) Ingress 终止 TLS(终端用户证书由平台管理)——必须允许 WebSocket 升级;
+# 2) 端到端 TLS(推荐):SSL-passthrough,容器内自签 + 客户端指纹固定(TOFU)。
+# traefik 的 passthrough 与 nginx 的 ssl-passthrough 注释示例见 docs/security.md。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mixumos-server
+  namespace: mixumos
+  annotations:
+    # nginx 示例:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true" # 端到端 TLS
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: mixumos.example.com # 部署时替换
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mixumos-server
+                port:
+                  number: 7601

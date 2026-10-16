@@ -1,0 +1,30 @@
+# e2e 测试镜像（mixumOS × redesign 集成变体）：
+# mixum-agentd(real-snapshot) + redesign-cli(--agent-bridge) + mixcomp。
+# 基于 Dockerfile.e2e-rust；额外注入 redesign external agent。
+FROM alpine:3.21
+
+RUN apk add --no-cache \
+	make build-base pkgconf wlroots-dev json-c-dev libxkbcommon-dev \
+	libjpeg-turbo-dev wayland-protocols \
+	wlroots json-c libjpeg-turbo libxkbcommon \
+	foot font-noto mesa-egl mesa-gles bash
+
+# mixcomp 源码内构建（协议头由 Makefile 用 wayland-scanner 现场生成）
+WORKDIR /opt/mixcomp
+COPY mixcomp/ /opt/mixcomp/
+RUN make && cp mixcomp /usr/local/bin/
+
+# mixum-agentd（Rust, real-snapshot）
+COPY build/mixum-agentd-arm64 /usr/local/bin/mixumd
+
+# redesign external agent（静态 musl 二进制 + 桥模式由 --agent-bridge 启用）
+COPY build/redesign-cli-arm64 /usr/local/bin/redesign-cli
+
+# agentd 配置：声明 redesign external agent（桥协议见 mixumos docs/agent-bridge.md）
+RUN mkdir -p /etc/mixum /etc/redesign
+COPY tests/integration/mixumd-redesign.json /etc/mixum/mixumd.json
+COPY tests/integration/entrypoint-mixum.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 7601
+ENTRYPOINT ["/entrypoint.sh"]

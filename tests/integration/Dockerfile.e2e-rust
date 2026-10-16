@@ -1,0 +1,23 @@
+# e2e 测试镜像（Rust 守护进程变体）：mixum-agentd + mixcomp + foot。
+# 与 Dockerfile.e2e 唯一区别：mixumd 为 Rust 实现（mixum-agentd，
+# real-snapshot 特性的 musl arm64 产物）。
+# 仅用于本地集成测试；正式镜像见 os/image/Dockerfile。
+FROM alpine:3.21
+
+RUN apk add --no-cache \
+	make build-base pkgconf wlroots-dev json-c-dev libxkbcommon-dev \
+	libjpeg-turbo-dev wayland-protocols \
+	wlroots json-c libjpeg-turbo libxkbcommon \
+	foot font-noto mesa-egl mesa-gles bash
+
+# mixcomp 源码内构建（协议头由 Makefile 用 wayland-scanner 现场生成）
+WORKDIR /opt/mixcomp
+COPY mixcomp/ /opt/mixcomp/
+RUN make && cp mixcomp /usr/local/bin/
+
+COPY build/mixum-agentd-arm64 /usr/local/bin/mixumd
+COPY tests/integration/entrypoint-rust.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 7601
+ENTRYPOINT ["/entrypoint.sh"]
