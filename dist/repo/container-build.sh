@@ -6,20 +6,14 @@
 # 由 dist/repo/build-repo.sh 在容器里调用;不在宿主机直接跑。
 #   用法:container-build.sh <架构名>        # aarch64 | x86_64
 # 约定挂载:仓库只读挂 /build/mixumos,产物目录读写挂 /out;
-# 前置:宿主已用 go 交叉编译出 /out/build/mixumd-<goarch>(占位源)。
+# 前置:宿主已导出 /out/build/rust 与 /out/build/cross-protocol(见 build-repo.sh)。
 set -euo pipefail
 
-ARCH="${1:?用法: container-build.sh <aarch64|x86_64>}"
+ARCH="${1:?用法:container-build.sh <aarch64|x86_64>}"
 GIT_SRC="/build/mixumos"
 BUILD="/build/pkgs"
 OUT_REPO="/out/repo-$ARCH"
 COMMIT="${_commit:-HEAD}"
-case "$ARCH" in
-	aarch64) GOARCH=arm64 ;;
-	x86_64)  GOARCH=amd64 ;;
-	*) echo "未知架构:$ARCH" >&2; exit 1 ;;
-esac
-MIXUMD_BIN="/out/build/mixumd-$GOARCH"
 
 echo "==> [container] 架构 $ARCH,commit ${COMMIT:0:12}"
 
@@ -46,11 +40,6 @@ for kr in /usr/share/pacman/keyrings/*.gpg; do
 done
 pacman -Syu --noconfirm --needed base-devel git >/dev/null
 git config --system --add safe.directory "$GIT_SRC"
-
-[ -f "$MIXUMD_BIN" ] || {
-	echo "缺宿主构建的占位二进制 $MIXUMD_BIN(宿主 go 交叉编译,见 build-repo.sh)" >&2
-	exit 1
-}
 
 # 按 PKGBUILD 声明装依赖(不硬编码,避免两处漂移)
 install_pkgbuild_deps() {
@@ -108,9 +97,11 @@ git config --system --add safe.directory /build/src
 chmod -R a+rX /build/src
 cp -a "$GIT_SRC/dist/pkgs/." "$BUILD/"
 rm -rf "$BUILD/wlroots0.18"
-install -d "$BUILD/mixum-agentd/placeholder"
-# /out 是宿主挂载,执行位可能丢失,显式补
-install -m755 "$MIXUMD_BIN" "$BUILD/mixum-agentd/placeholder/mixumd"
+# mixum-agentd 由 PKGBUILD(cargo)在容器内原生构建:同步 rust/ 与交叉协议向量
+rm -rf "$BUILD/mixum-agentd/rust" "$BUILD/mixum-agentd/tests"
+cp -a /out/build/rust "$BUILD/mixum-agentd/rust"
+install -d "$BUILD/mixum-agentd/tests"
+cp -a /out/build/cross-protocol "$BUILD/mixum-agentd/tests/cross-protocol"
 id builder >/dev/null 2>&1 || useradd -m builder
 chown -R builder:builder "$BUILD"
 

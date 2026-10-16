@@ -74,10 +74,14 @@ mkosi(pacman 从仓库组装)
 - 可复现:PKGBUILD 固定源(sdist + sha256),mkosi 版本锁定;
   构建机差异记录在 `dist/out/BUILDINFO`。
 
-## 6. 与 reference 的关系
+## 6. mixum-agentd 的构建来源
 
-reference/(Go)不进发行版。它的 e2e(tests/integration)保留,
-Rust agentd 就绪后同一套 e2e 换二进制即验协议兼容。
+Go 参考实现已移除(2026-10-16)。mixum-agentd 包由 PKGBUILD(cargo)在
+构建容器内直接构建 Rust 实现:build-repo.sh 导出 rust/ 与
+tests/cross-protocol 进容器,按 PKGBUILD 声明装依赖(rust/clang/cmake/perl)
+后原生编译;二进制沿用历史名 mixumd(e2e 入口脚本按此名调用)。
+原 Go 占位流程(宿主 go 交叉编译 + placeholder 包装)与
+scripts/dist-e2e.sh 一并移除;双架构全链重打待 VM 实测。
 
 ## 7. 工具链落地记录(2026-10-04,module/dist 分支)
 

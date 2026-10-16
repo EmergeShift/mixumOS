@@ -88,9 +88,8 @@ runner 以子进程拉起,stdin/stdout 行分隔 JSON:
   由 runner 缓存或拒绝(driver 可选实现 Suspender,收到暂停时挂起);
 - 任务结束(completed/canceled),窗口全部回 `free`。
 
-## Go 参考实现对照
+## Go 参考实现对照(已移除)
 
-external 桥协议的行为规范在 `reference/internal/task/drivers.go`
-(ExternalDriver),测试见 `reference/internal/task/`。
-Rust 版嵌入接口以 `mixum-agentd` crate 的 trait 为准(阶段 2 定稿,
-本文件同步更新签名)。
+external 桥协议的行为规范原在 Go 参考实现的 `drivers.go`(ExternalDriver),
+已随参考实现移除;行为规范由 `mixum-agentd` 的 Rust 实现与其测试承接,
+嵌入接口以 `mixum-agentd` crate 的 trait 为准。

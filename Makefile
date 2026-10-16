@@ -4,7 +4,6 @@
 #   make dist          包 → 仓库 → 镜像 一条龙(默认 aarch64)
 #   make dist-repo     只出 pacman 包 + 仓库 db
 #   make dist-image    只组装 rootfs + OCI 镜像(需已有仓库)
-#   make dist-e2e      导入镜像并跑 e2e 容器(任务/快照链路验收)
 #   make dist-clean    清理 dist/out/
 #
 # 构建位置:mixumos VM(colima)的 Arch 容器内;宿主机只需 docker CLI。
@@ -17,7 +16,7 @@ export DOCKER_CONTEXT
 # 快速构建用 make dist ARCH=aarch64
 ARCH ?= aarch64 x86_64
 
-.PHONY: dist dist-repo dist-image dist-e2e dist-clean
+.PHONY: dist dist-repo dist-image dist-clean
 
 dist: dist-repo dist-image
 
@@ -29,9 +28,6 @@ dist-repo:
 
 dist-image:
 	bash dist/os/build-image.sh
-
-dist-e2e:
-	bash scripts/dist-e2e.sh $(firstword $(ARCH))
 
 dist-clean:
 	rm -rf dist/out

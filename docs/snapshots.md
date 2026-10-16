@@ -100,9 +100,12 @@ Rust 版可加「保护最近 N 分钟的块」避免与进行中的推送竞态
   反向回迁同理。平台侧(macOS)用 IOKN 通知在盒盖前抢出几秒窗口,
   细节见 host-integration.md(待写)。
 
-## 8. Go 参考实现对照表
+## 8. Go 参考实现对照表(已移除)
 
-| 本文概念 | reference/ 位置 |
+Go 参考实现已移除(2026-10-16),下表保留为概念溯源;行为以
+`rust/crates/mixum-snapshot` 为准。
+
+| 本文概念 | 原 reference/ 位置 |
 |----------|-----------------|
 | CAS + 加密 | internal/snap/chunk.go |
 | 清单/打包/落地/diff | internal/snap/manifest.go |

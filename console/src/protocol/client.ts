@@ -1,6 +1,6 @@
 // 协议客户端:WebSocket + envelope 请求-应答关联 + 二进制帧分发 + 自动重连。
 // 对齐 docs/protocol.md:子协议 mixum.v1,reply op = 请求 op + .ok/.err,
-// 回复用 replyTo 指向请求 id。参考实现 reference/cmd/e2eclient/main.go。
+// 回复用 replyTo 指向请求 id。
 import { parseVideoFrame } from './video'
 import type {
   DisplayAttachResponse,
