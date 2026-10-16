@@ -1,6 +1,6 @@
 # e2e 测试镜像（Rust 守护进程变体）：mixum-agentd + mixcomp + foot。
 # 与 Dockerfile.e2e 唯一区别：mixumd 为 Rust 实现（mixum-agentd，
-# real-snapshot 特性的 musl arm64 产物，构建方式见 goals/notes/agentd.md）。
+# real-snapshot 特性的 musl arm64 产物）。
 # 仅用于本地集成测试；正式镜像见 os/image/Dockerfile。
 FROM alpine:3.21
 

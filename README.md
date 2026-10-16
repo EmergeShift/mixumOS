@@ -39,3 +39,15 @@ docker run -d --name mixum-e2e -p 17601:7601 mixumos-e2e
 简述:`rust/` 核心(workspace),`mixcomp/` C 合成器,
 `reference/` Go 可执行规格(不进发行版),`dist/` 发行版构建,
 `tests/` 集成 e2e,`docs/` 一切设计的唯一真相来源。
+
+## 许可证
+
+本仓库以 [Apache-2.0](LICENSE) 发布。mixcomp 的"魔改 Wayland 合成器"
+指基于 wlroots 自研,仓库不包含任何上游组件的修改版源码:
+
+- 仓库内源码(rust/mixcomp/reference/console/dist 脚本)为原创;
+  构建期拉取的上游 wlroots 0.18.2 tarball 未打补丁(MIT,见其 PKGBUILD);
+- 运行时动态链接的第三方库按各自许可:wayland/wayland-protocols(MIT)、
+  libxkbcommon(MIT)、json-c(MIT)、libjpeg-turbo(IJG/BSD-3)、zstd(BSD);
+- mixumOS 镜像内含 Arch/ALARM 基础系统(glibc/systemd/coreutils 等
+  GPL/LGPL 组件),其源码合规由上游发行仓库满足。

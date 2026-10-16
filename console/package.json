@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "mixumOS Web 控制台(PWA):任务、窗口画布、快照树",
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
