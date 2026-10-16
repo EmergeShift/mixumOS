@@ -54,10 +54,11 @@ mixumOS 是一个基于 Arch Linux 的 **Agent OS 发行版**:它把容器变成
 | 云端 operator | **Rust** | 与核心同 workspace;k8s 交互用 kube-rs |
 | 协议/SDK | **TS + Rust crate** | 客户端两端的形态 |
 
-**reference/(Go)的定位:参考实现。** wire 协议、快照树语义(回退/fork/分叉)、
-接管状态机、跨节点同步协议已经在 Go 实现中被单测和容器 e2e 锁住行为。
-Rust 重写时它充当可执行规格;两侧实现对跑可做协议一致性回归
-(`tests/cross-protocol/`,规划中)。它不进入发行版产物。
+**Go 参考实现的定位(已于 2026-10-16 移除)。** wire 协议、快照树语义
+(回退/fork/分叉)、接管状态机、跨节点同步协议最初由 Go 参考实现以单测
+和容器 e2e 锁定行为,并充当 Rust 重写的可执行规格;Rust 实现落地后参考
+实现完成使命移除,其锁定的行为由 Rust 单测与 `tests/cross-protocol/`
+回归向量(令牌/快照,预生成)承接。
 
 ## 关键数据流
 
@@ -92,7 +93,6 @@ mixumos/
 │       ├── mixum-ctl      主机侧 CLI(电力钩子/快照推送)
 │       └── mixum-operator 云端 k8s operator(后置)
 ├── mixcomp/               C/wlroots 合成器(见 wayland-magic.md)
-├── reference/             Go 参考实现(可执行规格,不进发行版)
 ├── dist/                  发行版构建(见 distro.md)
 │   ├── pkgs/              PKGBUILD(mixum-agentd / mixcomp / mixum-ctl)
 │   ├── repo/              pacman 仓库工具
@@ -101,7 +101,8 @@ mixumos/
 ├── console/               PWA 控制台(后置)
 ├── cloud/                 k8s 清单(后置)
 ├── tests/
-│   └── integration/       容器 e2e(reference 版已通过,Rust 版复用)
+│   ├── integration/       容器 e2e(Rust 版)
+│   └── cross-protocol/    交叉回归向量(令牌/快照,JSON)
 └── proto/v1/              协议的机器可读形态(JSON Schema,后置)
 ```
 
@@ -120,18 +121,20 @@ external 行分隔 JSON 桥、窗口 broker,均使用协议 crate 的类型。
 `real-snapshot` 特性装配,缺省内存桩保证分支可独立构建）；跨节点同步
 （协议 §6）已实现:push.import 对账、0x03 块流哈希校验落 CAS、commit
 落树与远端根标记,推送端为 wss 客户端（自签证书跳过校验,同
-reference client.go）。
+原 Go client.go 行为）。
 
-| 行为 | Go 参考实现 | Rust 实现 | 差异 |
+Go 参考实现已移除(2026-10-16),下表保留为行为溯源对照:
+
+| 行为 | 原 Go 参考实现 | Rust 实现 | 差异 |
 |------|-------------|-----------|------|
 | envelope、令牌、视频帧头 | `reference/internal/wire`、`auth` | `mixum-protocol` | |
 | 任务状态与事件 | `reference/internal/task` | `mixum-agentd::task` | |
 | 快照树 | `reference/internal/snap` | `mixum-snapshot` 适配（`RealSnapshotEngine`） | |
-| 跨节点同步 | `handlers_snap.go`、`client.go` | `mixum-agentd::sync` | `snap.pull` 同 reference 不设处理器（拉取=反向调用对方 push） |
+| 跨节点同步 | `handlers_snap.go`、`client.go` | `mixum-agentd::sync` | `snap.pull` 同原参考实现不设处理器（拉取=反向调用对方 push） |
 | 显示控制通道 | `reference/internal/display` | `mixum-agentd::display` | |
 | 管理 REST／指标 | 后置能力 | 未实现 | 任务书明确排除 |
 
-装配语义对齐 reference/cmd/mixumd:`--config` 支持空格与等号两种形式,
+装配语义:`--config` 支持空格与等号两种形式,
 空配置文件回退默认值;快照引擎 dataDir=`dataDir/snapshots`、
 root=`workRoot`、skip=`.mixum`;bootstrap 管理令牌 10 年;
 快照冻结回调冻结全部任务进程组。

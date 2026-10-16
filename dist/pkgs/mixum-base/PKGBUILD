@@ -22,7 +22,7 @@ build() {
 check() {
 	# check 先于 package 跑,$pkgdir 为空:JSON 校验对源文件做,
 	# sysusers/tmpfiles 的存在性由 package() 的 install 保证。
-	# 字段与 reference/cmd/mixumd 的默认配置对齐(改协议时同步)。
+	# 字段与 mixumd 默认配置对齐(改协议时同步)。
 	python3 - "$startdir/mixumd.json" <<'EOF'
 import json, sys
 with open(sys.argv[1]) as f:
@@ -49,7 +49,7 @@ package() {
 		'd /run/mixum 0750 mixum mixum -' \
 		> "$pkgdir/usr/lib/tmpfiles.d/mixum.conf"
 
-	# 默认配置(字段与 reference/cmd/mixumd defaultConfig 一致;
-	# Rust 版就绪后随 mixum-protocol 核对)
+	# 默认配置(字段与 mixum-agentd defaultConfig 一致;
+	# 改协议时随 mixum-protocol 核对)
 	install -Dm644 "$startdir/mixumd.json" "$pkgdir/etc/mixum/mixumd.json"
 }

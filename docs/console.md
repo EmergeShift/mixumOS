@@ -20,7 +20,7 @@
 
 ## 协议层(src/protocol/)
 
-对齐 `docs/protocol.md` v1 与 reference 实现,要点:
+对齐 `docs/protocol.md` v1 与 mixum-agentd 实现,要点:
 
 - **envelope**:文本帧 JSON,`v/id/op/seq/ts/payload`,请求-应答用
   `id`/`replyTo` 关联;`op.err` 负载 `{code, message}` 映射为
@@ -93,7 +93,7 @@ fakecomp 演示容器、`scripts/e2e-check.mjs` 冒烟脚本。
 
 ## 边界与遗留
 
-边界:本模块只新增 `console/` 与本文档;`reference/`、`mixcomp/`、
+边界:本模块只新增 `console/` 与本文档;`mixcomp/`、
 `rust/`、`dist/`、`tests/` 只读。
 
 遗留:

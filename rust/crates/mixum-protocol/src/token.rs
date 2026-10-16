@@ -259,7 +259,7 @@ mod tests {
 
     /// 与 Go 参考实现的交叉验证向量:
     /// 种子固定为 32 字节 0xAB,Go Signer.Mint 的输出必须被本实现接受。
-    /// 向量由 reference/cmd/genvector 生成(见 tests/cross-protocol)。
+    /// 向量由 genvector 预生成(工具已随 Go 参考实现移除),固化于 tests/cross-protocol/。
     #[test]
     fn cross_verify_with_go_reference_vector() {
         let vector = include_str!("../../../../tests/cross-protocol/token-vector.json");
