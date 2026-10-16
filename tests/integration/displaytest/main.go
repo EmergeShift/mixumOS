@@ -300,7 +300,7 @@ func main() {
 
 	// 不存在窗口 → 错误回复。注：按 protocol.md §4 语义应为 not_found，
 	// 但 reference 的 handlers_display 把 Inject 的所有错误一律映射为
-	// conflict（见 goals/notes/mixcomp.md 的差异记录），此处按当前行为断言。
+	// conflict，此处按当前行为断言。
 	_, err = c.call(opDisplayInput, map[string]any{"window": 999, "type": "pointer_motion", "x": 1, "y": 1})
 	check("不存在窗口注入回错误", err != nil && strings.HasPrefix(err.Error(), "conflict:"), fmt.Sprint(err))
 
