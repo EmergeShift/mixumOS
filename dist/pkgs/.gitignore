@@ -1,0 +1,7 @@
+# makepkg 本地直跑的落盘产物不入库(标准构建走 dist/repo/build-repo.sh)
+*/src/
+*/pkg/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.tar.gz
+*.tar.zst

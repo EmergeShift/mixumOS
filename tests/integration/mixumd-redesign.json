@@ -1,0 +1,12 @@
+{
+  "listen": "0.0.0.0:7601",
+  "dataDir": "/var/lib/mixum",
+  "workRoot": "/var/lib/mixum/work",
+  "encryptSnapshots": true,
+  "agents": [
+    {
+      "name": "redesign",
+      "command": "/usr/local/bin/redesign-cli --agent-bridge"
+    }
+  ]
+}
