@@ -100,4 +100,8 @@ fakecomp 演示容器、`scripts/e2e-check.mjs` 冒烟脚本。
 
 - 纯浏览器端无法做 TOFU 指纹固定(平台限制),待 mixum-ctl 托管方案;
 - 快照树无推送,新快照需手动刷新;
-- H.264/WebCodecs 帧播放为阶段 4 内容,v1 未涉及。
+- H.264/WebCodecs 已实现(2026-10-17):attach 以 codec 协商(探测
+  VideoDecoder + isConfigSupported,Annex-B 无 description 直解),
+  输出 VideoFrame 直接 drawImage(零拷贝);解码失败自动降级重连为
+  jpeg;JPEG 路径不变。e2e 双 codec 探针见
+  [tests/integration/h264-e2e.mjs](../tests/integration/h264-e2e.mjs)。

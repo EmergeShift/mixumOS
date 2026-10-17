@@ -752,6 +752,10 @@ impl Session {
             .and_then(Value::as_u64)
             .unwrap_or_default() as u32;
         let sub_id = format!("{}-{}", self.id, id);
+        let codec = payload
+            .get("codec")
+            .and_then(Value::as_str)
+            .unwrap_or(crate::display::CODEC_JPEG);
         match self
             .server
             .broker
@@ -759,19 +763,21 @@ impl Session {
                 id,
                 sub_id,
                 payload.get("fps").and_then(Value::as_u64).unwrap_or(30) as u32,
+                codec,
             )
             .await
         {
-            Ok((width, height, fps, mut frames)) => {
+            Ok((width, height, fps, mut sub)) => {
+                let codec = sub.codec.clone();
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    while let Some(frame) = frames.recv().await {
+                    while let Some(frame) = sub.frames.recv().await {
                         let _ = tx.send(Message::Binary(frame.into())).await;
                     }
                 });
                 self.reply(
                     env,
-                    json!({"window":id,"codec":"jpeg","width":width,"height":height,"fps":fps}),
+                    json!({"window":id,"codec":codec,"width":width,"height":height,"fps":fps}),
                 )
                 .await;
             }

@@ -61,7 +61,9 @@
 ## 阶段 4:agent 嵌入与 GUI 流体验
 
 - [ ] AgentDriver trait 的 crate 化发布:你们 agent 以依赖方式接入;
-- [ ] mixcomp 流体验打磨:自适应帧率、脏区、H.264(WebCodecs)可选;
+- [x] mixcomp H.264 流(openh264 编码,attach 协商 + WebCodecs 解码,
+      JPEG 路径保留;2026-10-17,静态内容 10s 流量 JPEG 的 1/84,
+      动态内容预期 1/5~1/20);自适应帧率、脏区仍待做;
 - [ ] mixum-ctl:macOS 电力钩子(盒盖前快照上传)、本地窗口视图服务;
 - [ ] 控制台 PWA:任务流、快照树(图状)、窗口画布(光标映射)、接管按钮。
 
