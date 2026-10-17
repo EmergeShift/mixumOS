@@ -1,6 +1,7 @@
 # mixumOS 发行版构建
 
-> 状态:设计定稿;工具落地在阶段 3。
+> 状态:工具链已落地(§7,2026-10-04);mixum-agentd 切容器内 cargo 构建
+> 后双架构重打实测收尾中(见 §6)。
 > 原则:mixumOS 是发行版,镜像(OCI / rootfs)是它的产物,不是它的本体。
 
 ## 1. 形态
@@ -130,13 +131,13 @@ Makefile            make dist / dist-repo / dist-image / dist-e2e / dist-clean
    aarch64 同为完整通路,代价是构建时间约为原生的数倍。
 6. **仓库 v1 不签名**(SigLevel = Never),GPG 签名后置(任务书范围外);
    产物保留标准签名位。
-7. **占位源策略**:mixum-agentd 的二进制 = 宿主 go 交叉编译的
-   reference/mixumd(GOOS=linux,CGO_ENABLED=0,静态,sha256 记录于
-   dist/out/BUILDINFO);mixum-ctl 纯文档占位。Rust 版就绪后只换
-   build()/package() 的来源,包名与路径不变。
-8. **mixcomp 的 check() 对已知启动段错误默认宽限**(虚拟 pointer 创建
-   时序,在修),`MIXCOMP_SMOKE_STRICT=1` 收紧;
-   修复合入后应把默认值翻成严格。另:源码树里混有历史误提交的 .o 文件,
+7. **占位源策略(已废弃)**:曾以宿主 go 交叉编译的 reference/mixumd
+   作占位二进制;2026-10-16 随 Go 参考实现移除而废止,现行构建来源见 §6
+   (容器内 cargo,二进制沿用历史名 mixumd)。
+8. **mixcomp 的 check() 已默认严格**(历史上的启动段错误——虚拟 pointer
+   时序等六处 0.18 迁移坑——已于 wayland-magic.md §8.1-8.6 修复,
+   71 分钟稳定运行;2026-10-17 起默认收紧,`MIXCOMP_SMOKE_STRICT=0`
+   可临时放宽)。另:源码树里混有历史误提交的 .o 文件,
    build() 先 make clean 兜底。
 
 ### 7.3 已验证(2026-10-04)
@@ -170,4 +171,4 @@ Makefile            make dist / dist-repo / dist-image / dist-e2e / dist-clean
 - ALARM 的 makepkg 默认 PKGEXT=.pkg.tar.xz(Arch x86_64 是 .zst),
   工具链 glob 均按两种后缀处理;Arch 侧 makepkg 默认产出 -debug 包;
 - 构建容器持久复用(mixum-build-<arch>),pacman 缓存热;
-- docker context colima-mixumos,宿主只需 docker CLI 与 go。
+- docker context(原开发环境为 colima-mixumos),宿主只需 docker CLI。

@@ -32,7 +32,7 @@
 - **重连**:指数退避(1s 起,10s 封顶);重连成功后自动补订阅
   `task.events`、`display.windows`,并重新 `display.attach` 附流中的窗口;
 - **窗口增删**:`display.windows` 推送单条 Window;`title === "__closed__"`
-  视为窗口关闭(与 Go 参考实现对齐)。
+  视为窗口关闭(mixumd 关闭窗口时以该标题推送,见 agentd display.rs)。
 
 高频视频帧不经过 zustand:`WindowCanvas` 直接订阅 `client.onFrame`,
 store 只放任务、窗口列表、快照树等低频状态。
