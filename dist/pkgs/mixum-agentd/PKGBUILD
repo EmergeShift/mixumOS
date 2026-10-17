@@ -9,6 +9,8 @@
 #   - real-snapshot 依赖 aws-lc-sys:Arch 构建容器需 pacman -S cmake perl
 #   - 源码布局:build-repo.sh 把 rust/ 树与 tests/cross-protocol 同步到
 #     $startdir(check() 的交叉向量测试依赖后者),makepkg 在 rust/ 内执行 cargo
+#   - 缓存:container-build.sh 经 MIXUM_CARGO_HOME/MIXUM_CARGO_TARGET_DIR
+#     指向持久卷(二次构建增量);缺省回退到 $startdir 内(行为同旧版)
 pkgname=mixum-agentd
 pkgver=0.1.0
 pkgrel=3
@@ -23,13 +25,14 @@ source=()
 sha256sums=()
 
 prepare() {
-	export CARGO_HOME="$startdir/.cargo-home"
+	export CARGO_HOME="${MIXUM_CARGO_HOME:-$startdir/.cargo-home}"
 	cd "$startdir/rust"
 	cargo fetch --locked 2>/dev/null || cargo fetch
 }
 
 build() {
-	export CARGO_HOME="$startdir/.cargo-home"
+	export CARGO_HOME="${MIXUM_CARGO_HOME:-$startdir/.cargo-home}"
+	export CARGO_TARGET_DIR="${MIXUM_CARGO_TARGET_DIR:-$startdir/rust/target}"
 	# makepkg 注入的 CFLAGS(-O2/-flto)会追加在 aws-lc-sys 自管的 cc flags
 	# 之后,覆盖 jitterentropy 强制的 -O0 直接编译失败;Rust 构建的 C 依赖
 	# 全部由 crate 自管 flags,与容器内 cargo 直编环境一致,这里清掉
@@ -40,13 +43,14 @@ build() {
 }
 
 check() {
-	export CARGO_HOME="$startdir/.cargo-home"
+	export CARGO_HOME="${MIXUM_CARGO_HOME:-$startdir/.cargo-home}"
+	export CARGO_TARGET_DIR="${MIXUM_CARGO_TARGET_DIR:-$startdir/rust/target}"
 	cd "$startdir/rust"
 	cargo test --release -p mixum-protocol -q
 }
 
 package() {
-	install -Dm755 "$startdir/rust/target/release/mixum-agentd" \
+	install -Dm755 "${MIXUM_CARGO_TARGET_DIR:-$startdir/rust/target}/release/mixum-agentd" \
 		"$pkgdir/usr/bin/mixumd"
 	install -Dm644 "$startdir/mixumd.service" "$pkgdir/usr/lib/systemd/system/mixumd.service"
 	install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/mixum-agentd/README.md"
