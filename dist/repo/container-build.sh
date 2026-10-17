@@ -37,6 +37,11 @@ for kr in /usr/share/pacman/keyrings/*.gpg; do
 	pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null ||
 		{ sleep 2; pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null; }
 done
+# ALARM rootfs 默认镜像走 geo 重定向,部分网络经代理不可达;可覆盖为可达镜像
+# (如 TUNA 的 archlinuxarm 同步),经 lib.sh 的 MIXUM_ARM_MIRROR 传入
+if [ -n "${MIXUM_ARM_MIRROR:-}" ]; then
+	echo "Server = ${MIXUM_ARM_MIRROR}/\$arch/\$repo" > /etc/pacman.d/mirrorlist
+fi
 pacman -Syu --noconfirm --needed base-devel git >/dev/null
 git config --system --add safe.directory "$GIT_SRC"
 

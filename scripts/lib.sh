@@ -79,6 +79,7 @@ ensure_build_container() {
 			-v "$(host_path "$ROOT/dist/out"):/out" \
 			-e http_proxy="$PROXY" -e https_proxy="$PROXY" \
 			-e no_proxy="localhost,127.0.0.1" \
+			-e MIXUM_ARM_MIRROR="${MIXUM_ARM_MIRROR:-}" \
 			"$IMAGE" infinity >/dev/null
 	fi
 	docker start "$CN" >/dev/null

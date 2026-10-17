@@ -122,8 +122,10 @@ Makefile            make dist / dist-repo / dist-image / dist-e2e / dist-clean
 4. **arm64 通路基于 Arch Linux ARM**。官方 Docker 镜像(Docker Hub 与
    ghcr)均无 arm64 manifest,Arch 官方仓库本身也没有 arm64 包;ALARM
    是 Arch 的 arm64 官方移植,包名/格式一致。rootfs tar 缓存于
-   dist/out/alarm/(不入库),下载源用 TUNA(官方 geo 镜像的 os/ 目录
-   重定向后 404)。
+   dist/out/ 根(不入库;文件名 ArchLinuxARM-aarch64-latest.tar.gz),
+   下载源用 TUNA(官方 geo 镜像的 os/ 目录重定向后 404);ALARM 容器内
+   pacman 镜像可用 MIXUM_ARM_MIRROR 覆盖(geo 重定向经部分代理不可达,
+   TUNA 实测可达,2026-10-17)。
 5. **x86_64 通路:binfmt + qemu-user**(构建 VM 内已注册 qemu-x86_64),
    无真机。mixumd 宿主交叉编译不经模拟;makepkg 全链(wlroots 编译、
    四包、pacstrap 组装)在模拟下实跑,OCI 镜像以 `docker import
