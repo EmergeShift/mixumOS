@@ -12,7 +12,7 @@ mixumOS 是一个基于 Arch Linux 的 **Agent OS 发行版**:它把容器变成
 ## 两条铁律
 
 1. **发行版,不是一堆二进制。** 所有组件以 PKGBUILD 打包进自有 pacman 仓库,
-   镜像(mkosi 组装的 rootfs / OCI)是发行版的产物而不是发行版本身。
+   镜像(组装的 rootfs / OCI)是发行版的产物而不是发行版本身。
    依赖库出安全更新时升一个 so,而不是重编整个世界。
 2. **agent 是一等公民。** 我们的 agent 用 Rust 写,runner 的核心也是 Rust,
    agent 以 crate 形式嵌入 runner,共享类型与生命周期;
@@ -94,10 +94,11 @@ mixumos/
 │       └── mixum-operator 云端 k8s operator(后置)
 ├── mixcomp/               C/wlroots 合成器(见 wayland-magic.md)
 ├── dist/                  发行版构建(见 distro.md)
-│   ├── pkgs/              PKGBUILD(mixum-agentd / mixcomp / mixum-ctl)
+│   ├── pkgs/              PKGBUILD(mixum-agentd / mixcomp / mixum-ctl
+│   │                      / mixum-base / wlroots0.18 自建)
 │   ├── repo/              pacman 仓库工具
-│   ├── os/                rootfs 与镜像构建(mkosi)
-│   └── mkosi/
+│   └── os/                rootfs 与镜像构建(pacstrap + OCI 打包脚本;
+│                          mkosi 以等价脚本替代,可启动磁盘镜像后置)
 ├── console/               PWA 控制台(后置)
 ├── cloud/                 k8s 清单(后置)
 ├── tests/

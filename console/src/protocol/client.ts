@@ -59,7 +59,7 @@ export class MixumClient {
   device = 'console'
 
   // 重连后需要恢复的订阅
-  private attached = new Map<number, number>() // window -> fps
+  private attached = new Map<number, { fps: number; codec: 'jpeg' | 'h264' }>()
 
   // 事件回调(由 store 接线)
   onStatus: (s: ConnStatus, detail?: string) => void = () => {}
@@ -166,7 +166,10 @@ export class MixumClient {
         this.onText(ev.data)
       } else {
         const frame = parseVideoFrame(new Uint8Array(ev.data))
-        if (frame) this.onFrame(frame)
+        if (frame) {
+          frame.codec = this.attached.get(frame.windowId)?.codec ?? 'jpeg'
+          this.onFrame(frame)
+        }
       }
     }
 
@@ -214,8 +217,12 @@ export class MixumClient {
   private async resubscribe(): Promise<void> {
     try {
       await Promise.all([this.request('task.events'), this.request('display.windows')])
-      for (const [win, fps] of this.attached) {
-        await this.request<DisplayAttachResponse>('display.attach', { window: win, fps })
+      for (const [win, sub] of this.attached) {
+        await this.request<DisplayAttachResponse>('display.attach', {
+          window: win,
+          fps: sub.fps,
+          codec: sub.codec,
+        })
       }
     } catch {
       this.ws?.close() // 下一轮重连再试
@@ -307,12 +314,16 @@ export class MixumClient {
     return this.request('task.cancel', { id })
   }
 
-  attach(windowId: number, fps = 15): Promise<DisplayAttachResponse> {
-    return this.request<DisplayAttachResponse>('display.attach', { window: windowId, fps })
+  attach(
+    windowId: number,
+    fps = 15,
+    codec: 'jpeg' | 'h264' = 'jpeg',
+  ): Promise<DisplayAttachResponse> {
+    return this.request<DisplayAttachResponse>('display.attach', { window: windowId, fps, codec })
   }
 
-  registerAttached(windowId: number, fps: number): void {
-    this.attached.set(windowId, fps)
+  registerAttached(windowId: number, fps: number, codec: 'jpeg' | 'h264'): void {
+    this.attached.set(windowId, { fps, codec })
   }
 
   async detach(windowId: number): Promise<void> {

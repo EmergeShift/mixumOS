@@ -2,11 +2,81 @@
 // 光标来自帧头元数据;接管后鼠标/键盘事件换算物理像素回传 display.input。
 import { useEffect, useRef, useState } from 'react'
 import { client, msg, useStore } from '../state/store'
-import type { DisplayAttachResponse, VideoFrame, WindowInfo } from '../protocol/types'
+import type { DisplayAttachResponse, VideoFrame as ProtocolVideoFrame, WindowInfo } from '../protocol/types'
 import { toKeysym, modsOf } from '../util/keysym'
 import { fmtTime } from '../util/format'
 
 const ATTACH_FPS = 15
+
+// WebCodecs 能力探测(模块级缓存):openh264 输出 Annex-B,无 description,
+// 探测从基线 profile 开始(openh264 实际输出基线档),返回命中的 codec 串。
+let h264SupportPromise: Promise<string | null> | null = null
+function probeH264(): Promise<string | null> {
+  if (h264SupportPromise) return h264SupportPromise
+  h264SupportPromise = (async () => {
+    if (typeof VideoDecoder === 'undefined') return null
+    const candidates = ['avc1.42e01e', 'avc1.4d0028', 'avc1.640028']
+    for (const codec of candidates) {
+      try {
+        const r = await VideoDecoder.isConfigSupported({ codec })
+        if (r.supported) return codec
+      } catch {
+        /* 探测失败继续 */
+      }
+    }
+    return null
+  })()
+  return h264SupportPromise
+}
+
+// H.264 解码封装:Annex-B 喂入,输出 VideoFrame 回调。
+class H264Decoder {
+  private decoder: VideoDecoder | null = null
+  private seq = 0
+  constructor(
+    private codec: string,
+    private onFrame: (vf: VideoFrame) => void,
+    private onError: (e: string) => void,
+  ) {}
+
+  handle(frame: { payload: Uint8Array; keyframe: boolean }): void {
+    let dec = this.decoder
+    if (!dec) {
+      const self = this
+      dec = new VideoDecoder({
+        output: (vf) => self.onFrame(vf),
+        error: (e) => self.onError(e.message),
+      })
+      dec.configure({ codec: this.codec, optimizeForLatency: true })
+      this.decoder = dec
+      this.seq = 0
+    }
+    if (frame.keyframe) this.seq = 0
+    else if (this.seq === 0) return // 等首个 IDR
+    this.seq += 1
+    try {
+      dec.decode(
+        new EncodedVideoChunk({
+          type: frame.keyframe ? 'key' : 'delta',
+          timestamp: this.seq * (1_000_000 / 30),
+          // WebSocket 二进制来源实际是 ArrayBuffer 背书,零拷贝直用
+          data: frame.payload as unknown as BufferSource,
+        }),
+      )
+    } catch (e) {
+      this.onError(String((e as Error)?.message ?? e))
+    }
+  }
+
+  close(): void {
+    try {
+      this.decoder?.close()
+    } catch {
+      /* 已关闭 */
+    }
+    this.decoder = null
+  }
+}
 
 export function WindowCanvas({ win }: { win: WindowInfo }) {
   const showToast = useStore((s) => s.showToast)
@@ -14,7 +84,9 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const openWindow = useStore((s) => s.openWindow)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const latestRef = useRef<VideoFrame | null>(null)
+  const latestRef = useRef<ProtocolVideoFrame | null>(null)
+  const decodedRef = useRef<VideoFrame | null>(null)
+  const decoderRef = useRef<H264Decoder | null>(null)
   const drawSeqRef = useRef(0)
   const rafRef = useRef(false)
   const physRef = useRef({ w: 0, h: 0 })
@@ -26,28 +98,60 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const [info, setInfo] = useState<DisplayAttachResponse | null>(null)
   const [stats, setStats] = useState({ frames: 0, lastTs: 0 })
   const [error, setError] = useState('')
+  const [forceJpeg, setForceJpeg] = useState(false)
 
   modeRef.current = win.mode
 
-  // 附流 + 帧订阅
+  // 附流 + 帧订阅(codec:服务端窗口回告优先,否则 WebCodecs 探测;
+  // 解码失败整体降级重连为 jpeg)
   useEffect(() => {
     let dead = false
     setError('')
-    client
-      .attach(win.id, ATTACH_FPS)
-      .then((r) => {
+    const want: 'jpeg' | 'h264' = forceJpeg
+      ? 'jpeg'
+      : (win.codec ?? null) === 'jpeg'
+        ? 'jpeg'
+        : 'h264'
+    const attachFps = ATTACH_FPS
+    void (async () => {
+      let codec: 'jpeg' | 'h264' = 'jpeg'
+      let h264Codec: string | null = null
+      if (want === 'h264' && !forceJpeg && win.codec !== 'jpeg') {
+        h264Codec = await probeH264()
+        codec = h264Codec ? 'h264' : 'jpeg'
+      }
+      if (dead) return
+      try {
+        const r = await client.attach(win.id, attachFps, codec)
         if (dead) return
         setInfo(r)
-        client.registerAttached(win.id, ATTACH_FPS)
-      })
-      .catch((err) => {
+        if ((r.codec as 'jpeg' | 'h264') === 'h264') {
+          const self: { decoder: H264Decoder | null } = { decoder: null }
+          self.decoder = new H264Decoder(
+            h264Codec ?? 'avc1.42e01e',
+            (vf) => {
+              decodedRef.current = vf
+              scheduleDraw()
+            },
+            () => setForceJpeg(true),
+          )
+          decoderRef.current = self.decoder
+        }
+        client.registerAttached(win.id, attachFps, r.codec as 'jpeg' | 'h264')
+      } catch (err) {
         if (!dead) setError(msg(err))
-      })
+      }
+    })()
 
     const prevHandler = client.onFrame
     client.onFrame = (f) => {
       if (f.windowId !== win.id) return
-      latestRef.current = f
+      if (f.codec === 'h264') {
+        decoderRef.current?.handle(f)
+        latestRef.current = f // 仅取帧头元数据(光标/尺寸),像素走解码输出
+      } else {
+        latestRef.current = f
+      }
       statsRef.current.frames += 1
       statsRef.current.lastTs = f.ts
       scheduleDraw()
@@ -56,9 +160,11 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
     return () => {
       dead = true
       client.onFrame = prevHandler
+      decoderRef.current?.close()
+      decoderRef.current = null
       void client.detach(win.id)
     }
-  }, [win.id])
+  }, [win.id, win.codec, forceJpeg])
 
   // 统计低频刷新
   useEffect(() => {
@@ -81,10 +187,17 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   }
 
   async function draw() {
-    const f = latestRef.current
     const canvas = canvasRef.current
-    if (!f || !canvas) return
+    if (!canvas) return
+    const f = latestRef.current
     latestRef.current = null // 取走即丢:绘制期间来的新帧下一轮画
+    if (!f) return
+    let vf: VideoFrame | null = null
+    if (f.codec === 'h264') {
+      vf = decodedRef.current
+      decodedRef.current = null
+      if (!vf) return // 解码尚未产出,丢这一拍
+    }
     physRef.current = { w: f.width, h: f.height }
     if (canvas.width !== f.width || canvas.height !== f.height) {
       canvas.width = f.width
@@ -92,15 +205,26 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
     }
     const seq = ++drawSeqRef.current
     try {
-      const bmp = await createImageBitmap(new Blob([f.jpeg as BlobPart], { type: 'image/jpeg' }))
-      if (seq !== drawSeqRef.current) {
-        bmp.close() // 已有更新帧,静默丢弃这帧
-        return
-      }
       const ctx = canvas.getContext('2d')
       if (!ctx) return
-      ctx.drawImage(bmp, 0, 0)
-      bmp.close()
+      if (vf) {
+        if (seq !== drawSeqRef.current) {
+          vf.close() // 已有更新帧,静默丢弃这帧
+          return
+        }
+        ctx.drawImage(vf, 0, 0)
+        vf.close()
+      } else {
+        const bmp = await createImageBitmap(
+          new Blob([f.payload as BlobPart], { type: 'image/jpeg' }),
+        )
+        if (seq !== drawSeqRef.current) {
+          bmp.close() // 已有更新帧,静默丢弃这帧
+          return
+        }
+        ctx.drawImage(bmp, 0, 0)
+        bmp.close()
+      }
       if (f.hasCursor) drawCursor(ctx, f)
     } catch {
       /* 解码失败丢帧 */
@@ -259,7 +383,7 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
 }
 
 // 光标按协议来自帧头(cursorX/Y + flags bit1),不依赖本机指针推算。
-function drawCursor(ctx: CanvasRenderingContext2D, f: VideoFrame) {
+function drawCursor(ctx: CanvasRenderingContext2D, f: ProtocolVideoFrame) {
   const scale = Math.max(0.8, Math.min(2, (f.cursorW || 16) / 16))
   ctx.save()
   ctx.translate(f.cursorX, f.cursorY)
