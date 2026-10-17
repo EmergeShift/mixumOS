@@ -91,6 +91,10 @@ struct mixcomp_server {
 	int sock_fd;
 	char sock_path[256];
 	bool sock_ready;
+	// 接收累积缓冲：半条记录留到下一轮处理，EAGAIN 不再误判连接死亡。
+	uint8_t *rx_buf;
+	size_t rx_cap;
+	size_t rx_have;
 
 	int jpeg_quality;
 };
