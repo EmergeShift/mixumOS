@@ -47,14 +47,15 @@
       替代;可启动磁盘镜像后置阶段 5);
 - [x] systemd 单元、sysusers、tmpfiles 进包;
 - [x] x86_64 构建通路(binfmt + qemu-user 模拟实跑,双架构 e2e PASS);
-- [ ] 双架构重打实测:mixum-agentd 切容器内 cargo 构建后(2026-10-16)
-      全链重打待 VM 实测。
+- [x] 双架构重打实测:mixum-agentd 切容器内 cargo 构建后全链重打
+      (2026-10-17,Docker Desktop/WSL2 通路;x86_64 原生 + aarch64 qemu,
+      双架构五包/仓库/OCI 齐产,导入启动+握手验收 PASS,多架构索引合并)。
 - [x] 跨节点流转双节点 e2e(盒盖→云端续跑全链:snap.create → snap.push
       → 幂等重推 → 云端 restore 物化 → head 迁移)与引擎延迟基准
       (2026-10-17,数字与复现见 snapshots.md §9)。
 
 完成标准:`make dist` 一条命令产出双架构 OCI 镜像与 pacman 仓库
-(工具已就绪,待 §6 重打实测确认)。
+(2026-10-17 达成;构建提速的缓存卷与跨编译选项列为演进项)。
 
 ## 阶段 4:agent 嵌入与 GUI 流体验
 

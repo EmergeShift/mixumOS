@@ -162,6 +162,19 @@ Makefile            make dist / dist-repo / dist-image / dist-e2e / dist-clean
 - 幂等:重复 make dist-repo / dist-image 只刷新产物;wlroots0.18 已在
   仓库时跳过重建(删其包文件可强制)。
 
+### 7.3.1 Docker Desktop/WSL2 通路重打(2026-10-17)
+
+构建宿主从 colima VM 迁到 Windows Docker Desktop 后全链重打实测:
+- x86_64(原生)与 aarch64(qemu-user)五包 + 双仓库 + rootfs/OCI 齐产;
+  双架构镜像导入后启动、READY、TLS 握手、sys.info(真实快照后端 +
+  compositor 在线)验收 PASS;`mixumos-0.1.0-multi.oci.tar` 双 manifest;
+- mixum-agentd 的容器内 cargo 构建(PKGBUILD.cargo 转正后)首次实跑,
+  暴露并修复 makepkg CFLAGS 覆盖 aws-lc-sys jitterentropy `-O0` 的问题
+  (PKGBUILD 内 unset 注入 flags,见 7.4);
+- 宿主工具链适配与踩坑见 7.4(git-bash 路径转换、pacman-key 无条件
+  init、ALARM 镜像 MIXUM_ARM_MIRROR);提速演进项:cargo 缓存卷
+  (现每次 makepkg 全量重建)、跨编译选项(通路验证保持 qemu 原生)。
+
 ### 7.4 环境要点(踩坑记录)
 
 - 构建容器需要 `--privileged`:pacstrap 要对 target 挂 /proc、/sys;
