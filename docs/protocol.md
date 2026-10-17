@@ -124,13 +124,15 @@ sizeBytes, chunks, kernel?, arch? }`。树语义见 snapshots.md §4。
 | op | 请求 | 应答 |
 |----|------|------|
 | display.list | — | `{ windows: [Window] }` |
-| display.attach | `{ window, fps?, quality? }` | `{ window, codec: "jpeg", width, height, fps }`(此后二进制 video 帧) |
+| display.attach | `{ window, fps?, codec?: "jpeg"\|"h264" }` | `{ window, codec, width, height, fps }`(codec = 实际编码,此后二进制 video 帧) |
 | display.detach | `{ window }` | `{ window }` |
 | display.input | `{ window, type, … }` | `{ ok: true }` |
 | display.takeover | `{ window, action: claim\|release, force? }` | `{ mode }` |
 | display.windows | — | `{ subscribed }`(此后推送窗口增删/改名) |
 
-Window:`{ id, appId, title, width, height, focused, mode: agent|user|free }`。
+Window:`{ id, appId, title, width, height, focused, mode: agent|user|free,
+codec? }`。codec = 窗口流的实际编码,由 mixcomp 能力回告(如请求 h264
+但编码器缺失时回 jpeg),broker 经 window 事件广播更新。
 
 输入事件(type 字段):
 
@@ -168,7 +170,14 @@ hostname, caps, snapshotBackend, criuAvailable, compositor, windows }`。
 
 设计说明:v1 全帧 JPEG(每帧即关键帧),主机端 `<canvas>` 直接绘制,
 光标由帧头元数据在画布上叠加绘制——光标永远与帧内容同源,不依赖
-主机侧指针位置推算。H.264/AV1 经 WebCodecs 的升级在阶段 4。
+主机侧指针位置推算。
+
+**编码协商(2026-10-17 起)**:`display.attach` 以 `codec` 参数协商,
+JPEG 路径字节级不变;`codec=h264` 时负载为 H.264 Annex-B,帧头格式
+原样复用(flags bit0 = IDR,含周期 IDR 与 attach 即时 IDR),主机端经
+WebCodecs 解码。mixumd↔mixcomp 私有通道以记录类型区分
+(0x02=JPEG/0x03=H.264),对公有协议不可见;编码器缺失由 mixcomp 经
+控制消息回告,broker 统一切换并随 window 事件广播。
 
 ## 6. 快照块传输(跨节点)
 

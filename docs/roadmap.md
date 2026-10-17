@@ -16,41 +16,54 @@
 - [x] 容器 e2e:任务执行 → 前置快照 → 回退 → fork 全链路 PASS
 - [x] 全栈集成测试(进程内双节点互推快照、去重生效)
 
-## 阶段 1:Rust 协议与快照内核(当前)
+## 阶段 1:Rust 协议与快照内核 ✅
 
 目标:Rust workspace 立起来,先把与语言无关的内核做扎实。
 
-- [ ] `mixum-protocol`:envelope/ops/caps/帧头/令牌,单测与 Go 参考实现同语义;
-- [ ] `mixum-snapshot`:块存储(CAS+zstd+静态加密)、树 DAG(bolt→sled 或
-      redb,选型时定)、COW 打包、CRIU 驱动、GC;
-- [ ] 交叉验证:同一测试向量集,Go 与 Rust 实现互跑
-      (令牌互验、清单互读、块互导)。
+- [x] `mixum-protocol`:envelope/ops/caps/帧头/令牌,单测与原参考实现同语义;
+- [x] `mixum-snapshot`:块存储(CAS+zstd+静态加密)、树 DAG(sled)、
+      COW 打包、CRIU 驱动、GC;
+- [x] 交叉验证:测试向量集锁定语义(令牌互验、清单互读、块互导;
+      Go 参考实现移除后由 tests/cross-protocol 预生成向量承接)。
 
-完成标准:`cargo test` 全绿 + 交叉向量测试通过。
+完成标准(已达成 2026-10-05):`cargo test` 全绿 + 交叉向量测试通过。
 
-## 阶段 2:mixum-agentd(容器内守护进程)
+## 阶段 2:mixum-agentd(容器内守护进程)✅
 
-- [ ] WSS 服务端(tokio-tungstenite + rustls,TLS 1.3 强制);
-- [ ] 任务引擎与 AgentDriver trait;external 桥协议实现;
-- [ ] 显示 broker 与接管状态机;mixcomp 控制通道(协议不变);
-- [ ] 与 mixcomp 的容器 e2e(复用 tests/integration,换 Rust 二进制)。
+- [x] WSS 服务端(tokio-tungstenite + rustls,TLS 1.3 强制);
+- [x] 任务引擎与 AgentDriver trait;external 桥协议实现;
+- [x] 显示 broker 与接管状态机;mixcomp 控制通道(协议不变);
+- [x] 与 mixcomp 的容器 e2e(tests/integration,Rust 二进制)。
 
-完成标准:现有 e2eclient 对 Rust agentd 全链路 PASS(协议兼容即证)。
+完成标准(已达成 2026-10-05):e2e 对 Rust agentd 全链路 PASS
+(握手/系统信息/窗口流/任务/快照树/回退/fork)。
 
-## 阶段 3:发行版形态
+## 阶段 3:发行版形态(当前,收尾中)
 
-- [ ] PKGBUILD ×3(mixum-agentd / mixcomp / mixum-ctl),动态链接走系统依赖;
-- [ ] 自有 pacman 仓库工具(repo-add 流程,arm64 + x86_64 双仓库);
-- [ ] mkosi:从仓库组装 Arch rootfs → OCI 镜像(两种产物同一来源);
-- [ ] systemd 单元、sysusers、tmpfiles 进包;
-- [ ] x86_64 构建通路(qemu-user 或 x86_64 构建机,binfmt)。
+- [x] PKGBUILD ×5(mixum-agentd / mixcomp / mixum-ctl / mixum-base /
+      wlroots0.18 自建),动态链接走系统依赖;
+- [x] 自有 pacman 仓库工具(repo-add 流程,arm64 + x86_64 双仓库);
+- [x] rootfs/OCI 组装:pacstrap + 纯 shell OCI 打包(mkosi 以等价脚本
+      替代;可启动磁盘镜像后置阶段 5);
+- [x] systemd 单元、sysusers、tmpfiles 进包;
+- [x] x86_64 构建通路(binfmt + qemu-user 模拟实跑,双架构 e2e PASS);
+- [x] 双架构重打实测:mixum-agentd 切容器内 cargo 构建后全链重打
+      (2026-10-17,Docker Desktop/WSL2 通路;x86_64 原生 + aarch64 qemu,
+      双架构五包/仓库/OCI 齐产,导入启动+握手验收 PASS,多架构索引合并)。
+- [x] 跨节点流转双节点 e2e(盒盖→云端续跑全链:snap.create → snap.push
+      → 幂等重推 → 云端 restore 物化 → head 迁移)与引擎延迟基准
+      (2026-10-17,数字与复现见 snapshots.md §9)。
 
-完成标准:`make dist` 一条命令产出双架构 OCI 镜像与 pacman 仓库。
+完成标准:`make dist` 一条命令产出双架构 OCI 镜像与 pacman 仓库
+(2026-10-17 达成;cargo 缓存卷提速已实施——重打增量 45s,跨编译
+选项列为演进项,见 distro.md §7.3.1)。
 
 ## 阶段 4:agent 嵌入与 GUI 流体验
 
 - [ ] AgentDriver trait 的 crate 化发布:你们 agent 以依赖方式接入;
-- [ ] mixcomp 流体验打磨:自适应帧率、脏区、H.264(WebCodecs)可选;
+- [x] mixcomp H.264 流(openh264 编码,attach 协商 + WebCodecs 解码,
+      JPEG 路径保留;2026-10-17,静态内容 10s 流量 JPEG 的 1/84,
+      动态内容预期 1/5~1/20);自适应帧率、脏区仍待做;
 - [ ] mixum-ctl:macOS 电力钩子(盒盖前快照上传)、本地窗口视图服务;
 - [ ] 控制台 PWA:任务流、快照树(图状)、窗口画布(光标映射)、接管按钮。
 
