@@ -8,6 +8,8 @@ set -euo pipefail
 ARCHS="${ARCHS:-aarch64}"
 PROXY="${MIXUM_PROXY:-http://192.168.5.2:7897}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# git-bash:Windows 形式路径(git -C 与 docker exec 参数都要);Linux 原样保留
+ROOT="$(cygpath -m "$ROOT" 2>/dev/null || echo "$ROOT")"
 OUT="$ROOT/dist/out"
 VERSION="$(bash -c ". '$ROOT/scripts/lib.sh' && dist_version")"
 # shellcheck source=../scripts/lib.sh

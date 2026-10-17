@@ -30,6 +30,10 @@ prepare() {
 
 build() {
 	export CARGO_HOME="$startdir/.cargo-home"
+	# makepkg 注入的 CFLAGS(-O2/-flto)会追加在 aws-lc-sys 自管的 cc flags
+	# 之后,覆盖 jitterentropy 强制的 -O0 直接编译失败;Rust 构建的 C 依赖
+	# 全部由 crate 自管 flags,与容器内 cargo 直编环境一致,这里清掉
+	unset CFLAGS CXXFLAGS LDFLAGS
 	cd "$startdir/rust"
 	cargo build --release --locked -p mixum-agentd --features real-snapshot \
 		2>/dev/null || cargo build --release -p mixum-agentd --features real-snapshot

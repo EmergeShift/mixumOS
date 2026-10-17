@@ -13,6 +13,12 @@ go_arch() {
 	esac
 }
 
+# 宿主路径归一化:git-bash 下 docker -v 需要 Windows 形式(C:/...),
+# Linux 宿主无 cygpath,原样返回
+host_path() {
+	cygpath -m "$1" 2>/dev/null || echo "$1"
+}
+
 # arm64 Arch 容器:Docker Hub 与 ghcr 的官方镜像都只有 amd64 manifest,
 # 从 Arch Linux ARM rootfs tar 自起(任务书预案;tar 缓存在 dist/out/alarm/)。
 _ensure_alarm_image() {
@@ -42,6 +48,7 @@ ensure_build_container() {
 	IMAGE="archlinux:mixum-$ARCH"
 	CN="mixum-build-$ARCH"
 	ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+	ROOT="$(cygpath -m "$ROOT" 2>/dev/null || echo "$ROOT")"
 
 	if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 		case "$DARCH" in
@@ -68,8 +75,8 @@ ensure_build_container() {
 		# 沙箱的 seccomp 问题;构建容器跑在专用开发 VM 内,可接受
 		docker create --name "$CN" --entrypoint sleep \
 			--privileged \
-			-v "$ROOT:/build/mixumos:ro" \
-			-v "$ROOT/dist/out:/out" \
+			-v "$(host_path "$ROOT"):/build/mixumos:ro" \
+			-v "$(host_path "$ROOT/dist/out"):/out" \
 			-e http_proxy="$PROXY" -e https_proxy="$PROXY" \
 			-e no_proxy="localhost,127.0.0.1" \
 			"$IMAGE" infinity >/dev/null
