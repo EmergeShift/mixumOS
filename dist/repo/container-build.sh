@@ -30,10 +30,9 @@ if [ "$PACMAN_MAJOR" -ge 7 ]; then
 		sed -i '/^\[options\]/a DisableSandboxFilesystem' /etc/pacman.conf
 fi
 mkdir -p /etc/pacman.d/gnupg
-if [ ! -f /etc/pacman.d/gnupg/pubring.kbx ] && [ ! -f /etc/pacman.d/gnupg/pubring.gpg ]; then
-	# qemu 模拟下 gpg 建钥偶发瞬时失败,重试一次
-	pacman-key --init || { sleep 2; pacman-key --init; }
-fi
+# 无条件 init(幂等):新版 archlinux:base 自带 pubring.kbx 但无私钥,
+# 跳过 init 会让 --populate 本地签名报「no secret key available to sign with」
+pacman-key --init || { sleep 2; pacman-key --init; }
 for kr in /usr/share/pacman/keyrings/*.gpg; do
 	pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null ||
 		{ sleep 2; pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null; }
