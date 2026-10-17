@@ -77,6 +77,8 @@ ensure_build_container() {
 			--privileged \
 			-v "$(host_path "$ROOT"):/build/mixumos:ro" \
 			-v "$(host_path "$ROOT/dist/out"):/out" \
+			-v mixum-dist-cargo:/cargo-home \
+			-v "mixum-dist-cargo-$ARCH:/cargo-target" \
 			-e http_proxy="$PROXY" -e https_proxy="$PROXY" \
 			-e no_proxy="localhost,127.0.0.1" \
 			-e MIXUM_ARM_MIRROR="${MIXUM_ARM_MIRROR:-}" \

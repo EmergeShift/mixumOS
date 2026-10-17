@@ -92,6 +92,11 @@ fi
 pacman -Sy >/dev/null
 
 # ---- B. 四包构建 ---------------------------------------------------------
+# cargo 缓存持久卷(挂载于 $BUILD 之外,rm -rf $BUILD 不影响):
+#   /cargo-home = CARGO_HOME(registry,跨架构共享) /cargo-target = 编译产物(按架构)
+# 二次构建走增量:fetch 秒级、只编改动 crate(见 distro.md §7.3.1 演进项)
+export MIXUM_CARGO_HOME=/cargo-home
+export MIXUM_CARGO_TARGET_DIR=/cargo-target
 echo "==> [container] stage B:按 PKGBUILD 声明装依赖"
 rm -rf /build/src "$BUILD"
 install -d "$BUILD"
@@ -107,6 +112,9 @@ cp -a /out/build/rust "$BUILD/mixum-agentd/rust"
 install -d "$BUILD/mixum-agentd/tests"
 cp -a /out/build/cross-protocol "$BUILD/mixum-agentd/tests/cross-protocol"
 id builder >/dev/null 2>&1 || useradd -m builder
+# 卷根属主(builder 每次写入);卷内容上轮已属 builder,不必递归
+install -d -o builder -g builder "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR" 2>/dev/null ||
+	{ mkdir -p "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR"; chown builder:builder "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR"; }
 chown -R builder:builder "$BUILD"
 
 # 三个组件包:装依赖 → makepkg(mixum-base 依赖它们,放最后单独处理)
@@ -116,7 +124,9 @@ for p in mixcomp mixum-agentd mixum-ctl; do
 	echo "==> [container] makepkg $p"
 	(
 		cd "$BUILD/$p"
-		runuser -u builder -- env _commit="$COMMIT" makepkg -f --noconfirm
+		runuser -u builder -- env MIXUM_CARGO_HOME="$MIXUM_CARGO_HOME" \
+			MIXUM_CARGO_TARGET_DIR="$MIXUM_CARGO_TARGET_DIR" _commit="$COMMIT" \
+			makepkg -f --noconfirm
 	)
 done
 

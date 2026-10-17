@@ -172,8 +172,12 @@ Makefile            make dist / dist-repo / dist-image / dist-e2e / dist-clean
   暴露并修复 makepkg CFLAGS 覆盖 aws-lc-sys jitterentropy `-O0` 的问题
   (PKGBUILD 内 unset 注入 flags,见 7.4);
 - 宿主工具链适配与踩坑见 7.4(git-bash 路径转换、pacman-key 无条件
-  init、ALARM 镜像 MIXUM_ARM_MIRROR);提速演进项:cargo 缓存卷
-  (现每次 makepkg 全量重建)、跨编译选项(通路验证保持 qemu 原生)。
+  init、ALARM 镜像 MIXUM_ARM_MIRROR);**cargo 缓存卷已实施**(2026-10-17):
+  构建容器挂 /cargo-home(registry,跨架构共享)与 /cargo-target(按架构)
+  持久卷,PKGBUILD 经 MIXUM_CARGO_HOME/MIXUM_CARGO_TARGET_DIR 指向,
+  卷在 $BUILD 之外不受 makepkg 清理影响;x86_64 实测冷缓存 181s →
+  增量 45s(剩余为 mixcomp meson 重编),qemu 下的 arm64 同理受益;
+  跨编译选项仍为演进项(通路验证保持 qemu 原生)。
 
 ### 7.4 环境要点(踩坑记录)
 
