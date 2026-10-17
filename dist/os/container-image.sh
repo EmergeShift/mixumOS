@@ -109,7 +109,7 @@ cp -a "$REPO"/. "$TARGET/srv/mixum/repo/"
 write_pacman_conf "file:///srv/mixum/repo" "$IS_ALARM" > "$TARGET/etc/pacman.conf"
 
 # ---- e2e 入口(容器冒烟;正式可启动镜像由 systemd 单元接管) -------------
-install -m755 /build/mixumos/tests/integration/entrypoint.sh "$TARGET/entrypoint.sh"
+install -m755 /build/mixumos/tests/integration/entrypoint-rust.sh "$TARGET/entrypoint.sh"
 
 # ---- 目录布局:容器内无 systemd 引导,手动过一遍 tmpfiles ----------------
 systemd-tmpfiles --root "$TARGET" --create

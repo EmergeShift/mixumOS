@@ -19,9 +19,23 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
+// H.264 编码器(openh264;HAVE_OPENH264 由 Makefile 依 pkg-config 探测定义)。
+#ifdef HAVE_OPENH264
+struct h264_encoder;
+struct h264_encoder *h264_open(int width, int height, int fps);
+void h264_close(struct h264_encoder *enc);
+// 编码一帧 BGRA(行距 stride,源尺寸 src_w×src_h,可奇数;编码器内部
+// 2 对齐并复制边缘像素)。force_idr 时强制 IDR。返回 Annex-B 数据
+// (调用者 free),*out_keyframe = 1 表示 IDR;失败返回 NULL。
+unsigned char *h264_encode(struct h264_encoder *enc, const unsigned char *bgra,
+		int stride, int src_w, int src_h, int force_idr,
+		unsigned long *out_size, int *out_keyframe);
+#endif
+
 // 与 mixumd 控制通道的记录类型。
-#define REC_CONTROL 0x01
-#define REC_VIDEO   0x02
+#define REC_CONTROL      0x01
+#define REC_VIDEO        0x02
+#define REC_VIDEO_H264   0x03
 
 // 视频帧头（与 Go internal/wire 对齐，小端）：
 // [0]=0x01 [1:5] windowID [5:9] w [9:13] h [13:17] size [17:19] flags
@@ -48,6 +62,10 @@ struct mixcomp_window {
 	int fps;
 	int cursor_x, cursor_y;
 	bool have_cursor;
+	// H.264 编码器(订阅者协商 h264 且 openh264 可用时创建;NULL = JPEG)
+	struct h264_encoder *h264;
+	int h264_w, h264_h;        // 编码器对应的源尺寸(重建判据)
+	bool h264_idr_pending;
 
 	struct wl_event_source *timer; // 帧节拍
 	struct wl_listener map;
@@ -91,6 +109,10 @@ struct mixcomp_server {
 	int sock_fd;
 	char sock_path[256];
 	bool sock_ready;
+	// 接收累积缓冲：半条记录留到下一轮处理，EAGAIN 不再误判连接死亡。
+	uint8_t *rx_buf;
+	size_t rx_cap;
+	size_t rx_have;
 
 	int jpeg_quality;
 };

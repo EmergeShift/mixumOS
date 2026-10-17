@@ -175,13 +175,17 @@ wlroots 0.18 移除了 `wl_display_init_shm`,但该符号仍由 libwayland-serve
 
 ### 8.7 e2e 测试链路的客户端侧约束
 
-reference 的 e2eclient(gorilla/websocket)默认读缓冲 4096,单帧超过
-即触发宿主侧 bufio 越界 panic,且其帧循环的读截止会让连接失效;帧循环
-与应答循环并发读同一 ws 亦不可靠。约束规避:entrypoint 以
+(2026-10-04 记录;原 Go e2eclient 已随参考实现移除,约束演化见
+tests/integration/。)原 e2eclient(gorilla/websocket)默认读缓冲 4096,
+单帧超过即触发宿主侧 bufio 越界 panic,且其帧循环的读截止会让连接失效;
+帧循环与应答循环并发读同一 ws 亦不可靠。约束规避:entrypoint 以
 `initial-window-size-pixels=300x200` 起小窗口 foot,单帧约 1.5KiB;
 注入/接管验收改用 tests/integration/displaytest(单读循环、1MiB 读缓冲、
-wire 层按 protocol.md 手写,兼作协议交叉验证)。displaytest 顺带确认:
-reference 的 handlers_display 把 Inject 的所有错误一律映射为 conflict
-(按 §4 语义「窗口不存在」应为 not_found),agent 模式亦无调用方接线
-(SetAgentMode 无人调用)——两者属 agentd 范围。
+wire 层按 protocol.md 手写,兼作协议交叉验证)。displaytest 顺带发现的
+两个 agentd 侧问题:Inject 对不存在窗口的错误码——Rust 实现已按 §4
+语义改为 not_found(2026-10-17;此前所有注入错误一律映射 conflict)。
+窗口 agent 模式切换在 Rust 实现中已全链接线(2026-10-17 核对):
+task.rs 活跃计数 0↔1 → bin 回调 → broker.set_tasks_active(free↔agent)
+→ inject 在 agent 模式硬拒绝、claim 需 force;mixcomp 收 input.mode
+仅记录(仲裁在 mixumd,v1 决策)。
 

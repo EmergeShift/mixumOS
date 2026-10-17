@@ -494,10 +494,12 @@ impl AgentDriver for ExternalDriver {
         let stderr = child.stderr.take().ok_or("external stderr 不可用")?;
         let hello =
             serde_json::json!({"type":"hello","instruction":task.instruction,"params":task.params});
-        stdin
-            .write_all(serde_json::to_string(&hello)?.as_bytes())
-            .await?;
-        stdin.write_all(b"\n").await?;
+        // 尽力而为:不读 stdin 的短命 agent 可能在父进程写入前已退出
+        // (EPIPE),此时按 stdout EOF 走正常收尾,不能因此标 failed
+        if let Err(e) = stdin.write_all(serde_json::to_string(&hello)?.as_bytes()).await {
+            eprintln!("external hello 写入失败(子进程可能已退出): {e}");
+        }
+        let _ = stdin.write_all(b"\n").await;
         let mut lines = BufReader::new(stdout).lines();
         let mut stderr_lines = BufReader::new(stderr).lines();
         let mut failed: Option<String> = None;
