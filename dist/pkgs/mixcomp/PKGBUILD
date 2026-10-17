@@ -49,12 +49,12 @@ check() {
 	if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then
 		return 0
 	fi
-	# 占位期宽限:启动即段错误是 mixcomp 的已知上游 bug(虚拟 pointer
-	# 创建时序,在修),不是打包缺陷;
-	# 修复合入后把默认值改为 1 收紧。
+	# 0.18 迁移期宽限:历史上的启动段错误(虚拟 pointer 时序等六处坑)
+	# 已修复(见 wayland-magic.md §8.1-8.6,71 分钟稳定运行);默认收紧,
+	# 需要临时放宽时以 MIXCOMP_SMOKE_STRICT=0 构建。
 	if { [ "$rc" -eq 139 ] || [ "$rc" -eq 134 ]; } &&
-		[ "${MIXCOMP_SMOKE_STRICT:-0}" != "1" ]; then
-		warning "mixcomp 冒烟段错误(exit=$rc)——已知上游 bug,宽限通过(详见包内注释)"
+		[ "${MIXCOMP_SMOKE_STRICT:-1}" != "1" ]; then
+		warning "mixcomp 冒烟段错误(exit=$rc)——MIXCOMP_SMOKE_STRICT=0 宽限通过"
 		return 0
 	fi
 	echo "mixcomp 冒烟失败(exit=$rc)" >&2
