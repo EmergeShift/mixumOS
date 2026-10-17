@@ -15,6 +15,10 @@ pub type FreezeFn =
     Box<dyn FnMut(&mut dyn FnMut() -> Result<(), EngineError>) -> Result<(), EngineError> + Send>;
 pub type DiffResult = (Vec<String>, Vec<String>, Vec<String>, usize);
 
+/// GC 保护窗口:窗口内写入的块即使未被树引用也不清(sweep 按 mtime 跳过),
+/// 避免推送/导入进行中的块被并发 GC 删掉(snapshots.md §5)。
+pub const GC_PROTECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error(transparent)]
@@ -269,7 +273,7 @@ impl Engine {
         for h in marks {
             self.store.mark(h);
         }
-        Ok(self.store.sweep()?)
+        Ok(self.store.sweep(GC_PROTECT_WINDOW)?)
     }
     fn clear_root(&self) -> Result<(), EngineError> {
         for item in fs::read_dir(&self.root)? {
