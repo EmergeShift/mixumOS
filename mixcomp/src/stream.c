@@ -128,6 +128,24 @@ void stream_send_window(struct mixcomp_server *s, struct mixcomp_window *w,
 	json_object_put(root);
 }
 
+// stream.info —— 编码能力回告:mixumd 据此统一订阅者编码并广播 window 事件。
+static void stream_send_info(struct mixcomp_server *s, int id,
+		const char *codec) {
+	if (!s->sock_ready) {
+		return;
+	}
+	json_object *root = json_object_new_object();
+	json_object_object_add(root, "type", json_object_new_string("stream.info"));
+	json_object_object_add(root, "id", json_object_new_int(id));
+	json_object_object_add(root, "codec", json_object_new_string(codec));
+	const char *str = json_object_to_json_string(root);
+	rec_send_rc rc = rec_send(s->sock_fd, REC_CONTROL, str, strlen(str));
+	if (rc == REC_SEND_FATAL) {
+		stream_mark_dead(s);
+	}
+	json_object_put(root);
+}
+
 // encode_jpeg —— 按 DRM 格式选择 libjpeg 扩展色彩空间。
 static unsigned char *encode_jpeg(const unsigned char *pix, int stride,
 		int width, int height, uint32_t drm_format, int quality,
@@ -176,22 +194,53 @@ void stream_send_frame(struct mixcomp_server *s, struct mixcomp_window *w,
 	if (!s->sock_ready) {
 		return;
 	}
-	unsigned long jpg_size = 0;
-	unsigned char *jpg = encode_jpeg(rgba, stride, width, height, drm_format,
-			s->jpeg_quality, &jpg_size);
-	if (jpg == NULL || jpg_size == 0) {
-		free(jpg);
+	uint8_t rec_type = REC_VIDEO;
+	unsigned char *enc_data = NULL;
+	unsigned long enc_size = 0;
+	uint16_t flags = 0;
+#ifdef HAVE_OPENH264
+	if (w->h264 != NULL) {
+		// 窗口尺寸变化 → 重建编码器
+		if (w->h264_w != width || w->h264_h != height) {
+			h264_close(w->h264);
+			w->h264 = h264_open(width, height, w->fps);
+			w->h264_w = width;
+			w->h264_h = height;
+			w->h264_idr_pending = w->h264 != NULL;
+			if (w->h264 == NULL) {
+				stream_send_info(s, (int)w->id, "jpeg");
+			}
+		}
+	}
+	if (w->h264 != NULL) {
+		int key = 0;
+		enc_data = h264_encode(w->h264, rgba, stride, width, height,
+				w->h264_idr_pending, &enc_size, &key);
+		w->h264_idr_pending = false;
+		if (enc_data != NULL) {
+			rec_type = REC_VIDEO_H264;
+			flags = key ? FRAME_FLAG_KEYFRAME : 0;
+		}
+	}
+#endif
+	if (rec_type == REC_VIDEO) {
+		// JPEG 路径(v1 语义:每帧即关键帧)
+		enc_data = encode_jpeg(rgba, stride, width, height, drm_format,
+				s->jpeg_quality, &enc_size);
+		flags = FRAME_FLAG_KEYFRAME;
+	}
+	if (enc_data == NULL || enc_size == 0) {
+		free(enc_data);
 		return;
 	}
 	uint8_t buf[FRAME_HDR];
 	buf[0] = 0x01; // ChanVideo
 	uint32_t id = w->id, wd = (uint32_t)width, ht = (uint32_t)height;
-	uint32_t sz = (uint32_t)jpg_size;
+	uint32_t sz = (uint32_t)enc_size;
 	memcpy(buf + 1, &id, 4);
 	memcpy(buf + 5, &wd, 4);
 	memcpy(buf + 9, &ht, 4);
 	memcpy(buf + 13, &sz, 4);
-	uint16_t flags = FRAME_FLAG_KEYFRAME; // v1 全帧即关键帧
 	if (w->have_cursor) {
 		flags |= FRAME_FLAG_HASCURSOR;
 	}
@@ -203,15 +252,15 @@ void stream_send_frame(struct mixcomp_server *s, struct mixcomp_window *w,
 	memcpy(buf + 23, &cw, 2);
 	memcpy(buf + 25, &ch, 2);
 
-	// 帧记录：头 + JPEG 一次写出。
-	size_t total = 5 + FRAME_HDR + jpg_size;
+	// 帧记录：头 + 编码数据一次写出。
+	size_t total = 5 + FRAME_HDR + enc_size;
 	uint8_t *rec = malloc(total);
 	if (rec != NULL) {
-		uint32_t len = FRAME_HDR + (uint32_t)jpg_size;
+		uint32_t len = FRAME_HDR + (uint32_t)enc_size;
 		memcpy(rec, &len, 4);
-		rec[4] = REC_VIDEO;
+		rec[4] = rec_type;
 		memcpy(rec + 5, buf, FRAME_HDR);
-		memcpy(rec + 5 + FRAME_HDR, jpg, jpg_size);
+		memcpy(rec + 5 + FRAME_HDR, enc_data, enc_size);
 		rec_send_rc rc = rec_send_raw(s->sock_fd, rec, total);
 		if (rc == REC_SEND_FATAL) {
 			stream_mark_dead(s);
@@ -220,7 +269,7 @@ void stream_send_frame(struct mixcomp_server *s, struct mixcomp_window *w,
 		}
 		free(rec);
 	}
-	free(jpg);
+	free(enc_data);
 }
 
 // stream_recv_record —— 从累积缓冲取一条完整记录；不足则再收一轮。
@@ -317,8 +366,9 @@ void stream_poll_control(struct mixcomp_server *s) {
 					const char *t = json_object_get_string(jt);
 					if (strcmp(t, "stream.start") == 0 ||
 							strcmp(t, "stream.stop") == 0) {
-						json_object *jid, *jfps;
+						json_object *jid, *jfps, *jcodec;
 						int id = 0, fps = 30;
+						const char *codec = "jpeg";
 						if (json_object_object_get_ex(root, "id", &jid)) {
 							id = json_object_get_int(jid);
 						}
@@ -329,10 +379,39 @@ void stream_poll_control(struct mixcomp_server *s) {
 								fps = 30;
 							}
 						}
+						if (strcmp(t, "stream.start") == 0 &&
+								json_object_object_get_ex(root, "codec", &jcodec)) {
+							codec = json_object_get_string(jcodec);
+						}
 						struct mixcomp_window *w = find_window(s, id);
 						if (w != NULL) {
 							w->want_stream = strcmp(t, "stream.start") == 0;
 							w->fps = fps;
+#ifdef HAVE_OPENH264
+							if (!w->want_stream) {
+								if (w->h264 != NULL) {
+									h264_close(w->h264);
+									w->h264 = NULL;
+								}
+								w->h264_idr_pending = false;
+							} else if (strcmp(codec, "h264") == 0) {
+								if (w->h264 == NULL && w->width > 0) {
+									w->h264 = h264_open(w->width, w->height, fps);
+									w->h264_w = w->width;
+									w->h264_h = w->height;
+								}
+								w->h264_idr_pending = true;
+								// 能力回告:openh264 缺失/建失败时回 jpeg
+								stream_send_info(s, id,
+										w->h264 != NULL ? "h264" : "jpeg");
+							} else {
+								if (w->h264 != NULL) {
+									h264_close(w->h264);
+									w->h264 = NULL;
+								}
+								w->h264_idr_pending = false;
+							}
+#endif
 						}
 					} else if (strcmp(t, "input") == 0 ||
 							strcmp(t, "input.mode") == 0) {

@@ -77,6 +77,12 @@ static void destroy_cb(struct wl_listener *listener, void *data) {
 	if (w->timer != NULL) {
 		wl_event_source_remove(w->timer);
 	}
+#ifdef HAVE_OPENH264
+	if (w->h264 != NULL) {
+		h264_close(w->h264);
+		w->h264 = NULL;
+	}
+#endif
 	wl_list_remove(&w->map.link);
 	wl_list_remove(&w->unmap.link);
 	wl_list_remove(&w->commit.link);
