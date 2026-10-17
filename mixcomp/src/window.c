@@ -77,6 +77,12 @@ static void destroy_cb(struct wl_listener *listener, void *data) {
 	if (w->timer != NULL) {
 		wl_event_source_remove(w->timer);
 	}
+#ifdef HAVE_OPENH264
+	if (w->h264 != NULL) {
+		h264_close(w->h264);
+		w->h264 = NULL;
+	}
+#endif
 	wl_list_remove(&w->map.link);
 	wl_list_remove(&w->unmap.link);
 	wl_list_remove(&w->commit.link);
@@ -92,7 +98,8 @@ static void destroy_cb(struct wl_listener *listener, void *data) {
 static int timer_cb(void *data) {
 	struct mixcomp_window *w = data;
 	if (w->timer != NULL) {
-		wl_event_source_timer_update(w->timer, 33);
+		// 按窗口 fps 重挂节拍（stream.start 可动态调整，缺省 30）。
+		wl_event_source_timer_update(w->timer, w->fps > 0 ? 1000 / w->fps : 33);
 	}
 	if (w->surface == NULL || !w->surface->mapped) {
 		return 0;
@@ -154,11 +161,11 @@ static void map_cb(struct wl_listener *listener, void *data) {
 	struct mixcomp_window *w = wl_container_of(listener, w, map);
 	struct mixcomp_server *s = w->server;
 
-	// 每窗口独立帧节拍定时器（33ms ≈ 30fps 上限）。
+	// 每窗口独立帧节拍定时器（缺省 30fps，stream.start 可动态调整）。
 	w->timer = wl_event_loop_add_timer(wl_display_get_event_loop(s->display),
 			timer_cb, w);
 	if (w->timer != NULL) {
-		wl_event_source_timer_update(w->timer, 33);
+		wl_event_source_timer_update(w->timer, w->fps > 0 ? 1000 / w->fps : 33);
 	}
 	stream_send_window(s, w, "window.open");
 	wlr_log(WLR_INFO, "窗口已隔离: id=%u app=%s title=%s %dx%d",

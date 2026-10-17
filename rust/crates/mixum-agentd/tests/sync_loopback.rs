@@ -148,3 +148,66 @@ async fn push_reports_missing_node() {
         .unwrap_err();
     assert!(matches!(err, sync::SyncError::NotFound(_)));
 }
+
+/// 盒盖→云端续跑的最后一环:推送后远端 restore 物化工作区,内容逐字节一致,
+/// head 移到该节点(云端从这一刻继续工作)。
+#[tokio::test(flavor = "multi_thread")]
+async fn push_then_restore_materializes_workspace_on_remote() {
+    let (_dir_a, engine_a, _token_a, _port_a) = spawn_node("node-a3").await;
+    let (_dir_b, engine_b, token_b, port_b) = spawn_node("node-b3").await;
+
+    // A 端工作区:嵌套目录、多文件、符号链接,然后快照。
+    let node_id = {
+        let mut engine = engine_a.lock().unwrap();
+        let root = engine.root.clone();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::write(root.join("src/main.rs"), b"fn main() {}\n").unwrap();
+        std::fs::write(root.join("src/deep/data.bin"), vec![7u8; 100_000]).unwrap();
+        std::fs::write(root.join("README.md"), b"# demo\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("main.rs", root.join("src/link.rs")).unwrap();
+        engine
+            .snapshot(mixum_snapshot::KIND_DISK, "合盖前迁移", false)
+            .unwrap()
+            .id
+    };
+
+    let stats = sync::push_node(
+        &engine_a,
+        &node_id,
+        &format!("ws://127.0.0.1:{port_b}"),
+        &token_b,
+        "node-a3",
+    )
+    .await
+    .unwrap();
+    assert!(stats.chunks_sent >= 1, "至少推送一个块:{stats:?}");
+
+    // B 端 restore(inplace):物化 + head 迁移。
+    let snapshots = RealSnapshotEngine::from_shared(engine_b.clone());
+    let result = snapshots.restore(&node_id, "inplace", None).await.unwrap();
+    assert_eq!(result.restored_to, node_id);
+    assert_eq!(snapshots.head().await.unwrap().as_deref(), Some(node_id.as_str()));
+
+    {
+        let engine = engine_b.lock().unwrap();
+        let root = &engine.root;
+        assert_eq!(
+            std::fs::read(root.join("src/main.rs")).unwrap(),
+            b"fn main() {}\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join("src/deep/data.bin")).unwrap(),
+            vec![7u8; 100_000]
+        );
+        assert_eq!(std::fs::read(root.join("README.md")).unwrap(), b"# demo\n");
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_link(root.join("src/link.rs"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "main.rs"
+        );
+    }
+}
