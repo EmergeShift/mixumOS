@@ -496,11 +496,7 @@ impl ServerCertVerifier for SkipServerVerification {
 }
 
 fn insecure_tls_client() -> rustls::ClientConfig {
-    crate::auth::ensure_crypto_provider();
-    rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth()
+    crate::auth::insecure_tls_client()
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ pub struct Identity {
 /// aws-lc-rs:两个都在时 rustls 无法自动选择,这里显式钉住 ring。
 /// install_default 全进程幂等,重复调用返回 Err,忽略即可。
 pub fn ensure_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    mixum_protocol::token::ensure_crypto_provider();
 }
 
 pub fn load_or_create_identity(
@@ -174,5 +174,57 @@ mod tests {
         assert!(dir.path().join("identity.key").exists());
         assert!(dir.path().join("tls-cert.pem").exists());
         assert!(dir.path().join("tls-key.pem").exists());
+    }
+}
+
+/// 不校验服务端证书的 TLS 客户端配置(gateway relay/同步链路的自签场景)。
+pub fn insecure_tls_client() -> rustls::ClientConfig {
+    ensure_crypto_provider();
+    rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+        .with_no_client_auth()
+}
+
+#[derive(Debug)]
+struct SkipServerVerification;
+
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+        ]
     }
 }

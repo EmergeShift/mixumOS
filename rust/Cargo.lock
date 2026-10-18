@@ -1573,8 +1573,14 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "mixum-protocol",
+ "rand 0.8.8",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
+ "sha2",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
 ]
 
@@ -1603,6 +1609,7 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "rand 0.8.8",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

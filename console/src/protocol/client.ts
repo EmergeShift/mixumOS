@@ -57,6 +57,8 @@ export class MixumClient {
   address = ''
   token = ''
   device = 'console'
+  // gateway 多节点路由:设置后所有信封携带 node 字段(直连 mixumd 时不设)
+  node = ''
 
   // 重连后需要恢复的订阅
   private attached = new Map<number, { fps: number; codec: 'jpeg' | 'h264' }>()
@@ -270,6 +272,7 @@ export class MixumClient {
       op,
       seq: this.seq,
       ts: Date.now(),
+      ...(this.node ? { node: this.node } : {}),
       payload,
     }
   }
@@ -343,6 +346,31 @@ export class MixumClient {
     return this.request<{ mode: string }>('display.takeover', { window: windowId, action, force })
   }
 
+  // ── gateway M2:节点列表 / 设备配对 / 吊销 ──
+
+  isGateway(): boolean {
+    return this.hello?.server.includes('gateway') ?? false
+  }
+
+  nodeList(): Promise<{ nodes: string[] }> {
+    return this.request('gateway.node.list')
+  }
+
+  pairCreate(): Promise<{ code: string; expiresIn: number }> {
+    return this.request('gateway.pair.create')
+  }
+
+  pairClaim(code: string, deviceName: string): Promise<{ token: string; deviceId: string }> {
+    return this.request('gateway.pair.claim', { code, deviceName })
+  }
+
+  deviceList(): Promise<{ devices: { jti: string; name: string; sub: string; iat: number }[] }> {
+    return this.request('gateway.device.list')
+  }
+
+  deviceRevoke(jti: string): Promise<{ revoked: boolean }> {
+    return this.request('gateway.device.revoke', { jti })
+  }
   snapTree(): Promise<SnapTreeResponse> {
     return this.request('snap.tree')
   }

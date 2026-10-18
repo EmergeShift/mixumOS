@@ -47,7 +47,23 @@ async fn run(relay: GatewayRelay) -> Result<(), Box<dyn std::error::Error + Send
     // 客户端自行重连/重订阅(与直连 mixumd 的重连语义一致)。
     let mut backoff = 1u64;
     loop {
-        match tokio_tungstenite::connect_async(&relay.url).await {
+        // wss 时用不校验自签证书的 connector(节点→gateway 属同一信任域,
+        // M2 限定;公网部署换受信证书后可去)。
+        let connector = if relay.url.starts_with("wss://") {
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(
+                crate::auth::insecure_tls_client(),
+            )))
+        } else {
+            None
+        };
+        match tokio_tungstenite::connect_async_tls_with_config(
+            &relay.url,
+            None,
+            false,
+            connector,
+        )
+        .await
+        {
             Ok((ws, _)) => {
                 eprintln!("gateway 已连接: {}", relay.url);
                 if let Err(e) = pump(&relay, ws, local_port).await {
