@@ -3,14 +3,15 @@
 #   A. 自建 wlroots0.18 包 → 入 mini 仓库 → 容器 pacman 认领 [mixum] 源
 #      (官方源已无 wlroots0.18,依赖必须先自给,见包内注释);
 #   B. 按 PKGBUILD 声明装依赖 → makepkg 四包 → repo-add。
-# 由 dist/repo/build-repo.sh 在容器里调用;不在宿主机直接跑。
-#   用法:container-build.sh <架构名>        # aarch64 | x86_64
-# 约定挂载:仓库只读挂 /build/mixumos,产物目录读写挂 /out;
-# 前置:宿主已导出 /out/build/rust 与 /out/build/cross-protocol(见 build-repo.sh)。
+# 由 dist/repo/build-repo.sh 经 docker cp 注入 /build/incoming 后在容器里调用;
+# 不在宿主机直接跑。  用法:container-build.sh <架构名>        # aarch64 | x86_64
+# 约定:全部输入(build-repo.sh 经 docker cp 注入)在 /build/incoming/;
+#       产物目录读写挂 /out(输出方向;若宿主回读陈旧,build-repo.sh 负责 docker cp 回收)。
 set -euo pipefail
 
 ARCH="${1:?用法:container-build.sh <aarch64|x86_64>}"
-GIT_SRC="/build/mixumos"
+IN="/build/incoming"
+GIT_SRC="$IN"
 BUILD="/build/pkgs"
 OUT_REPO="/out/repo-$ARCH"
 COMMIT="${_commit:-HEAD}"
@@ -65,7 +66,7 @@ if [ -z "$WL_FILE" ]; then
 	rm -rf "$BUILD/wlroots0.18"
 	id builder >/dev/null 2>&1 || useradd -m builder
 	install -d "$BUILD"
-	cp -a "$GIT_SRC/dist/pkgs/wlroots0.18" "$BUILD/wlroots0.18"
+	cp -a "$GIT_SRC/pkgs/wlroots0.18" "$BUILD/wlroots0.18"
 	chown -R builder:builder "$BUILD/wlroots0.18"
 	install_pkgbuild_deps "$BUILD/wlroots0.18"
 	(
@@ -100,17 +101,19 @@ export MIXUM_CARGO_TARGET_DIR=/cargo-target
 echo "==> [container] stage B:按 PKGBUILD 声明装依赖"
 rm -rf /build/src "$BUILD"
 install -d "$BUILD"
-# mixcomp 的 git 源:用宿主准备好的裸仓库(见 build-repo.sh),拷进容器
-cp -a /out/src-bare.git /build/src
+# mixcomp 的 git 源:宿主打的单文件 bundle(经 docker cp 注入)——
+# 目录逐文件拷贝在 macOS 共享挂载上曾静默丢对象,clone 自 bundle 完整性由 git 保证
+git clone --bare --quiet "$IN/src.bundle" /build/src
+git -C /build/src cat-file -e "$(git -C /build/src rev-parse HEAD^{tree})"  # bundle 完整性闸门
 git config --system --add safe.directory /build/src
 chmod -R a+rX /build/src
-cp -a "$GIT_SRC/dist/pkgs/." "$BUILD/"
+cp -a "$GIT_SRC/pkgs/." "$BUILD/"
 rm -rf "$BUILD/wlroots0.18"
 # mixum-agentd 由 PKGBUILD(cargo)在容器内原生构建:同步 rust/ 与交叉协议向量
 rm -rf "$BUILD/mixum-agentd/rust" "$BUILD/mixum-agentd/tests"
-cp -a /out/build/rust "$BUILD/mixum-agentd/rust"
+cp -a "$IN/rust" "$BUILD/mixum-agentd/rust"
 install -d "$BUILD/mixum-agentd/tests"
-cp -a /out/build/cross-protocol "$BUILD/mixum-agentd/tests/cross-protocol"
+cp -a "$IN/cross-protocol" "$BUILD/mixum-agentd/tests/cross-protocol"
 id builder >/dev/null 2>&1 || useradd -m builder
 # 卷根属主(builder 每次写入);卷内容上轮已属 builder,不必递归
 install -d -o builder -g builder "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR" 2>/dev/null ||
