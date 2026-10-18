@@ -6,8 +6,8 @@ FROM alpine:3.21
 
 RUN apk add --no-cache \
 	make build-base pkgconf wlroots-dev json-c-dev libxkbcommon-dev \
-	libjpeg-turbo-dev wayland-protocols \
-	wlroots json-c libjpeg-turbo libxkbcommon \
+	libjpeg-turbo-dev wayland-protocols openh264-dev \
+	wlroots json-c libjpeg-turbo libxkbcommon openh264 \
 	foot font-noto mesa-egl mesa-gles bash
 
 # mixcomp 源码内构建（协议头由 Makefile 用 wayland-scanner 现场生成）

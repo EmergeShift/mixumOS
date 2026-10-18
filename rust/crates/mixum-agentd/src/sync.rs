@@ -153,6 +153,12 @@ impl SyncBackend {
             }
         }
         let engine = self.engine.lock().expect("快照引擎锁");
+        // 幂等:同 id 节点此前已落树(commit 恒发后的幂等重推路径),回既有 id。
+        if !stage.node.id.is_empty() {
+            if let Ok(existing) = engine.tree.get(&stage.node.id) {
+                return Ok(existing.id);
+            }
+        }
         let mut node = TreeNode::new(
             stage.node.id.clone(),
             stage.node.parent.clone(),
@@ -267,16 +273,15 @@ pub async fn push_node(
         bytes_sent += data.len() as i64;
     }
 
-    // 5. 有块才 commit;远端回 .ok 负载忽略。
-    if sent > 0 {
-        client
-            .call(
-                format!("{}.commit", op::SNAP_PUSH),
-                serde_json::json!({"count": sent}),
-                Duration::from_secs(180),
-            )
-            .await?;
-    }
+    // 5. commit 恒发:落树发生在这一步,与是否传输了块无关——
+    //    0 块节点与幂等重推的缺失列表为空,跳过 commit 会使节点永不到达远端树。
+    client
+        .call(
+            format!("{}.commit", op::SNAP_PUSH),
+            serde_json::json!({"count": sent}),
+            Duration::from_secs(180),
+        )
+        .await?;
     let dedup = if sent > 0 && (sent as usize) < chunks.len() {
         format!("{:.2}", chunks.len() as f64 / sent as f64)
     } else {
@@ -570,6 +575,75 @@ mod tests {
         backend.store_chunk(&mut stage, &frame);
         let err = backend.commit(stage).unwrap_err().to_string();
         assert!(err.contains("缺失块未送达"), "实际：{err}");
+    }
+
+    #[test]
+    fn commit_lands_zero_chunk_node() {
+        // 回归:空清单节点(0 块)无缺失、无传输,commit 必须照常落树。
+        let (_dir, backend) = open_backend("commit-zero-chunk");
+        let stage = backend.stage_import(ImportRequest {
+            node: RemoteNodeMeta {
+                id: "snap_empty_1".into(),
+                branch: "main".into(),
+                kind: KIND_DISK.into(),
+                origin: "node-a".into(),
+                ..Default::default()
+            },
+            manifest: Manifest {
+                version: 1,
+                files: vec![],
+                dirs: vec![],
+            },
+            chunks: vec![],
+        });
+        assert!(stage.missing().is_empty());
+        let id = backend.commit(stage).unwrap();
+        assert_eq!(id, "snap_empty_1");
+        let engine = backend.engine.lock().unwrap();
+        assert!(engine.tree.get("snap_empty_1").is_ok());
+    }
+
+    #[test]
+    fn commit_is_idempotent_for_existing_node() {
+        // commit 恒发后,幂等重推会以同 id 再次 commit:回既有 id,不报落树失败。
+        let (_dir, backend) = open_backend("commit-idempotent");
+        let data = b"payload";
+        let (manifest, chunks) = sample_manifest(data);
+
+        let mut stage = backend.stage_import(ImportRequest {
+            node: RemoteNodeMeta {
+                id: "snap_dup_1".into(),
+                branch: "main".into(),
+                kind: KIND_DISK.into(),
+                ..Default::default()
+            },
+            manifest: manifest.clone(),
+            chunks: chunks.clone(),
+        });
+        for hash in &chunks {
+            let mut frame = vec![mixum_protocol::frames::chan::CHUNK];
+            frame.extend_from_slice(&Sha256::digest(data));
+            frame.extend_from_slice(data);
+            let _ = hash; // 帧内含哈希,store_chunk 按帧内哈希落 CAS
+            backend.store_chunk(&mut stage, &frame);
+        }
+        let id = backend.commit(stage).unwrap();
+        assert_eq!(id, "snap_dup_1");
+
+        // 第二次:同 id、缺失列表为空(块已在 CAS)。
+        let stage2 = backend.stage_import(ImportRequest {
+            node: RemoteNodeMeta {
+                id: "snap_dup_1".into(),
+                branch: "main".into(),
+                kind: KIND_DISK.into(),
+                ..Default::default()
+            },
+            manifest,
+            chunks,
+        });
+        assert!(stage2.missing().is_empty());
+        let id2 = backend.commit(stage2).unwrap();
+        assert_eq!(id2, "snap_dup_1");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! WSS/WS 服务、握手、能力路由和限速。
 
 use crate::auth::Authorizer;
-use crate::display::Broker;
+use crate::display::{Broker, DisplayError};
 use crate::snapshot::SnapshotEngine;
 use crate::task::{Engine, TaskSpec};
 use crate::wire::{DisplayListResponse, HelloRequest, HelloResponse, TaskSubmitRequest};
@@ -18,9 +18,13 @@ use tokio_rustls::{rustls, TlsAcceptor};
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message, WebSocketStream};
 
 /// WS 子协议协商:服务端必须应答 mixum.v1(否则守协议的客户端会拒绝连接)。
+// allow:回调签名被 accept_hdr_async 钉死为 tungstenite 的 ErrorResponse
+// (自身就超过 result_large_err 阈值),错误类型不可更换;错误走冷路径,
+// 装箱收益仅在这一个边界上存在,故整体 allow 并在返回类型里装箱。
+#[allow(clippy::result_large_err)]
 fn accept_with_subprotocol<S>(
     stream: S,
-) -> impl std::future::Future<Output = Result<WebSocketStream<S>, tokio_tungstenite::tungstenite::Error>>
+) -> impl std::future::Future<Output = Result<WebSocketStream<S>, Box<tokio_tungstenite::tungstenite::Error>>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -48,7 +52,7 @@ where
         }
         Ok(Response::from_parts(parts, body))
     };
-    accept_hdr_async(stream, cb)
+    async move { accept_hdr_async(stream, cb).await.map_err(Box::new) }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -187,7 +191,7 @@ impl Server {
 
     pub async fn handle_stream<S>(
         self: Arc<Self>,
-        stream: Result<WebSocketStream<S>, tokio_tungstenite::tungstenite::Error>,
+        stream: Result<WebSocketStream<S>, Box<tokio_tungstenite::tungstenite::Error>>,
     ) -> Result<(), ServerError>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -212,7 +216,7 @@ impl Server {
             sync_stage: None,
         };
         while let Some(message) = source.next().await {
-            match message? {
+            match message.map_err(Box::new)? {
                 Message::Text(text) => {
                     if text.len() > session.server.config.max_message_size {
                         session
@@ -754,6 +758,10 @@ impl Session {
             .and_then(Value::as_u64)
             .unwrap_or_default() as u32;
         let sub_id = format!("{}-{}", self.id, id);
+        let codec = payload
+            .get("codec")
+            .and_then(Value::as_str)
+            .unwrap_or(crate::display::CODEC_JPEG);
         match self
             .server
             .broker
@@ -761,19 +769,21 @@ impl Session {
                 id,
                 sub_id,
                 payload.get("fps").and_then(Value::as_u64).unwrap_or(30) as u32,
+                codec,
             )
             .await
         {
-            Ok((width, height, fps, mut frames)) => {
+            Ok((width, height, fps, mut sub)) => {
+                let codec = sub.codec.clone();
                 let tx = self.tx.clone();
                 tokio::spawn(async move {
-                    while let Some(frame) = frames.recv().await {
+                    while let Some(frame) = sub.frames.recv().await {
                         let _ = tx.send(Message::Binary(frame.into())).await;
                     }
                 });
                 self.reply(
                     env,
-                    json!({"window":id,"codec":"jpeg","width":width,"height":height,"fps":fps}),
+                    json!({"window":id,"codec":codec,"width":width,"height":height,"fps":fps}),
                 )
                 .await;
             }
@@ -856,6 +866,10 @@ impl Session {
         }
         match self.server.broker.inject(id, p.clone()).await {
             Ok(()) => self.reply(env, json!({"ok":true})).await,
+            Err(DisplayError::NotFound(_)) => {
+                self.err(env, ErrCode::NotFound, &format!("窗口不存在: {id}"))
+                    .await;
+            }
             Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
         }
     }
@@ -888,8 +902,10 @@ impl Session {
 pub enum ServerError {
     #[error("网络：{0}")]
     Io(#[from] std::io::Error),
+    // tungstenite::Error 体积超过 result_large_err 阈值,装箱以保
+    // Result<(), ServerError> 在热路径签名上的传递成本。
     #[error("WebSocket：{0}")]
-    Ws(#[from] tokio_tungstenite::tungstenite::Error),
+    Ws(#[from] Box<tokio_tungstenite::tungstenite::Error>),
 }
 
 fn payload<T: serde::de::DeserializeOwned>(env: &Envelope) -> Result<T, String> {

@@ -13,6 +13,14 @@ use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 pub const MODE_AGENT: &str = "agent";
 pub const MODE_USER: &str = "user";
 pub const MODE_FREE: &str = "free";
+pub const CODEC_JPEG: &str = "jpeg";
+pub const CODEC_H264: &str = "h264";
+
+/// mixumd↔mixcomp 私有通道的记录类型(0x01 JSON 控制之外):
+/// 0x02 = JPEG 视频帧,0x03 = H.264 视频帧(负载同为协议 §5 的
+/// 0x01 + 27 字节头 + 编码数据,公有 WS 帧格式不区分)。
+const COMP_REC_VIDEO: u8 = 0x02;
+const COMP_REC_VIDEO_H264: u8 = 0x03;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DisplayError {
@@ -29,6 +37,8 @@ pub enum DisplayError {
 pub struct FrameSubscription {
     pub id: String,
     pub frames: FrameReceiver,
+    /// 订阅者协商的编码(broker 按 codec 路由帧)
+    pub codec: String,
 }
 
 #[derive(Clone)]
@@ -84,11 +94,19 @@ impl FrameReceiver {
             self.queue.notify.notified().await;
         }
     }
+    pub fn try_recv(&self) -> Option<Vec<u8>> {
+        self.queue.items.try_lock().ok()?.pop_front()
+    }
+}
+
+struct Subscriber {
+    sender: FrameSender,
+    codec: String,
 }
 
 struct WindowState {
     window: Window,
-    subscribers: HashMap<String, FrameSender>,
+    subscribers: HashMap<String, Subscriber>,
 }
 
 #[derive(Clone)]
@@ -199,12 +217,14 @@ impl Broker {
             }
         });
         let mode = entry.window.mode.clone();
+        let codec = entry.window.codec.clone();
         entry.window = Window {
             mode: if mode.is_empty() {
                 window.mode.clone()
             } else {
                 mode
             },
+            codec: codec.or(window.codec),
             ..window
         };
         let changed = entry.window.clone();
@@ -221,6 +241,7 @@ impl Broker {
             height: 0,
             focused: false,
             mode: MODE_FREE.into(),
+            codec: None,
         });
     }
     /// 任务引擎在窗口生命周期变化时切换 agent 输入归属。
@@ -239,22 +260,40 @@ impl Broker {
         id: u32,
         subscriber_id: impl Into<String>,
         fps: u32,
-    ) -> Result<(u32, u32, u32, FrameReceiver), DisplayError> {
+        codec: &str,
+    ) -> Result<(u32, u32, u32, FrameSubscription), DisplayError> {
+        let codec = match codec {
+            CODEC_H264 => CODEC_H264.to_owned(),
+            _ => CODEC_JPEG.to_owned(),
+        };
         let (tx, rx) = FrameQueue::pair(8);
         let subscriber_id = subscriber_id.into();
-        let mut all = self.windows.lock().await;
-        let state = all.get_mut(&id).ok_or(DisplayError::NotFound(id))?;
-        state.subscribers.insert(subscriber_id, tx);
-        drop(all);
-        self.send_json(serde_json::json!({"type":"stream.start","id":id,"fps":fps.clamp(1,60)}))
-            .await;
+        {
+            let mut all = self.windows.lock().await;
+            let state = all.get_mut(&id).ok_or(DisplayError::NotFound(id))?;
+            state.subscribers.insert(
+                subscriber_id.clone(),
+                Subscriber {
+                    sender: tx,
+                    codec: codec.clone(),
+                },
+            );
+        }
+        self.send_json(
+            serde_json::json!({"type":"stream.start","id":id,"fps":fps.clamp(1,60),"codec":codec}),
+        )
+        .await;
         let all = self.windows.lock().await;
         let state = all.get(&id).ok_or(DisplayError::NotFound(id))?;
         Ok((
             state.window.width,
             state.window.height,
             fps.clamp(1, 60),
-            rx,
+            FrameSubscription {
+                id: subscriber_id,
+                frames: rx,
+                codec,
+            },
         ))
     }
     pub async fn detach(&self, id: u32, subscriber_id: &str) {
@@ -264,13 +303,19 @@ impl Broker {
         self.send_json(serde_json::json!({"type":"stream.stop","id":id}))
             .await;
     }
-    pub async fn broadcast_frame(&self, id: u32, frame: Vec<u8>) {
+    pub async fn broadcast_frame(&self, id: u32, frame: Vec<u8>, codec: &str) {
         let subscribers = self
             .windows
             .lock()
             .await
             .get(&id)
-            .map(|s| s.subscribers.values().cloned().collect::<Vec<_>>())
+            .map(|s| {
+                s.subscribers
+                    .values()
+                    .filter(|sub| sub.codec == codec)
+                    .map(|sub| sub.sender.clone())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         for tx in subscribers {
             tx.push(frame.clone()).await;
@@ -378,12 +423,23 @@ impl Broker {
             read.read_exact(&mut payload).await?;
             match header[4] {
                 0x01 => self.handle_comp(&payload).await,
-                0x02 => {
+                COMP_REC_VIDEO => {
                     if payload.first() == Some(&frames::chan::VIDEO)
                         && payload.len() >= frames::VIDEO_HEADER_SIZE
                     {
                         if let Ok(frame) = frames::unmarshal_video(&payload) {
-                            self.broadcast_frame(frame.window_id, payload).await;
+                            self.broadcast_frame(frame.window_id, payload, CODEC_JPEG)
+                                .await;
+                        }
+                    }
+                }
+                COMP_REC_VIDEO_H264 => {
+                    if payload.first() == Some(&frames::chan::VIDEO)
+                        && payload.len() >= frames::VIDEO_HEADER_SIZE
+                    {
+                        if let Ok(frame) = frames::unmarshal_video(&payload) {
+                            self.broadcast_frame(frame.window_id, payload, CODEC_H264)
+                                .await;
                         }
                     }
                 }
@@ -404,11 +460,28 @@ impl Broker {
                         width: message.width,
                         height: message.height,
                         focused: message.focused,
-                        mode: String::new(),
+                        mode: MODE_FREE.into(),
+                        codec: None,
                     })
                     .await;
                 }
                 "window.close" => self.close(message.id).await,
+                // mixcomp 能力回告:该窗口实际的流编码(如请求 h264 但
+                // openh264 缺失时回 jpeg),更新订阅者与窗口并广播
+                "stream.info" => {
+                    if let Some(codec) = &message.codec {
+                        let mut all = self.windows.lock().await;
+                        if let Some(state) = all.get_mut(&message.id) {
+                            state.window.codec = Some(codec.clone());
+                            for sub in state.subscribers.values_mut() {
+                                sub.codec = codec.clone();
+                            }
+                            let changed = state.window.clone();
+                            drop(all);
+                            let _ = self.window_events.send(changed);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -432,6 +505,8 @@ struct CompMessageWire {
     height: u32,
     #[serde(default)]
     focused: bool,
+    #[serde(default)]
+    codec: Option<String>,
 }
 
 #[cfg(test)]
@@ -450,6 +525,7 @@ mod tests {
                 height: 600,
                 focused: true,
                 mode: MODE_AGENT.into(),
+                codec: None,
             })
             .await;
         assert!(matches!(
@@ -466,5 +542,49 @@ mod tests {
             broker.takeover(1, "release", false).await.unwrap(),
             MODE_FREE
         );
+    }
+
+    #[tokio::test]
+    async fn frames_route_by_subscriber_codec_and_stream_info_updates() {
+        let broker = Broker::new("/tmp/mixum-agentd-test3.sock");
+        broker
+            .open_or_update(Window {
+                id: 7,
+                app_id: "a".into(),
+                title: "A".into(),
+                width: 640,
+                height: 480,
+                focused: true,
+                mode: MODE_FREE.into(),
+                codec: None,
+            })
+            .await;
+        let jpeg_sub = broker.attach(7, "s-jpeg", 30, CODEC_JPEG).await.unwrap();
+        let h264_sub = broker.attach(7, "s-h264", 30, CODEC_H264).await.unwrap();
+        assert_eq!(jpeg_sub.3.codec, CODEC_JPEG);
+        assert_eq!(h264_sub.3.codec, CODEC_H264);
+        // 能力回告前窗口 codec 未定
+        assert_eq!(broker.list().await[0].codec, None);
+
+        // H.264 帧只发给 h264 订阅者
+        broker.broadcast_frame(7, vec![1, 2, 3], CODEC_H264).await;
+        assert_eq!(h264_sub.3.frames.try_recv().as_deref(), Some(&[1u8, 2, 3][..]));
+        assert!(jpeg_sub.3.frames.try_recv().is_none());
+
+        // JPEG 帧只发给 jpeg 订阅者
+        broker.broadcast_frame(7, vec![4, 5], CODEC_JPEG).await;
+        assert_eq!(jpeg_sub.3.frames.try_recv().as_deref(), Some(&[4u8, 5][..]));
+        assert!(h264_sub.3.frames.try_recv().is_none());
+
+        // mixcomp 能力回告:请求 h264 但实际 jpeg → 订阅者与窗口统一切 jpeg
+        let info = serde_json::to_vec(&serde_json::json!({
+            "type":"stream.info","id":7,"codec":"jpeg"
+        }))
+        .unwrap();
+        broker.handle_comp(&info).await;
+        assert_eq!(broker.list().await[0].codec.as_deref(), Some(CODEC_JPEG));
+        // 回告后广播 jpeg,h264 订阅者也能收到(解码器据此切换)
+        broker.broadcast_frame(7, vec![9], CODEC_JPEG).await;
+        assert_eq!(h264_sub.3.frames.try_recv().as_deref(), Some(&[9u8][..]));
     }
 }

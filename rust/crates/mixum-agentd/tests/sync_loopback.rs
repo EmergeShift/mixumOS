@@ -143,6 +143,54 @@ async fn push_moves_node_between_nodes_and_dedups() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn push_lands_zero_chunk_node_on_target() {
+    // 回归:0 块节点(空工作区快照)的推送缺失列表为空,推送端曾跳过
+    // commit 导致节点永不到达目标树;修复后 commit 恒发 + 接收端幂等。
+    let (_dir_a, engine_a, _token_a, _port_a) = spawn_node("node-a4").await;
+    let (_dir_b, engine_b, token_b, port_b) = spawn_node("node-b4").await;
+
+    // 空工作区快照:清单为空、chunks 为 0。
+    let node_id = {
+        let mut engine = engine_a.lock().unwrap();
+        engine
+            .snapshot(mixum_snapshot::KIND_DISK, "空基线", false)
+            .unwrap()
+            .id
+    };
+
+    let stats = sync::push_node(
+        &engine_a,
+        &node_id,
+        &format!("ws://127.0.0.1:{port_b}"),
+        &token_b,
+        "node-a4",
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.chunks_sent, 0, "0 块节点不应传输任何块");
+
+    // 回归断言:节点必须落在目标树上(父=A 的 genesis,不在 B → 远端根)。
+    {
+        let engine = engine_b.lock().unwrap();
+        let node = engine.tree.get(&node_id).unwrap();
+        assert!(node.label.contains("远端根"), "label:{}", node.label);
+        let manifest = node.disk.as_ref().unwrap();
+        assert!(manifest.files.is_empty(), "空清单应原样落树");
+    }
+
+    // 幂等重推:同 id 已在树中,仍应成功。
+    sync::push_node(
+        &engine_a,
+        &node_id,
+        &format!("ws://127.0.0.1:{port_b}"),
+        &token_b,
+        "node-a4",
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn push_reports_missing_node() {
     let (_dir_a, engine_a, _token_a, _port_a) = spawn_node("node-a2").await;
     let (_dir_b, _engine_b, token_b, _port_b) = spawn_node("node-b2").await;
@@ -156,4 +204,67 @@ async fn push_reports_missing_node() {
     .await
     .unwrap_err();
     assert!(matches!(err, sync::SyncError::NotFound(_)));
+}
+
+/// 盒盖→云端续跑的最后一环:推送后远端 restore 物化工作区,内容逐字节一致,
+/// head 移到该节点(云端从这一刻继续工作)。
+#[tokio::test(flavor = "multi_thread")]
+async fn push_then_restore_materializes_workspace_on_remote() {
+    let (_dir_a, engine_a, _token_a, _port_a) = spawn_node("node-a3").await;
+    let (_dir_b, engine_b, token_b, port_b) = spawn_node("node-b3").await;
+
+    // A 端工作区:嵌套目录、多文件、符号链接,然后快照。
+    let node_id = {
+        let mut engine = engine_a.lock().unwrap();
+        let root = engine.root.clone();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::write(root.join("src/main.rs"), b"fn main() {}\n").unwrap();
+        std::fs::write(root.join("src/deep/data.bin"), vec![7u8; 100_000]).unwrap();
+        std::fs::write(root.join("README.md"), b"# demo\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("main.rs", root.join("src/link.rs")).unwrap();
+        engine
+            .snapshot(mixum_snapshot::KIND_DISK, "合盖前迁移", false)
+            .unwrap()
+            .id
+    };
+
+    let stats = sync::push_node(
+        &engine_a,
+        &node_id,
+        &format!("ws://127.0.0.1:{port_b}"),
+        &token_b,
+        "node-a3",
+    )
+    .await
+    .unwrap();
+    assert!(stats.chunks_sent >= 1, "至少推送一个块:{stats:?}");
+
+    // B 端 restore(inplace):物化 + head 迁移。
+    let snapshots = RealSnapshotEngine::from_shared(engine_b.clone());
+    let result = snapshots.restore(&node_id, "inplace", None).await.unwrap();
+    assert_eq!(result.restored_to, node_id);
+    assert_eq!(snapshots.head().await.unwrap().as_deref(), Some(node_id.as_str()));
+
+    {
+        let engine = engine_b.lock().unwrap();
+        let root = &engine.root;
+        assert_eq!(
+            std::fs::read(root.join("src/main.rs")).unwrap(),
+            b"fn main() {}\n"
+        );
+        assert_eq!(
+            std::fs::read(root.join("src/deep/data.bin")).unwrap(),
+            vec![7u8; 100_000]
+        );
+        assert_eq!(std::fs::read(root.join("README.md")).unwrap(), b"# demo\n");
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_link(root.join("src/link.rs"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "main.rs"
+        );
+    }
 }

@@ -206,8 +206,11 @@ impl Store {
         }
     }
 
-    pub fn sweep(&self) -> Result<usize, StoreError> {
+    /// Sweep 未标记块。`protect` 窗口内的块(按 mtime)不删——
+    /// 防止进行中的推送/导入刚写入的块被并发 GC 清掉(协议 §6 竞态)。
+    pub fn sweep(&self, protect: std::time::Duration) -> Result<usize, StoreError> {
         let marks = std::mem::take(&mut *self.marks.lock().expect("store marks mutex poisoned"));
+        let now = std::time::SystemTime::now();
         let mut removed = 0;
         for level in fs::read_dir(self.dir.join("objects"))?
             .filter_map(Result::ok)
@@ -220,6 +223,17 @@ impl Store {
                     entry.file_name().to_string_lossy()
                 );
                 if !marks.contains(&hash) {
+                    if !protect.is_zero() {
+                        let age = entry
+                            .metadata()?
+                            .modified()
+                            .ok()
+                            .and_then(|m| now.duration_since(m).ok())
+                            .unwrap_or_default();
+                        if age < protect {
+                            continue;
+                        }
+                    }
                     fs::remove_file(entry.path())?;
                     removed += 1;
                 }
