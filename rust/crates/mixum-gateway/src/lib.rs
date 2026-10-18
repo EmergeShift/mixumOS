@@ -104,11 +104,7 @@ impl Gateway {
     }
 
     pub async fn verify(&self, token: &str) -> Result<Claims, String> {
-        let claims = self
-            .signer
-            .verifying_key()
-            .clone();
-        let verifier = mixum_protocol::token::Verifier::new(claims);
+        let verifier = mixum_protocol::token::Verifier::new(self.signer.verifying_key());
         let claims = verifier.verify(token).map_err(|e| e.to_string())?;
         if self.revoked.read().await.contains(&claims.jti) && !claims.jti.is_empty() {
             return Err("令牌已吊销".into());
