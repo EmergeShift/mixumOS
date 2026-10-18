@@ -95,7 +95,26 @@ pub struct Tree {
 impl Tree {
     pub fn open(dir: impl AsRef<Path>) -> Result<Self, TreeError> {
         std::fs::create_dir_all(dir.as_ref()).map_err(sled::Error::from)?;
-        let db = sled::open(dir)?;
+        // sled 的文件锁在 Db drop 后由后台线程异步释放,同进程紧接着重开会
+        // 撞锁(WouldBlock)。短暂重试等待释放,避免正常的重启路径偶发失败。
+        let dir = dir.as_ref();
+        let mut db = None;
+        for _ in 0..20 {
+            match sled::open(dir) {
+                Ok(opened) => {
+                    db = Some(opened);
+                    break;
+                }
+                Err(sled::Error::Io(e)) if e.to_string().contains("could not acquire lock") => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let db = db.ok_or(sled::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "could not acquire sled lock after 20 retries",
+        )))?;
         let nodes = db.open_tree("nodes")?;
         let heads = db.open_tree("heads")?;
         let meta = db.open_tree("meta")?;
