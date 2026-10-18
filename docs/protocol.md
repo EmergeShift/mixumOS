@@ -16,6 +16,8 @@
   出现时回 `map.v1`),应答头回显选中的子协议。
 - 消息大小:控制消息上限 32 MiB,二进制记录上限 16 MiB。
 - 限速:每连接令牌桶,50 条/秒,突发 100;超限回 `session.err/rate_limited`。
+- 经 gateway 多节点接入时(§gateway.md),信封可携带可选顶层字段
+  `node`(目标节点名);直连 mixumd 时不存在,mixumd 忽略之。
 
 ## 2. 帧
 

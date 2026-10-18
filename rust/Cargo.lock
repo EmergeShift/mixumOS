@@ -1568,6 +1568,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mixum-gateway"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "mixum-protocol",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "mixum-operator"
 version = "0.1.2"
 dependencies = [
