@@ -91,7 +91,7 @@ async fn handle_connection(
                         }
                     }
                     Side::Node(name) => {
-                        gw.on_node_text(&name, &t).await; // 核心直投客户端
+                        gw.on_node_text(name, &t).await; // 核心直投客户端
                     }
                     Side::Client(session) => {
                         let session = session.clone();
