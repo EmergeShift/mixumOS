@@ -1,0 +1,17 @@
+[package]
+name = "mixum-gateway"
+description = "mixumOS 云端枢纽:多节点信封路由、令牌签发(设计见 docs/gateway.md M1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mixum-gateway"
+path = "src/bin/mixum-gateway.rs"
+
+[dependencies]
+mixum-protocol = { path = "../mixum-protocol" }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }

@@ -131,10 +131,27 @@ gateway 的节点注册表就是 operator 的对账目标:
 
 ## 9. 实施里程碑
 
-- **M1(最小故事)**:gateway 二进制(crate `mixum-gateway`,复用
-  mixum-protocol)+ 节点出站注册/心跳 + envelope.node 路由(文本与
-  二进制)+ 用户/节点令牌签发;e2e:双节点拓扑(两容器各自注册,
-  一个控制台会话切换操作两节点、各开各的窗口流);
+- **M1(✅ 2026-10-18 落地)**:gateway 二进制(crate `mixum-gateway`,
+  复用 mixum-protocol)+ 节点出站注册 + envelope.node 路由(文本与
+  二进制)+ 用户/节点令牌签发(bootstrap 管理令牌打印于启动日志,
+  `gateway.token.issue` 签发,`gateway.node.list` 查询);e2e 双节点
+  拓扑全链路通过(tests/integration/gateway-e2e.mjs:注册/令牌/任务
+  提交/事件流隔离/窗口表隔离/帧按附流路由)。M1 传输为明文 ws(TLS
+  于 M2 补);mixumd 新增 `--gateway/--gateway-name/--gateway-token`
+  出站 relay(rust/crates/mixum-agentd/src/gateway.rs)。
+
+### 9.1 节点通道私有约定(gateway ↔ mixumd relay,非公有协议)
+
+- gateway 为每条客户端连接分配 `gatewaySession`;relay 按会话开一条
+  到本机 mixumd 的回环明文 WS(127.0.0.1,复用
+  server.serve_plain_listener)——mixumd 的订阅/广播是会话级的,按
+  会话开回环天然隔离多客户端;
+- gateway→节点文本:信封 + `gatewaySession` 字段;
+  `gateway.session.open/close` 控制会话生命周期(relay 幂等处理);
+- 节点→gateway 文本:同上带 `gatewaySession`,gateway 剥离后回送
+  客户端;二进制:`u32 LE 会话 id 长度 + 会话 id 字节 + 原始帧`;
+- 会话在首次路由到某节点时惰性开启(重复 open 由 relay 幂等忽略),
+  客户端断开或节点重连时关闭(客户端按既有语义重连/重订阅)。
 - **M2**:设备配对 + 吊销 + gateway.node.list + console 节点选择器
   与配对 UI;
 - **M3**(阶段 5 合流):NodeRegistry 换 k8s 后端、多 gateway 副本。
