@@ -9,7 +9,9 @@ mod store;
 mod tree;
 
 pub use criu::{env_fingerprint, Criu, CriuError};
-pub use engine::{DiffResult, Engine, EngineError, EngineOptions, FreezeFn};
+pub use engine::{
+    DiffResult, Engine, EngineError, EngineOptions, FreezeFn, GC_PROTECT_WINDOW,
+};
 /// 与 Go 参考实现 `Options` 名称对应的便捷别名。
 pub type Options = EngineOptions;
 pub use manifest::{diff_manifests, DirEntry, FileEntry, Manifest, ManifestError, PackStats};

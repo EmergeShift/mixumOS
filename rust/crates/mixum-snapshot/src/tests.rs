@@ -133,10 +133,27 @@ fn restore_inplace_and_fork_follow_current_branch() {
     assert!(e.tree.get(&n3.id).is_ok());
 }
 
+/// 把仓库内全部块文件的 mtime 回拨到纪元,模拟「保护窗口之外的旧块」。
+fn backdate_store_chunks(data_dir: &Path) {
+    for level in fs::read_dir(data_dir.join("store/objects"))
+        .expect("store objects dir")
+        .filter_map(Result::ok)
+    {
+        for f in fs::read_dir(level.path()).unwrap().filter_map(Result::ok) {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(f.path())
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+                .unwrap();
+        }
+    }
+}
+
 #[test]
 fn fork_names_and_leaf_gc() {
     // 对应 Go: TestForkBranchNaming、TestGcRemovesOrphans。
-    let (mut e, _data, root) = engine(false);
+    let (mut e, data, root) = engine(false);
     let (_, n1) = e.tree.head().unwrap();
     let n1 = n1.unwrap();
     let b1 = e.fork(&n1.id, "experiment").unwrap();
@@ -152,8 +169,30 @@ fn fork_names_and_leaf_gc() {
     let before = e.store.count();
     assert!(before >= 2);
     assert!(e.tree.delete(&n2.id).is_ok());
+    // 删除产生的孤儿块是刚写入的(mtime 在保护窗口内):第一轮 GC 不动它们。
+    assert_eq!(e.gc().unwrap(), 0);
+    backdate_store_chunks(data.path());
     assert!(e.gc().unwrap() > 0);
     assert!(e.restore(&n1.id, "inplace", "").is_ok());
+}
+
+#[test]
+fn gc_protects_recent_orphan_chunks() {
+    // 推送竞态保护(§5):远端刚收到、树还没落的块不能被并发 GC 清掉。
+    let (mut e, data, root) = engine(false);
+    let (_, genesis) = e.tree.head().unwrap();
+    let genesis = genesis.unwrap();
+    fs::write(root.path().join("hello.txt"), "内容变了,旧块成为孤儿").unwrap();
+    let n2 = e.snapshot(KIND_DISK, "second", false).unwrap();
+    e.restore(&genesis.id, "inplace", "").unwrap();
+    e.tree.delete(&n2.id).unwrap();
+    // 孤儿块很新:保护窗口内 GC 零删除,数据仍可恢复。
+    assert_eq!(e.gc().unwrap(), 0);
+    // 窗口过后:旧孤儿块被清,被树引用的块(genesis)保留。
+    backdate_store_chunks(data.path());
+    let removed = e.gc().unwrap();
+    assert!(removed > 0);
+    assert!(e.restore(&genesis.id, "inplace", "").is_ok());
 }
 
 #[test]
