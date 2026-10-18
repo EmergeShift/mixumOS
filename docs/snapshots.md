@@ -1,6 +1,7 @@
 # 快照引擎设计
 
-> 状态:语义已经 Go 参考实现验证(单测 + e2e);本文档是 Rust 重写的规格。
+> 状态:语义经参考实现验证后以 Rust 落地(`rust/crates/mixum-snapshot`,
+> 见 §9);本文档仍是快照语义的规格权威。
 
 ## 1. 三种快照
 
@@ -44,7 +45,7 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 
 - 节点 TreeNode:`{ id, parent?, branch, label?, kind, auto?, createdAt,
   origin?, disk: Manifest?, memory: Manifest?, kernel, arch, sizeBytes,
-  chunks }`;存储为单文件 KV 库(Go 版 bbolt;Rust 版选型 redb/sled,阶段 1 定);
+  chunks }`;存储为单文件 KV 库(参考实现曾用 bbolt;Rust 版已选 sled,见 §9);
 - **分支 = 节点属性,head = 指针**。新快照永远挂在「当前 head」之下并成为
   该分支新 head;
 - **原地回退(inplace)**:head 移回旧节点。此后继续工作产生的新快照
@@ -73,8 +74,9 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 ## 5. GC
 
 可达集合 = 树中全部现存节点引用的块(节点删除只允许删叶子,所以
-不存在「被删节点仍被引用」的中间态)。Sweep 清掉 CAS 中未标记块。
-Rust 版可加「保护最近 N 分钟的块」避免与进行中的推送竞态。
+不存在「被删节点仍被引用」的中间态)。Sweep 清掉 CAS 中未标记块;
+「保护最近 10 分钟的块」已实现(`engine.rs::GC_PROTECT_WINDOW`,
+按 mtime 跳过),进行中的推送/导入写入的块不会被并发 GC 清掉。
 
 ## 6. 内存快照(CRIU)
 
@@ -98,7 +100,7 @@ Rust 版可加「保护最近 N 分钟的块」避免与进行中的推送竞态
 - 「mac 盒盖 → 云端续跑」链路:mixum-ctl 监听电源事件 → hybrid 快照
   → snap.push 到云端 → 云端容器 restore 该节点 → 任务继续;
   反向回迁同理。平台侧(macOS)用 IOKN 通知在盒盖前抢出几秒窗口,
-  细节见 host-integration.md(待写)。
+  细节见 host-integration.md。
 
 ## 8. Go 参考实现对照表(已移除)
 
@@ -130,4 +132,20 @@ Rust 实现位于 `rust/crates/mixum-snapshot`，并以本节与本文规格为�
 | 引擎 | `engine.rs` | disk/memory/hybrid、冻结 hook、恢复、GC；纯 memory 恢复拒绝 |
 | CRIU | `criu.rs` | 启动时探测 `criu`，非 Linux 仍可编译；不可用时返回明确错误 |
 
-Rust 节点 ID 使用本地随机十六进制后缀，时间字段仍为 Unix 毫秒；JSON 字段使用协议规定的 camelCase。Go 侧 bbolt 的事务存储和 Rust 侧 sled 的文件格式不互通，但节点/清单/块的线格式与语义由交叉向量测试锁定。最近 N 分钟 GC 保护、推送竞态保护等演进项仍未实现。
+Rust 节点 ID 使用本地随机十六进制后缀，时间字段仍为 Unix 毫秒；JSON 字段使用协议规定的 camelCase。Go 侧 bbolt 的事务存储和 Rust 侧 sled 的文件格式不互通，但节点/清单/块的线格式与语义由交叉向量测试锁定。GC 的推送竞态保护已实现(§5,10 分钟 mtime 窗口)。
+
+### 引擎延迟基准（2026-10-17，Linux 容器 release 构建）
+
+复现:`cargo run --release -p mixum-snapshot --example bench`。
+
+| 工作区 | 冷打包 | 无变更(中位) | 部分变更 | 恢复物化 |
+|--------|--------|--------------|----------|----------|
+| code:300 × 2 KiB 小文件 | 1651 ms | 9.3 ms | 813 ms | 1593 ms |
+| assets:50 MiB 单文件 | 78.5 ms | 36.7 ms | 77.3 ms | 92.2 ms |
+
+结论:**「无感前置快照」在热路径成立**(未变更工作区 9 ms / 大文件 37 ms),
+大文件吞吐约 640 MB/s。短板是小文件工作区:逐块「临时文件+rename」与
+sled 单键提交的每文件开销 ≈2.7 ms(打包)/ ≈5.3 ms(恢复),几百个
+小文件即进入秒级。优化方向(未实施):块分组批量落盘、清单复用
+(ino/size/mtime 未变直接引用旧块)、sled 批量事务。跨节点流转
+(盒盖→云端续跑)已由双节点 e2e 全链验证,见 tests/integration/sync-e2e.mjs。

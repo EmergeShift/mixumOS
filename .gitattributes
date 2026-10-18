@@ -1,0 +1,5 @@
+# Windows 检出时 shell 脚本必须保持 LF:CRLF 会让容器内
+# `exec /entrypoint.sh` 报 "no such file or directory"(shebang 变成
+# "/bin/sh\r"),Docker COPY 进镜像的脚本同样中招。其余文本不强制,
+# 避免全仓重整化的 churn。
+*.sh text eol=lf

@@ -127,6 +127,9 @@ pub struct Window {
     pub height: u32,
     pub focused: bool,
     pub mode: String,
+    /// 窗口流的实际编码(mixcomp 能力回告后由 broker 填写);缺省 jpeg
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
