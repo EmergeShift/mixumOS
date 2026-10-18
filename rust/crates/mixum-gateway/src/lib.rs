@@ -499,7 +499,7 @@ mod tests {
         let claims = gw.verify(&bootstrap).await.unwrap();
         assert_eq!(claims.sub, "gateway-admin");
 
-        let (ctx, crx) = mpsc_pair();
+        let (ctx, mut crx) = mpsc_pair();
         // 非用户会话不能签发
         let anon = gw.client_connected("device:x", ctx.clone()).await;
         let req = json!({"v":1,"id":"t0","op":"gateway.token.issue","payload":{"kind":"node","name":"n1"}});
