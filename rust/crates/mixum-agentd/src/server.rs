@@ -28,7 +28,12 @@ where
 
     // 回调错误类型为 tungstenite 约定的 Response<Option<String>>;
     // 未请求 mixum.v1 的客户端不报错、仅不回子协议头。
-    let cb = |req: &Request, resp: Response| -> Result<Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse> {
+    let cb = |req: &Request,
+              resp: Response|
+     -> Result<
+        Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
         let requested = req
             .headers()
             .get("sec-websocket-protocol")
@@ -45,7 +50,6 @@ where
     };
     accept_hdr_async(stream, cb)
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,7 +159,9 @@ impl Server {
             let (stream, _) = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = this.handle_stream(accept_with_subprotocol(stream).await).await;
+                let _ = this
+                    .handle_stream(accept_with_subprotocol(stream).await)
+                    .await;
             });
         }
     }
@@ -664,15 +670,15 @@ impl Session {
         )
         .await
         {
-            Ok(stats) => {
-                self.reply(env, serde_json::to_value(stats).unwrap())
-                    .await
-            }
+            Ok(stats) => self.reply(env, serde_json::to_value(stats).unwrap()).await,
             Err(crate::sync::SyncError::NotFound(m)) => self.err(env, ErrCode::NotFound, &m).await,
             Err(crate::sync::SyncError::Unsupported(m)) => {
                 self.err(env, ErrCode::Unsupported, &m).await
             }
-            Err(e) => self.err(env, ErrCode::Internal, &format!("推送失败: {e}")).await,
+            Err(e) => {
+                self.err(env, ErrCode::Internal, &format!("推送失败: {e}"))
+                    .await
+            }
         }
     }
 

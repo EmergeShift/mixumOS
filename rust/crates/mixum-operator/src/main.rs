@@ -6,8 +6,7 @@ use mixum_operator::reconciler;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -16,7 +15,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let client = kube::Client::try_default().await?;
     let version = client.apiserver_version().await?;
-    tracing::info!("已连接 apiserver {}.{},开始监听 MixumTask", version.major, version.minor);
+    tracing::info!(
+        "已连接 apiserver {}.{},开始监听 MixumTask",
+        version.major,
+        version.minor
+    );
 
     // v1 单命名空间(mixumos);多租户随阶段 5 扩展。
     reconciler::run(client, "mixumos").await?;

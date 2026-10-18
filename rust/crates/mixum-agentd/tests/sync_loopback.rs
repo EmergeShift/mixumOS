@@ -53,8 +53,11 @@ async fn spawn_node(tag: &str) -> (tempfile::TempDir, SharedEngine, String, u16)
 
     let registry = Arc::new(Registry::new());
     registry.register(ShellDriver).unwrap();
-    let tasks =
-        Engine::with_snapshots(registry, Arc::new(LocalSandbox::new()), Some(snapshots.clone()));
+    let tasks = Engine::with_snapshots(
+        registry,
+        Arc::new(LocalSandbox::new()),
+        Some(snapshots.clone()),
+    );
     let broker = Broker::new(dir.path().join("display.sock"));
 
     let mut server = Server::new(
@@ -143,8 +146,14 @@ async fn push_moves_node_between_nodes_and_dedups() {
 async fn push_reports_missing_node() {
     let (_dir_a, engine_a, _token_a, _port_a) = spawn_node("node-a2").await;
     let (_dir_b, _engine_b, token_b, _port_b) = spawn_node("node-b2").await;
-    let err = sync::push_node(&engine_a, "snap_nope", "ws://127.0.0.1:1", &token_b, "node-a")
-        .await
-        .unwrap_err();
+    let err = sync::push_node(
+        &engine_a,
+        "snap_nope",
+        "ws://127.0.0.1:1",
+        &token_b,
+        "node-a",
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, sync::SyncError::NotFound(_)));
 }
