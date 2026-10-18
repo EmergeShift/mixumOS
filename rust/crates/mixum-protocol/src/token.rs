@@ -9,6 +9,12 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, Verifying
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// rustls 加密提供者:钉 ring(aws-lc-rs 与 ring 并存时 rustls 无法自动
+/// 选择);install_default 全进程幂等,重复调用返回 Err,忽略即可。
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 use crate::ops::Cap;
 
 /// MAP 规范前缀(token.schema.json 标题为 `map1.`)。

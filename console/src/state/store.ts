@@ -36,6 +36,11 @@ interface ConsoleStore {
   windows: WindowInfo[]
   activeWindow: number | null
 
+  // gateway 多节点
+  nodes: string[]
+  selectedNode: string
+  devices: { jti: string; name: string; sub: string; iat: number }[]
+
   snapTree: SnapTreeResponse | null
   snapsLoading: boolean
 
@@ -92,6 +97,10 @@ export const useStore = create<ConsoleStore>((set, get) => ({
 
   windows: [],
   activeWindow: null,
+
+  nodes: [],
+  selectedNode: '',
+  devices: [],
 
   snapTree: null,
   snapsLoading: false,
@@ -170,6 +179,24 @@ export function msg(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+export function selectNode(node: string): void {
+  useStore.setState({ selectedNode: node })
+  client.node = node
+}
+
+export async function refreshDevices(): Promise<void> {
+  try {
+    const r = await client.deviceList()
+    useStore.setState({ devices: r.devices })
+  } catch {
+    useStore.setState({ devices: [] })
+  }
+}
+
+export function showToast2(text: string, kind: 'info' | 'error' = 'info'): void {
+  useStore.getState().showToast(text, kind)
+}
+
 // ---------- client 回调接线 ----------
 
 client.onStatus = (s, detail) => useStore.setState({ status: s, statusDetail: detail ?? '' })
@@ -183,6 +210,21 @@ client.onHello = (h) => {
     .request<{ windows: WindowInfo[] }>('display.list')
     .then((r) => useStore.setState({ windows: r.windows }))
     .catch(() => {})
+  // gateway:拉节点列表并自动选第一个(单节点场景无感知)
+  if (client.isGateway()) {
+    void client
+      .nodeList()
+      .then((r) => {
+        useStore.setState((s) => ({
+          nodes: r.nodes,
+          selectedNode: s.selectedNode && r.nodes.includes(s.selectedNode)
+            ? s.selectedNode
+            : (r.nodes[0] ?? ''),
+        }))
+        if (useStore.getState().selectedNode) client.node = useStore.getState().selectedNode
+      })
+      .catch(() => {})
+  }
 }
 
 client.onTaskEvent = (e) => {

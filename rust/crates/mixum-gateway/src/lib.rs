@@ -12,6 +12,8 @@
 //! - 节点→gateway 二进制:`u32 LE 会话 id 长度 + 会话 id 字节 + 原始帧`,
 //!   帧本身(0x01 + 27 字节头)不改。
 
+pub mod identity;
+
 use mixum_protocol::ops::{ErrCode, Cap};
 use mixum_protocol::token::{Claims, Signer};
 use serde_json::{json, Value};
@@ -47,11 +49,28 @@ struct ClientConn {
     nodes: HashSet<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PairCode {
+    pub user_sub: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceEntry {
+    pub name: String,
+    pub sub: String,
+    pub iat: i64,
+}
+
 pub struct Gateway {
     signer: Signer,
     nodes: RwLock<HashMap<String, NodeConn>>,
     clients: Mutex<HashMap<String, ClientConn>>,
     revoked: RwLock<HashSet<String>>,
+    /// 配对码 → 用户主体(5 分钟有效,单次使用)。
+    pairs: Mutex<HashMap<String, PairCode>>,
+    /// 已签发设备(jti → 条目);吊销即移入 revoked 并移除。
+    devices: Mutex<HashMap<String, DeviceEntry>>,
     seq: AtomicU64,
     started_at: i64,
 }
@@ -76,13 +95,14 @@ fn err_envelope(env: Option<&Value>, code: ErrCode, message: &str) -> String {
 }
 
 impl Gateway {
-    pub fn new() -> Arc<Self> {
-        let signer = Signer::generate();
+    pub fn new(signer: Signer) -> Arc<Self> {
         Arc::new(Self {
             signer,
             nodes: RwLock::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
             revoked: RwLock::new(HashSet::new()),
+            pairs: Mutex::new(HashMap::new()),
+            devices: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(1),
             started_at: mixum_protocol::envelope::now_ms(),
         })
@@ -182,6 +202,15 @@ impl Gateway {
         match op {
             "gateway.token.issue" => {
                 vec![self.issue_token(session, &env).await]
+            }
+            "gateway.pair.create" => {
+                vec![self.pair_create(session, &env).await]
+            }
+            "gateway.device.list" => {
+                vec![self.device_list(session, &env).await]
+            }
+            "gateway.device.revoke" => {
+                vec![self.device_revoke(session, &env).await]
             }
             "gateway.node.list" => {
                 let nodes = self.node_offline().await;
@@ -300,6 +329,127 @@ impl Gateway {
         }
     }
 
+    /// 设备配对第一步:已信任会话生成 6 位配对码(5 分钟有效,单次)。
+    async fn pair_create(&self, session: &str, env: &Value) -> Outbound {
+        let id = env.get("id").cloned().unwrap_or_default();
+        let fail = |code, msg: &str| Outbound::Text(err_envelope(Some(env), code, msg));
+        let user_sub = self
+            .clients
+            .lock()
+            .await
+            .get(session)
+            .map(|c| c.sub.clone())
+            .unwrap_or_default();
+        if !user_sub.starts_with("user:") && user_sub != "gateway-admin" {
+            return fail(ErrCode::Forbidden, "仅用户会话可生成配对码");
+        }
+        // 6 位数字码:从会话序号+时间熵派生(v1 无 rand 依赖)。
+        let entropy = self.seq.fetch_add(1, Ordering::Relaxed)
+            ^ (mixum_protocol::envelope::now_ms() as u64)
+            ^ (&user_sub as *const String as u64);
+        let code = format!("{:06}", entropy % 1_000_000);
+        self.pairs.lock().await.insert(
+            code.clone(),
+            PairCode { user_sub, expires_at: mixum_protocol::envelope::now_ms() + 300_000 },
+        );
+        Outbound::Text(
+            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.pair.create.ok","replyTo":id,"payload":{"code":code,"expiresIn":300}})
+                .to_string(),
+        )
+    }
+
+    /// 设备配对第二步:配对码换设备令牌(未认证连接的首条消息)。
+    pub async fn pair_claim(&self, code: &str, device_name: &str) -> Result<(String, String, String), String> {
+        let now = mixum_protocol::envelope::now_ms();
+        let pair = self
+            .pairs
+            .lock()
+            .await
+            .remove(code)
+            .filter(|p| p.expires_at > now)
+            .ok_or("配对码无效或已过期")?;
+        if device_name.is_empty() || device_name.len() > 64 {
+            return Err("deviceName 非法".into());
+        }
+        let device_id = format!("dev-{}", mixum_protocol::envelope::new_id());
+        let sub = format!("device:{device_id}");
+        let claims = Claims {
+            sub: sub.clone(),
+            caps: vec![
+                Cap::TaskRun,
+                Cap::TaskObserve,
+                Cap::DisplayView,
+                Cap::DisplayInput,
+            ],
+            iat: now,
+            exp: now + 30 * 24 * 3600,
+            jti: mixum_protocol::envelope::new_id(),
+            task_id: String::new(),
+            windows: vec![],
+        };
+        let jti = claims.jti.clone();
+        let token = self.signer.mint(claims).map_err(|e| e.to_string())?;
+        self.devices.lock().await.insert(
+            jti.clone(),
+            DeviceEntry { name: device_name.to_owned(), sub, iat: now },
+        );
+        Ok((token, device_id, pair.user_sub))
+    }
+
+    /// 设备列表(吊销过的已移除,不出现)。
+    async fn device_list(&self, session: &str, env: &Value) -> Outbound {
+        let id = env.get("id").cloned().unwrap_or_default();
+        let user_sub = self
+            .clients
+            .lock()
+            .await
+            .get(session)
+            .map(|c| c.sub.clone())
+            .unwrap_or_default();
+        if !user_sub.starts_with("user:") && user_sub != "gateway-admin" {
+            return Outbound::Text(err_envelope(Some(env), ErrCode::Forbidden, "仅用户会话可查设备"));
+        }
+        let devices = self.devices.lock().await;
+        let list: Vec<Value> = devices
+            .iter()
+            .map(|(jti, d)| json!({"jti": jti, "name": d.name, "sub": d.sub, "iat": d.iat}))
+            .collect();
+        Outbound::Text(
+            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.device.list.ok","replyTo":id,"payload":{"devices":list}})
+                .to_string(),
+        )
+    }
+
+    /// 吊销设备:jti 进撤销表并移除条目;已签令牌即刻失效。
+    async fn device_revoke(&self, session: &str, env: &Value) -> Outbound {
+        let id = env.get("id").cloned().unwrap_or_default();
+        let fail = |code, msg: &str| Outbound::Text(err_envelope(Some(env), code, msg));
+        let user_sub = self
+            .clients
+            .lock()
+            .await
+            .get(session)
+            .map(|c| c.sub.clone())
+            .unwrap_or_default();
+        if !user_sub.starts_with("user:") && user_sub != "gateway-admin" {
+            return Outbound::Text(err_envelope(Some(env), ErrCode::Forbidden, "仅用户会话可吊销设备"));
+        }
+        let jti = env
+            .pointer("/payload/jti")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if jti.is_empty() {
+            return fail(ErrCode::BadRequest, "jti 必填");
+        }
+        let removed = self.devices.lock().await.remove(&jti).is_some();
+        self.revoked.write().await.insert(jti);
+        Outbound::Text(
+            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.device.revoke.ok","replyTo":id,"payload":{"revoked":removed}})
+                .to_string(),
+        )
+    }
+
     async fn issue_token(&self, session: &str, env: &Value) -> Outbound {
         let id = env.get("id").cloned().unwrap_or_default();
         let fail = |code, msg: &str| {
@@ -377,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_request_routes_to_node_and_reply_returns() {
-        let gw = Gateway::new();
+        let gw = Gateway::new(Signer::generate());
         let (ntx, mut nrx) = mpsc_pair();
         gw.node_connected("a", "0.1.0", ntx).await.unwrap();
         assert!(gw.node_connected("a", "0.1.0", mpsc_pair().0).await.is_err());
@@ -418,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_online_node_is_default_target() {
-        let gw = Gateway::new();
+        let gw = Gateway::new(Signer::generate());
         let (ntx, mut nrx) = mpsc_pair();
         gw.node_connected("only", "0.1.0", ntx).await.unwrap();
         let (ctx, _crx) = mpsc_pair();
@@ -433,7 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_node_without_node_field_is_rejected() {
-        let gw = Gateway::new();
+        let gw = Gateway::new(Signer::generate());
         gw.node_connected("a", "0.1.0", mpsc_pair().0).await.unwrap();
         gw.node_connected("b", "0.1.0", mpsc_pair().0).await.unwrap();
         let (ctx, _crx) = mpsc_pair();
@@ -445,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_offline_request_gets_not_found() {
-        let gw = Gateway::new();
+        let gw = Gateway::new(Signer::generate());
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
         let req = json!({"v":1,"id":"r4","op":"task.list","node":"ghost","payload":{}});
@@ -455,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn binary_frames_carry_session_prefix() {
-        let gw = Gateway::new();
+        let gw = Gateway::new(Signer::generate());
         let (ntx, nrx) = mpsc_pair();
         gw.node_connected("a", "0.1.0", ntx).await.unwrap();
         let (ctx, mut crx) = mpsc_pair();
@@ -476,7 +626,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_disconnect_closes_node_sessions() {
-        let gw = Gateway::new();
+        let gw = Gateway::new(Signer::generate());
         let (ntx, mut nrx) = mpsc_pair();
         gw.node_connected("a", "0.1.0", ntx).await.unwrap();
         let (ctx, _crx) = mpsc_pair();
@@ -494,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_issue_requires_admin_and_node_token_registers() {
-        let gw = Gateway::new();
+        let gw = Gateway::new(Signer::generate());
         let bootstrap = gw.bootstrap_token().unwrap();
         let claims = gw.verify(&bootstrap).await.unwrap();
         assert_eq!(claims.sub, "gateway-admin");

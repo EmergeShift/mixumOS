@@ -176,11 +176,49 @@ await new Promise((r) => setTimeout(r, 800));
 const framesAfter = frames.length;
 console.log(`11. detach 后停帧 ✓ (${framesA} → ${framesAfter})`);
 
+// ── 7. 设备配对:创建配对码 → 未认证连接 claim → 设备令牌 hello → 吊销后失效 ──
+const pair = await admin.call("gateway.pair.create", {});
+if (!pair.op?.endsWith(".ok")) { console.error("FAIL: pair.create", JSON.stringify(pair)); process.exit(1); }
+const pairCode = pair.payload.code;
+console.log(`12. 配对码生成 ✓ (${pairCode})`);
+
+const device = ws(`ws://localhost:${GW_PORT}`);
+await device.opened;
+const claim = await device.call("gateway.pair.claim", { code: pairCode, deviceName: "e2e 设备" });
+if (!claim.op?.endsWith(".ok")) { console.error(`FAIL: pair.claim ${JSON.stringify(claim)}`); process.exit(1); }
+const deviceToken = claim.payload.token;
+device.socket.close();
+
+// 设备令牌 hello → 应通过
+const devConn = ws(`ws://localhost:${GW_PORT}`);
+await devConn.opened;
+const dh = await devConn.call("hello", { token: deviceToken, client: "device/0.1" });
+if (!dh.op?.endsWith(".ok")) { console.error("FAIL: 设备令牌 hello 被拒"); process.exit(1); }
+devConn.socket.close();
+console.log("13. 设备令牌 hello ✓");
+
+// device.list 应包含该设备
+const dl = await admin.call("gateway.device.list", {});
+const deviceEntry = (dl.payload?.devices ?? []).find((d) => d.name === "e2e 设备");
+if (!deviceEntry) { console.error("FAIL: device.list 未含新设备"); process.exit(1); }
+console.log("14. 设备列表 ✓ (1 台)");
+
+// 吊销 → 设备令牌 hello 被拒
+const rv = await admin.call("gateway.device.revoke", { jti: deviceEntry.jti });
+if (!rv.op?.endsWith(".ok")) { console.error("FAIL: device.revoke", JSON.stringify(rv)); process.exit(1); }
+const devConn2 = ws(`ws://localhost:${GW_PORT}`);
+await devConn2.opened;
+const dh2 = await devConn2.call("hello", { token: deviceToken, client: "device/0.1" });
+devConn2.socket.close();
+const revokedRejected = dh2.op?.endsWith(".err");
+console.log(`15. 吊销后令牌失效 ✓ (hello ${revokedRejected ? "被拒" : "仍通过"})`);
+if (!revokedRejected) { console.error("FAIL: 吊销未生效"); process.exit(1); }
+
 // 清理
 client.socket.close();
 admin.socket.close();
 for (const c of ["mixum-gw-a", "mixum-gw-b", "mixum-gw"]) { try { sh(["rm", "-f", c]); } catch { /* noop */ } }
 
 const ok = sawA && !leaked && tbState === "completed" && tb2State === "completed" && framesA > 0 && framesAfter === framesA;
-console.log(ok ? "PASS gateway M1:注册/令牌/路由/事件隔离/帧隔离 全链路通过" : "FAIL gateway M1");
+console.log(ok ? "PASS gateway M1+M2:注册/令牌/路由/隔离/帧 + 配对/吊销 全链路通过" : "FAIL gateway e2e");
 process.exit(ok ? 0 : 1);

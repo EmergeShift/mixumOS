@@ -152,8 +152,12 @@ gateway 的节点注册表就是 operator 的对账目标:
   客户端;二进制:`u32 LE 会话 id 长度 + 会话 id 字节 + 原始帧`;
 - 会话在首次路由到某节点时惰性开启(重复 open 由 relay 幂等忽略),
   客户端断开或节点重连时关闭(客户端按既有语义重连/重订阅)。
-- **M2**:设备配对 + 吊销 + gateway.node.list + console 节点选择器
-  与配对 UI;
+- **M2(✅ 2026-10-18 落地)**:设备配对(`gateway.pair.create/claim`,
+  6 位码 5 分钟单次)+ 设备注册表(`gateway.device.list/revoke`,
+  jti 撤销表即时生效)+ gateway TLS(`--listen wss://`,自签证书
+  持久化于 --data-dir,TOFU;relay 侧 insecure connector 同信任域)
+  + console 节点选择器与配对/设备管理 UI(Settings 内);e2e 扩展
+  配对/设备 hello/吊销失效三断言;
 - **M3**(阶段 5 合流):NodeRegistry 换 k8s 后端、多 gateway 副本。
 
 测试计划:新增 tests/integration/gateway-e2e.mjs——两容器栈 +
