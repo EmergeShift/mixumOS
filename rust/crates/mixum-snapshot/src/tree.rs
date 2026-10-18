@@ -249,6 +249,15 @@ impl Tree {
             return Ok(old.into());
         }
         let name = self.fork_branch(&id, want)?;
+        // 重写该分支所有节点的 branch 字段:否则旧节点 inplace 恢复时
+        // 会按记录里的旧名把已改名的分支复活。
+        for mut node in self.all()? {
+            if node.branch == old {
+                node.branch = name.clone();
+                self.nodes
+                    .insert(node.id.as_bytes(), serde_json::to_vec(&node)?)?;
+            }
+        }
         self.heads.remove(old)?;
         self.db.flush()?;
         if self.current_branch()? == old {
@@ -258,23 +267,30 @@ impl Tree {
     }
 
     pub fn delete(&self, id: &str) -> Result<(), TreeError> {
+        let node = self.get(id)?;
         if !self.children(id)?.is_empty() {
             return Err(TreeError::HasChildren(id.into()));
         }
-        let node = self.get(id)?;
         self.nodes.remove(id.as_bytes())?;
+        // 指向该节点的分支头移交其父节点,分支不因删除而失头
+        // (根节点没有父节点,相应分支条目随之移除)。
+        let mut affected: Vec<String> = Vec::new();
         for item in self.heads.iter() {
             let (k, v) = item?;
             if v.as_ref() == id.as_bytes() {
-                self.heads.remove(k)?;
+                affected.push(String::from_utf8_lossy(&k).into_owned());
+            }
+        }
+        for branch in affected {
+            if node.parent.is_empty() {
+                self.heads.remove(branch.as_bytes())?;
+            } else {
+                self.heads
+                    .insert(branch.as_bytes(), node.parent.as_bytes())?;
             }
         }
         self.db.flush()?;
-        let _ = node;
         Ok(())
-    }
-    pub fn reachable(&self) -> Result<std::collections::HashSet<String>, TreeError> {
-        Ok(self.all()?.into_iter().map(|n| n.id).collect())
     }
 }
 

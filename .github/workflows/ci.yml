@@ -1,0 +1,88 @@
+# CI:本仓库完整构建依赖 Linux(本地开发在 Windows 上只能跑 protocol/snapshot 单测),
+# 这里覆盖三块:
+#   rust    —— 全 workspace fmt/clippy/测试(含依赖 nix 的 agentd/operator/ctl)
+#   console —— Web 控制台 tsc + vite 构建
+#   e2e     —— arm64 runner 原生复刻 README 的容器 e2e(musl agentd + mixcomp + foot)
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: fmt
+        run: cargo fmt --check
+        working-directory: rust
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+        working-directory: rust
+      - name: test
+        run: cargo test --workspace
+        working-directory: rust
+
+  console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  e2e:
+    # Dockerfile.e2e-rust 需要预构建的 arm64 musl mixum-agentd;
+    # arm64 runner 上 musl-gcc 即本机架构,直接原生构建。
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build mixum-agentd (aarch64-musl)
+        working-directory: rust
+        env:
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          AR_aarch64_unknown_linux_musl: ar
+        run: |
+          cargo build --release -p mixum-agentd --target aarch64-unknown-linux-musl
+          mkdir -p build
+          cp target/aarch64-unknown-linux-musl/release/mixum-agentd build/mixum-agentd-arm64
+      - name: Build e2e image
+        run: docker build -f tests/integration/Dockerfile.e2e-rust -t mixumos-e2e-rust .
+      - name: Run e2e smoke (agentd ready + token issued)
+        run: |
+          docker run -d --name mixum-e2e -p 17601:7601 mixumos-e2e-rust
+          for i in $(seq 1 60); do
+            line=$(docker logs mixum-e2e 2>&1 | grep '^READY token=' || true)
+            if [ -n "$line" ]; then
+              echo "$line"
+              echo "e2e smoke passed: agentd ready, token issued"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "e2e container not ready within timeout"
+          docker logs mixum-e2e
+          exit 1

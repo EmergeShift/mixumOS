@@ -94,11 +94,18 @@ struct WindowState {
 #[derive(Clone)]
 pub struct Broker {
     windows: Arc<Mutex<HashMap<u32, WindowState>>>,
-    comp: Arc<Mutex<Option<mpsc::Sender<CompMessage>>>>,
+    comp: Arc<Mutex<Option<CompConn>>>,
+    comp_seq: Arc<std::sync::atomic::AtomicU64>,
     window_events: broadcast::Sender<Window>,
     socket_path: PathBuf,
     /// 任务引擎是否活跃:活跃时新窗口归 agent 模式(用户接管需 claim)。
     tasks_active: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct CompConn {
+    /// 连接代数:旧连接退出时不得清掉新连接的槽位。
+    id: u64,
+    tx: mpsc::Sender<CompMessage>,
 }
 
 #[derive(Debug)]
@@ -112,6 +119,7 @@ impl Broker {
         Self {
             windows: Arc::new(Mutex::new(HashMap::new())),
             comp: Arc::new(Mutex::new(None)),
+            comp_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             window_events,
             socket_path: path.into(),
             tasks_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -161,8 +169,7 @@ impl Broker {
             let mut all = self.windows.lock().await;
             for st in all.values_mut() {
                 let target = if active {
-                    (st.window.mode.is_empty() || st.window.mode == MODE_FREE)
-                        .then_some(MODE_AGENT)
+                    (st.window.mode.is_empty() || st.window.mode == MODE_FREE).then_some(MODE_AGENT)
                 } else {
                     (st.window.mode == MODE_AGENT).then_some(MODE_FREE)
                 };
@@ -179,9 +186,7 @@ impl Broker {
 
     pub async fn open_or_update(&self, window: Window) {
         let mut all = self.windows.lock().await;
-        let tasks_active = self
-            .tasks_active
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let tasks_active = self.tasks_active.load(std::sync::atomic::Ordering::SeqCst);
         let entry = all.entry(window.id).or_insert_with(|| {
             // 任务运行中打开的窗口归 agent:用户可见,接管需 display.takeover。
             let mut w = window.clone();
@@ -324,14 +329,17 @@ impl Broker {
         Ok(())
     }
     async fn send_json(&self, value: serde_json::Value) {
-        if let Some(tx) = self.comp.lock().await.as_ref() {
-            let _ = tx.send(CompMessage::Json(value)).await;
+        if let Some(conn) = self.comp.lock().await.as_ref() {
+            let _ = conn.tx.send(CompMessage::Json(value)).await;
         }
     }
     async fn serve_comp(&self, stream: UnixStream) -> Result<(), DisplayError> {
         let (mut read, mut write) = stream.into_split();
+        let id = self
+            .comp_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, mut rx) = mpsc::channel(64);
-        *self.comp.lock().await = Some(tx);
+        *self.comp.lock().await = Some(CompConn { id, tx });
         let write_task = tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 let (kind, payload) = match message {
@@ -346,6 +354,19 @@ impl Broker {
                 }
             }
         });
+        let result = self.serve_comp_read(&mut read).await;
+        write_task.abort();
+        // 仅当槽位仍是本连接时清除:新连接可能已接管。
+        let mut comp = self.comp.lock().await;
+        if comp.as_ref().is_some_and(|c| c.id == id) {
+            *comp = None;
+        }
+        result
+    }
+    async fn serve_comp_read(
+        &self,
+        read: &mut tokio::net::unix::OwnedReadHalf,
+    ) -> Result<(), DisplayError> {
         loop {
             let mut header = [0u8; 5];
             read.read_exact(&mut header).await?;
@@ -369,14 +390,13 @@ impl Broker {
                 _ => break,
             }
         }
-        write_task.abort();
-        *self.comp.lock().await = None;
         Ok(())
     }
     async fn handle_comp(&self, data: &[u8]) {
         if let Ok(message) = serde_json::from_slice::<CompMessageWire>(data) {
             match message.kind.as_str() {
                 "window.open" | "window.update" => {
+                    // mode 留空:由 open_or_update 决定归属(任务活跃时新窗口归 agent)。
                     self.open_or_update(Window {
                         id: message.id,
                         app_id: message.app_id,
@@ -384,7 +404,7 @@ impl Broker {
                         width: message.width,
                         height: message.height,
                         focused: message.focused,
-                        mode: MODE_FREE.into(),
+                        mode: String::new(),
                     })
                     .await;
                 }
