@@ -297,11 +297,24 @@ impl Broker {
         ))
     }
     pub async fn detach(&self, id: u32, subscriber_id: &str) {
-        if let Some(state) = self.windows.lock().await.get_mut(&id) {
-            state.subscribers.remove(subscriber_id);
+        let last_same_codec = {
+            let mut all = self.windows.lock().await;
+            let Some(state) = all.get_mut(&id) else {
+                return;
+            };
+            let Some(removed) = state.subscribers.remove(subscriber_id) else {
+                return;
+            };
+            !state
+                .subscribers
+                .values()
+                .any(|s| s.codec == removed.codec)
+        };
+        // 同编码还有别的订阅者时不能停流,否则共享流被误停。
+        if last_same_codec {
+            self.send_json(serde_json::json!({"type":"stream.stop","id":id}))
+                .await;
         }
-        self.send_json(serde_json::json!({"type":"stream.stop","id":id}))
-            .await;
     }
     pub async fn broadcast_frame(&self, id: u32, frame: Vec<u8>, codec: &str) {
         let subscribers = self
@@ -460,7 +473,7 @@ impl Broker {
                         width: message.width,
                         height: message.height,
                         focused: message.focused,
-                        mode: MODE_FREE.into(),
+                        mode: String::new(),
                         codec: None,
                     })
                     .await;
@@ -586,5 +599,90 @@ mod tests {
         // 回告后广播 jpeg,h264 订阅者也能收到(解码器据此切换)
         broker.broadcast_frame(7, vec![9], CODEC_JPEG).await;
         assert_eq!(h264_sub.3.frames.try_recv().as_deref(), Some(&[9u8][..]));
+    }
+
+    #[tokio::test]
+    async fn window_open_during_active_task_is_agent_owned() {
+        let broker = Broker::new("/tmp/mixum-agentd-test4.sock");
+        broker.set_tasks_active(true).await;
+        let open = serde_json::to_vec(&serde_json::json!({
+            "type":"window.open","id":9,"app_id":"a","title":"A",
+            "width":640,"height":480,"focused":false
+        }))
+        .unwrap();
+        broker.handle_comp(&open).await;
+        assert_eq!(broker.list().await[0].mode, MODE_AGENT);
+        // agent 持有期间,控制台注入必须先接管
+        assert!(matches!(
+            broker.inject(9, serde_json::json!({"type":"key"})).await,
+            Err(DisplayError::AgentOwnsInput)
+        ));
+        broker.set_tasks_active(false).await;
+        assert_eq!(broker.list().await[0].mode, MODE_FREE);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detach_keeps_stream_until_last_same_codec_subscriber_leaves() {
+        use std::time::Duration;
+        let path = format!("/tmp/mixum-agentd-detach-{}.sock", std::process::id());
+        let broker = Broker::new(path.clone());
+        broker.start().await.unwrap();
+        let mut client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        for _ in 0..50 {
+            if broker.online().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(broker.online().await);
+        broker
+            .open_or_update(Window {
+                id: 7,
+                app_id: "a".into(),
+                title: "A".into(),
+                width: 640,
+                height: 480,
+                focused: true,
+                mode: MODE_FREE.into(),
+                codec: None,
+            })
+            .await;
+        broker.attach(7, "s1", 30, CODEC_JPEG).await.unwrap();
+        broker.attach(7, "s2", 30, CODEC_JPEG).await.unwrap();
+        broker.attach(7, "s3", 30, CODEC_H264).await.unwrap();
+        // 三次 attach 的 stream.start
+        for _ in 0..3 {
+            let (kind, payload) = read_record(&mut client).await;
+            assert_eq!(kind, 0x01);
+            assert_eq!(payload["type"], "stream.start");
+        }
+        // 还有同编码订阅者:不得停流
+        broker.detach(7, "s1").await;
+        assert!(tokio::time::timeout(Duration::from_millis(150), read_record(&mut client))
+            .await
+            .is_err());
+        // 最后一个 jpeg 订阅者退出:停流
+        broker.detach(7, "s2").await;
+        let (kind, payload) = read_record(&mut client).await;
+        assert_eq!(kind, 0x01);
+        assert_eq!(payload["type"], "stream.stop");
+        // 最后一个 h264 订阅者退出:同样停流
+        broker.detach(7, "s3").await;
+        let (kind, payload) = read_record(&mut client).await;
+        assert_eq!(kind, 0x01);
+        assert_eq!(payload["type"], "stream.stop");
+    }
+
+    #[cfg(unix)]
+    async fn read_record(
+        client: &mut tokio::net::UnixStream,
+    ) -> (u8, serde_json::Value) {
+        let mut header = [0u8; 5];
+        client.read_exact(&mut header).await.unwrap();
+        let len = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; len];
+        client.read_exact(&mut payload).await.unwrap();
+        (header[4], serde_json::from_slice(&payload).unwrap())
     }
 }
