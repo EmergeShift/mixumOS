@@ -123,6 +123,8 @@ export interface WindowInfo {
   height: number
   focused: boolean
   mode: WindowMode
+  /** 窗口流实际编码(mixcomp 能力回告后随 window 事件到达) */
+  codec?: 'jpeg' | 'h264'
 }
 
 export interface DisplayAttachResponse {
@@ -167,6 +169,8 @@ export interface VideoFrameHeader {
 }
 
 export interface VideoFrame extends VideoFrameHeader {
-  jpeg: Uint8Array
+  /** 编码数据:jpeg = JPEG,h264 = H.264 Annex-B(由 attach 协商决定) */
+  payload: Uint8Array
+  codec: 'jpeg' | 'h264'
   ts: number
 }

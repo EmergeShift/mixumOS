@@ -30,14 +30,18 @@ if [ "$PACMAN_MAJOR" -ge 7 ]; then
 		sed -i '/^\[options\]/a DisableSandboxFilesystem' /etc/pacman.conf
 fi
 mkdir -p /etc/pacman.d/gnupg
-if [ ! -f /etc/pacman.d/gnupg/pubring.kbx ] && [ ! -f /etc/pacman.d/gnupg/pubring.gpg ]; then
-	# qemu 模拟下 gpg 建钥偶发瞬时失败,重试一次
-	pacman-key --init || { sleep 2; pacman-key --init; }
-fi
+# 无条件 init(幂等):新版 archlinux:base 自带 pubring.kbx 但无私钥,
+# 跳过 init 会让 --populate 本地签名报「no secret key available to sign with」
+pacman-key --init || { sleep 2; pacman-key --init; }
 for kr in /usr/share/pacman/keyrings/*.gpg; do
 	pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null ||
 		{ sleep 2; pacman-key --populate "$(basename "$kr" .gpg)" >/dev/null; }
 done
+# ALARM rootfs 默认镜像走 geo 重定向,部分网络经代理不可达;可覆盖为可达镜像
+# (如 TUNA 的 archlinuxarm 同步),经 lib.sh 的 MIXUM_ARM_MIRROR 传入
+if [ -n "${MIXUM_ARM_MIRROR:-}" ]; then
+	echo "Server = ${MIXUM_ARM_MIRROR}/\$arch/\$repo" > /etc/pacman.d/mirrorlist
+fi
 pacman -Syu --noconfirm --needed base-devel git >/dev/null
 git config --system --add safe.directory "$GIT_SRC"
 
@@ -88,6 +92,11 @@ fi
 pacman -Sy >/dev/null
 
 # ---- B. 四包构建 ---------------------------------------------------------
+# cargo 缓存持久卷(挂载于 $BUILD 之外,rm -rf $BUILD 不影响):
+#   /cargo-home = CARGO_HOME(registry,跨架构共享) /cargo-target = 编译产物(按架构)
+# 二次构建走增量:fetch 秒级、只编改动 crate(见 distro.md §7.3.1 演进项)
+export MIXUM_CARGO_HOME=/cargo-home
+export MIXUM_CARGO_TARGET_DIR=/cargo-target
 echo "==> [container] stage B:按 PKGBUILD 声明装依赖"
 rm -rf /build/src "$BUILD"
 install -d "$BUILD"
@@ -103,6 +112,9 @@ cp -a /out/build/rust "$BUILD/mixum-agentd/rust"
 install -d "$BUILD/mixum-agentd/tests"
 cp -a /out/build/cross-protocol "$BUILD/mixum-agentd/tests/cross-protocol"
 id builder >/dev/null 2>&1 || useradd -m builder
+# 卷根属主(builder 每次写入);卷内容上轮已属 builder,不必递归
+install -d -o builder -g builder "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR" 2>/dev/null ||
+	{ mkdir -p "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR"; chown builder:builder "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR"; }
 chown -R builder:builder "$BUILD"
 
 # 三个组件包:装依赖 → makepkg(mixum-base 依赖它们,放最后单独处理)
@@ -112,7 +124,9 @@ for p in mixcomp mixum-agentd mixum-ctl; do
 	echo "==> [container] makepkg $p"
 	(
 		cd "$BUILD/$p"
-		runuser -u builder -- env _commit="$COMMIT" makepkg -f --noconfirm
+		runuser -u builder -- env MIXUM_CARGO_HOME="$MIXUM_CARGO_HOME" \
+			MIXUM_CARGO_TARGET_DIR="$MIXUM_CARGO_TARGET_DIR" _commit="$COMMIT" \
+			makepkg -f --noconfirm
 	)
 done
 
