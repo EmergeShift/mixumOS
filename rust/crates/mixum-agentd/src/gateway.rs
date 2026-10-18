@@ -99,11 +99,11 @@ async fn pump(
                     else {
                         continue;
                     };
-                    let mut map = sessions.lock().await;
-                    if !map.contains_key(&gs) {
+                    let has = sessions.lock().await.contains_key(&gs);
+                    if !has {
                         match Loopback::connect(local_port, &local_token, &gs, up_tx.clone()).await {
                             Ok(lb) => {
-                                map.insert(gs, lb);
+                                sessions.lock().await.insert(gs.clone(), lb);
                             }
                             Err(e) => eprintln!("gateway relay 回环建立失败: {e}"),
                         }
