@@ -382,7 +382,7 @@ mod tests {
         gw.node_connected("a", "0.1.0", ntx).await.unwrap();
         assert!(gw.node_connected("a", "0.1.0", mpsc_pair().0).await.is_err());
 
-        let (ctx, crx) = mpsc_pair();
+        let (ctx, mut crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
 
         // 客户端请求(带 node)→ 到节点,且带 gatewaySession
@@ -458,7 +458,7 @@ mod tests {
         let gw = Gateway::new();
         let (ntx, nrx) = mpsc_pair();
         gw.node_connected("a", "0.1.0", ntx).await.unwrap();
-        let (ctx, crx) = mpsc_pair();
+        let (ctx, mut crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
 
         // 节点发"带前缀"的帧 → 客户端收到裸帧
@@ -499,7 +499,7 @@ mod tests {
         let claims = gw.verify(&bootstrap).await.unwrap();
         assert_eq!(claims.sub, "gateway-admin");
 
-        let (ctx, mut crx) = mpsc_pair();
+        let (ctx, crx) = mpsc_pair();
         // 非用户会话不能签发
         let anon = gw.client_connected("device:x", ctx.clone()).await;
         let req = json!({"v":1,"id":"t0","op":"gateway.token.issue","payload":{"kind":"node","name":"n1"}});
