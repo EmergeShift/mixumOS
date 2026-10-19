@@ -1,5 +1,5 @@
 //! op 名、错误码与能力(scope)常量。
-//! 与 reference/internal/wire/ops.go 逐项对齐。
+//! 与已移除的 Go 参考实现逐项对齐,字符串形式由 tests/cross-protocol 锁定。
 
 /// op 名常量。服务端回复在对应 op 后追加 ".ok" / ".err"。
 pub mod op {
@@ -70,7 +70,7 @@ pub enum ErrCode {
 }
 
 /// 能力(scope)。令牌只授最小集合;admin 覆盖全部。
-/// 字符串形式必须与 reference/internal/wire/ops.go 完全一致(点号分隔)。
+/// 字符串形式必须与 Go 参考实现(已移除)完全一致(点号分隔)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Cap {
     #[serde(rename = "task.run")]
@@ -111,8 +111,11 @@ mod tests {
 
     #[test]
     fn cap_wire_names_match_reference() {
-        // reference/internal/wire/ops.go 的字符串形式(点号分隔)
-        assert_eq!(serde_json::to_string(&Cap::TaskRun).unwrap(), "\"task.run\"");
+        // Go 参考实现的字符串形式(点号分隔)
+        assert_eq!(
+            serde_json::to_string(&Cap::TaskRun).unwrap(),
+            "\"task.run\""
+        );
         assert_eq!(
             serde_json::to_string(&Cap::DisplayInput).unwrap(),
             "\"display.input\""

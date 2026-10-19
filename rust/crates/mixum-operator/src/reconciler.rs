@@ -157,10 +157,12 @@ fn task_pod(task: &MixumTask) -> Result<k8s_openapi::api::core::v1::Pod, Error> 
     if let Some(pvc) = &task.spec.snapshot_pvc {
         volumes.push(k8s_openapi::api::core::v1::Volume {
             name: "mixum-data".into(),
-            persistent_volume_claim: Some(k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource {
-                claim_name: pvc.clone(),
-                ..Default::default()
-            }),
+            persistent_volume_claim: Some(
+                k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource {
+                    claim_name: pvc.clone(),
+                    ..Default::default()
+                },
+            ),
             ..Default::default()
         });
         mounts.push(k8s_openapi::api::core::v1::VolumeMount {
@@ -186,7 +188,11 @@ fn task_pod(task: &MixumTask) -> Result<k8s_openapi::api::core::v1::Pod, Error> 
                     .collect(),
             )
         },
-        volumes: if volumes.is_empty() { None } else { Some(volumes) },
+        volumes: if volumes.is_empty() {
+            None
+        } else {
+            Some(volumes)
+        },
         ..Default::default()
     });
     Ok(pod)
@@ -204,7 +210,11 @@ async fn set_status(
         "status": status,
     });
     tasks
-        .patch_status(name, &PatchParams::apply(FIELD_MANAGER), &Patch::Apply(&patch))
+        .patch_status(
+            name,
+            &PatchParams::apply(FIELD_MANAGER),
+            &Patch::Apply(&patch),
+        )
         .await?;
     Ok(())
 }
@@ -223,7 +233,8 @@ pub async fn reconcile(task: Arc<MixumTask>, ctx: Arc<Context>) -> Result<Action
             if task.status.as_ref().map(|s| s.state.as_str()) == Some("completed") {
                 return Ok(Action::await_change()); // 已终态,不重建
             }
-            pods.create(&PostParams::default(), &task_pod(&task)?).await?;
+            pods.create(&PostParams::default(), &task_pod(&task)?)
+                .await?;
             recorder(&ctx, &task)
                 .publish(Event {
                     type_: EventType::Normal,
@@ -266,9 +277,9 @@ pub async fn reconcile(task: Arc<MixumTask>, ctx: Arc<Context>) -> Result<Action
                         state: state.into(),
                         pod_name: Some(name.clone()),
                         message: p.status.as_ref().and_then(|s| s.reason.clone()),
-                        finished_at: terminal.then(now_rfc3339).or_else(|| {
-                            task.status.as_ref().and_then(|s| s.finished_at.clone())
-                        }),
+                        finished_at: terminal
+                            .then(now_rfc3339)
+                            .or_else(|| task.status.as_ref().and_then(|s| s.finished_at.clone())),
                     },
                 )
                 .await?;
@@ -282,9 +293,9 @@ pub async fn reconcile(task: Arc<MixumTask>, ctx: Arc<Context>) -> Result<Action
                     .and_then(|s| s.finished_at.as_deref())
                     .and_then(|t| DateTime::parse_from_rfc3339(t).ok());
                 if let Some(finished) = finished {
-                    let ttl = chrono::Duration::seconds(
-                        i64::from(task.spec.ttl_seconds_after_finished.max(0)),
-                    );
+                    let ttl = chrono::Duration::seconds(i64::from(
+                        task.spec.ttl_seconds_after_finished.max(0),
+                    ));
                     if Utc::now() - finished.with_timezone(&Utc) > ttl {
                         pods.delete(&name, &DeleteParams::default()).await?;
                         recorder(&ctx, &task)

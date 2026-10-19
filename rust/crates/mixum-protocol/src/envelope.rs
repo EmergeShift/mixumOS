@@ -25,11 +25,7 @@ pub struct Envelope {
     pub op: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub seq: i64,
-    #[serde(
-        default,
-        rename = "replyTo",
-        skip_serializing_if = "String::is_empty"
-    )]
+    #[serde(default, rename = "replyTo", skip_serializing_if = "String::is_empty")]
     pub reply_to: String,
     #[serde(default)]
     pub ts: i64,
@@ -168,10 +164,7 @@ mod tests {
         let got = Envelope::decode(raw.as_bytes()).expect("往返应成功");
         assert_eq!(got.op, "task.submit");
         assert_eq!(got.id, e.id);
-        assert_eq!(
-            got.payload.unwrap()["instruction"],
-            "打开 b 站搜 mixumOS"
-        );
+        assert_eq!(got.payload.unwrap()["instruction"], "打开 b 站搜 mixumOS");
     }
 
     #[test]

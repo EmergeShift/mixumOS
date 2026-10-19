@@ -70,7 +70,6 @@ where
     async move { accept_hdr_async(stream, cb).await.map_err(Box::new) }
 }
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -380,7 +379,9 @@ impl Server {
             let (stream, _) = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = this.handle_stream(accept_with_subprotocol(stream).await).await;
+                let _ = this
+                    .handle_stream(accept_with_subprotocol(stream).await)
+                    .await;
             });
         }
     }
@@ -429,6 +430,7 @@ impl Server {
             id: String::new(),
             conn_id: new_id(),
             bound: false,
+            forwarders: Vec::new(),
             #[cfg(feature = "real-snapshot")]
             sync_stage: None,
         };
@@ -474,6 +476,10 @@ impl Server {
                 .await;
         }
         writer.abort();
+        // 帧转发任务持有会话出站通道,断连后必须终止,否则永久泄漏。
+        for forwarder in session.forwarders.drain(..) {
+            forwarder.abort();
+        }
         Ok(())
     }
 }
@@ -488,6 +494,8 @@ pub struct Session {
     /// 本连接的内部 id;用于避免旧连接清理新连接的会话状态。
     conn_id: String,
     bound: bool,
+    /// display.attach 的帧转发任务:会话结束时统一 abort(队列关闭是常规路径)。
+    forwarders: Vec<tokio::task::JoinHandle<()>>,
     /// 远端导入暂存:一次 import 对账到 commit 之间有效(协议 §6)。
     #[cfg(feature = "real-snapshot")]
     sync_stage: Option<crate::sync::ImportStage>,
@@ -1201,15 +1209,15 @@ impl Session {
         )
         .await
         {
-            Ok(stats) => {
-                self.reply(env, serde_json::to_value(stats).unwrap())
-                    .await
-            }
+            Ok(stats) => self.reply(env, serde_json::to_value(stats).unwrap()).await,
             Err(crate::sync::SyncError::NotFound(m)) => self.err(env, ErrCode::NotFound, &m).await,
             Err(crate::sync::SyncError::Unsupported(m)) => {
                 self.err(env, ErrCode::Unsupported, &m).await
             }
-            Err(e) => self.err(env, ErrCode::Internal, &format!("推送失败: {e}")).await,
+            Err(e) => {
+                self.err(env, ErrCode::Internal, &format!("推送失败: {e}"))
+                    .await
+            }
         }
     }
 
@@ -1303,11 +1311,12 @@ impl Session {
             Ok((width, height, fps, mut sub)) => {
                 let codec = sub.codec.clone();
                 let tx = self.tx.clone();
-                tokio::spawn(async move {
+                let forwarder = tokio::spawn(async move {
                     while let Some(frame) = sub.frames.recv().await {
                         let _ = tx.send(Message::Binary(frame.into())).await;
                     }
                 });
+                self.forwarders.push(forwarder);
                 self.reply(
                     env,
                     json!({"window":id,"codec":codec,"width":width,"height":height,"fps":fps}),

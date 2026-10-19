@@ -1,11 +1,11 @@
 //! 能力令牌:`map1.<base64url(payload)>.<base64url(sig)>`,ed25519 签名。
-//! 语义与 reference/internal/auth/token.go 一致:
+//! 语义与已移除的 Go 参考实现一致,兼容向量固化于 tests/cross-protocol:
 //! 长期令牌允许跨连接复用(jti 留给吊销列表),过期即拒。
 //! 过渡期:旧前缀 `mixum1.` 仍被接受(验证端双读),签发端只发 `map1.`。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
-use ed25519_dalek::{Signer as _, Verifier as _, Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -92,8 +92,7 @@ impl Signer {
         if claims.exp == 0 {
             claims.exp = claims.iat + 3600;
         }
-        let payload = serde_json::to_vec(&claims)
-            .map_err(|e| Error::Serialize(e.to_string()))?;
+        let payload = serde_json::to_vec(&claims).map_err(|e| Error::Serialize(e.to_string()))?;
         let sig = self.key.sign(&payload);
         Ok(format!(
             "{}{}.{}",
@@ -184,43 +183,49 @@ mod tests {
     #[test]
     fn rejects_tampered_and_foreign() {
         let (s, v) = pair();
-        let tok = s.mint(Claims {
-            sub: "x".into(),
-            caps: vec![Cap::Admin],
-            iat: 0,
-            exp: 0,
-            jti: String::new(),
-            task_id: String::new(),
-            windows: vec![],
-        }).unwrap();
+        let tok = s
+            .mint(Claims {
+                sub: "x".into(),
+                caps: vec![Cap::Admin],
+                iat: 0,
+                exp: 0,
+                jti: String::new(),
+                task_id: String::new(),
+                windows: vec![],
+            })
+            .unwrap();
         let bad = format!("{}AAAA", &tok[..tok.len() - 4]);
         assert!(v.verify(&bad).is_err(), "被篡改的令牌应被拒绝");
 
         let (other, _) = pair();
-        let tok2 = other.mint(Claims {
-            sub: "y".into(),
-            caps: vec![],
-            iat: 0,
-            exp: 0,
-            jti: String::new(),
-            task_id: String::new(),
-            windows: vec![],
-        }).unwrap();
+        let tok2 = other
+            .mint(Claims {
+                sub: "y".into(),
+                caps: vec![],
+                iat: 0,
+                exp: 0,
+                jti: String::new(),
+                task_id: String::new(),
+                windows: vec![],
+            })
+            .unwrap();
         assert!(v.verify(&tok2).is_err(), "非本服务签发应被拒绝");
     }
 
     #[test]
     fn rejects_expired() {
         let (s, v) = pair();
-        let tok = s.mint(Claims {
-            sub: "x".into(),
-            caps: vec![],
-            iat: now_unix() - 7200,
-            exp: now_unix() - 60,
-            jti: String::new(),
-            task_id: String::new(),
-            windows: vec![],
-        }).unwrap();
+        let tok = s
+            .mint(Claims {
+                sub: "x".into(),
+                caps: vec![],
+                iat: now_unix() - 7200,
+                exp: now_unix() - 60,
+                jti: String::new(),
+                task_id: String::new(),
+                windows: vec![],
+            })
+            .unwrap();
         assert!(matches!(v.verify(&tok), Err(Error::Expired)));
     }
 
@@ -228,15 +233,17 @@ mod tests {
     fn token_reuse_is_allowed() {
         // 长期令牌跨连接复用是设计决策(见 docs/security.md §2)。
         let (s, v) = pair();
-        let tok = s.mint(Claims {
-            sub: "x".into(),
-            caps: vec![Cap::SnapSync],
-            iat: 0,
-            exp: 0,
-            jti: String::new(),
-            task_id: String::new(),
-            windows: vec![],
-        }).unwrap();
+        let tok = s
+            .mint(Claims {
+                sub: "x".into(),
+                caps: vec![Cap::SnapSync],
+                iat: 0,
+                exp: 0,
+                jti: String::new(),
+                task_id: String::new(),
+                windows: vec![],
+            })
+            .unwrap();
         for _ in 0..3 {
             assert!(v.verify(&tok).is_ok());
         }
@@ -281,7 +288,10 @@ mod tests {
         let verifier = Verifier::new(s.verifying_key());
         let claims = verifier.verify(v["token"].as_str().unwrap()).unwrap();
         assert_eq!(claims.sub, v["expect"]["sub"].as_str().unwrap());
-        assert_eq!(claims.caps.len(), v["expect"]["caps"].as_array().unwrap().len());
+        assert_eq!(
+            claims.caps.len(),
+            v["expect"]["caps"].as_array().unwrap().len()
+        );
     }
 
     #[test]
