@@ -44,6 +44,7 @@ pub mod op {
     pub const DISPLAY_WINDOWS: &str = "display.windows";
     pub const DISPLAY_INPUT: &str = "display.input";
     pub const DISPLAY_TAKEOVER: &str = "display.takeover";
+    pub const DISPLAY_CLIPBOARD: &str = "display.clipboard";
 
     pub const SYS_INFO: &str = "sys.info";
     pub const SYS_PING: &str = "sys.ping";
