@@ -80,5 +80,8 @@
 ## 持续事项
 
 - 安全:威胁模型随阶段更新(security.md);
+- 兼容:mixumd↔mixcomp 私有通道未知记录类型改忽略+告警(现直接断连,
+  EmergeShift#8;新 mixcomp 配旧 mixumd 会死链,违反 MAP 前向兼容原则);
+- display.attach 插入订阅者与二次查表的低概率竞态(PR#6 遗留);
 - 文档:每个阶段的实现与设计偏差回写设计文档;
 - mixcomp 上游跟踪:wlroots 0.19 变更评估。
