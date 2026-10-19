@@ -10,7 +10,7 @@ pkgdesc="mixumOS 的魔改 Wayland 合成器:每窗口独立虚拟输出,JPEG �
 arch=(aarch64 x86_64)
 url="https://github.com/mixumos/mixumos"
 license=('Apache-2.0')
-depends=(wlroots0.18 libjpeg-turbo json-c libxkbcommon wayland openh264)
+depends=(wlroots0.18 libjpeg-turbo libpng json-c libxkbcommon wayland openh264)
 # wlroots0.18 是 mixum 仓库自建包(官方源已无 0.18,见该包注释),
 # 构建容器经 [mixum] 源认领,由 container-build.sh 保证先于本包入库。
 makedepends=(git wayland-protocols)
