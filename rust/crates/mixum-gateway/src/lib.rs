@@ -13,7 +13,14 @@
 //!   帧本身(0x01 + 27 字节头)不改。
 
 pub mod identity;
+pub mod mesh;
+pub mod registry;
+pub mod registry_k8s;
 
+pub use mesh::MeshHub;
+pub use registry::{MemoryRegistry, NodeRecord, NodeRegistry};
+
+use async_trait::async_trait;
 use mixum_protocol::ops::{Cap, ErrCode};
 use mixum_protocol::token::{Claims, Signer};
 use serde::{Deserialize, Serialize};
@@ -32,15 +39,6 @@ pub enum Outbound {
     Binary(Vec<u8>),
     /// 连接关闭前发一条 Close(可选)。
     Close,
-}
-
-struct NodeConn {
-    out: OutTx,
-    // 版本与注册时间:M1 未消费,留给 gateway.node.list 详情与审计。
-    #[allow(dead_code)]
-    version: String,
-    #[allow(dead_code)]
-    since: i64,
 }
 
 struct ClientConn {
@@ -66,9 +64,41 @@ pub struct DeviceEntry {
     pub iat: i64,
 }
 
+/// 跨副本 mesh 会话 id 前缀(owner 侧据此把节点应答路由回请求方)。
+pub const MESH_SESSION_PREFIX: &str = "ms-";
+
+pub fn is_mesh_session(session: &str) -> bool {
+    session.starts_with(MESH_SESSION_PREFIX)
+}
+
+/// 跨副本转发(M3b)。实现见 `mesh.rs`;gateway 核心只依赖这个窄接口。
+#[async_trait]
+pub trait MeshRouter: Send + Sync {
+    /// 把一条客户端信封转给节点 owner 副本;成功后返回本次 mesh 会话 id
+    /// (用于节点应答的反向寻址)。
+    async fn forward_text(
+        &self,
+        client_session: &str,
+        record: &NodeRecord,
+        text: &str,
+    ) -> Result<String, String>;
+    /// mesh 会话 → 本地客户端会话(本副本是请求发起方时)。
+    async fn client_session(&self, mesh_session: &str) -> Option<String>;
+    /// 节点应答回送发起方副本(本副本是节点 owner 时)。
+    async fn reply_text(&self, mesh_session: &str, text: &str);
+    async fn reply_binary(&self, mesh_session: &str, frame: &[u8]);
+    /// 客户端断开:关闭它在该 owner 上的所有 mesh 会话。
+    async fn close_client(&self, client_session: &str);
+    /// 节点 owner 侧收到 mesh.close:关闭回环会话。
+    async fn close_inbound(&self, mesh_session: &str);
+}
+
 pub struct Gateway {
     signer: Signer,
-    nodes: RwLock<HashMap<String, NodeConn>>,
+    /// 节点注册表(元数据):内存(M1/M2)或 k8s Lease(M3)。
+    nodes: Arc<dyn NodeRegistry>,
+    /// 本副本持有的节点出站连接。
+    local: RwLock<HashMap<String, OutTx>>,
     clients: Mutex<HashMap<String, ClientConn>>,
     revoked: RwLock<HashSet<String>>,
     /// 配对码 → 用户主体(5 分钟有效,单次使用)。
@@ -81,6 +111,14 @@ pub struct Gateway {
     state_path: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// 最近一次签发的 bootstrap jti:重启时轮换(旧令牌立即失效)。
     bootstrap_jti: std::sync::Mutex<Option<String>>,
+    /// 本 gateway 实例标识(单副本 `local`,k8s 为 Pod 名)。
+    instance_id: String,
+    /// 本实例的 mesh 地址(M3b 跨副本寻址)。
+    advertise: String,
+    /// 跨副本转发器;单副本为 None。
+    mesh: Option<Arc<dyn MeshRouter>>,
+    /// owner 侧已打开的 mesh 回环会话(mesh session → 节点名)。
+    mesh_open: Mutex<HashMap<String, String>>,
     seq: AtomicU64,
     started_at: i64,
 }
@@ -114,9 +152,32 @@ fn err_envelope(env: Option<&Value>, code: ErrCode, message: &str) -> String {
 
 impl Gateway {
     pub fn new(signer: Signer) -> Arc<Self> {
+        Self::with_options(
+            signer,
+            Arc::new(MemoryRegistry::new()),
+            "local".into(),
+            String::new(),
+            None,
+        )
+    }
+
+    /// 注入注册表后端(测试与 M3 k8s 后端装配点)。
+    pub fn with_registry(signer: Signer, nodes: Arc<dyn NodeRegistry>) -> Arc<Self> {
+        Self::with_options(signer, nodes, "local".into(), String::new(), None)
+    }
+
+    /// 完整装配:注册表 + 实例标识 + mesh 地址 + 跨副本转发器。
+    pub fn with_options(
+        signer: Signer,
+        nodes: Arc<dyn NodeRegistry>,
+        instance_id: String,
+        advertise: String,
+        mesh: Option<Arc<dyn MeshRouter>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             signer,
-            nodes: RwLock::new(HashMap::new()),
+            nodes,
+            local: RwLock::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
             revoked: RwLock::new(HashSet::new()),
             pairs: Mutex::new(HashMap::new()),
@@ -124,6 +185,10 @@ impl Gateway {
             pair_failures: Mutex::new(HashMap::new()),
             state_path: std::sync::Mutex::new(None),
             bootstrap_jti: std::sync::Mutex::new(None),
+            instance_id,
+            advertise,
+            mesh,
+            mesh_open: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(1),
             started_at: mixum_protocol::envelope::now_ms(),
         })
@@ -189,6 +254,30 @@ impl Gateway {
 
     /// 启动时轮换 bootstrap:旧 jti 进撤销表,签发新的短期管理令牌。
     pub async fn bootstrap_token(&self) -> Result<String, String> {
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// 启动 mesh 入站消费任务:把跨副本事件接到本 gateway 的路由核心。
+    pub fn start_mesh(self: &Arc<Self>, hub: Arc<mesh::MeshHub>) {
+        let gateway = self.clone();
+        tokio::spawn(async move {
+            while let Some(event) = hub.next_event().await {
+                match event {
+                    mesh::MeshEvent::Text { session, text } => {
+                        gateway.on_mesh_text(&session, &text).await;
+                    }
+                    mesh::MeshEvent::Binary { session, data } => {
+                        gateway.on_mesh_binary(&session, &data).await;
+                    }
+                    mesh::MeshEvent::Close { session } => {
+                        gateway.on_mesh_close(&session).await;
+                    }
+                }
+            }
+        });
+    }
+
         let now = mixum_protocol::envelope::now_ms();
         let previous = self.bootstrap_jti.lock().expect("bootstrap lock").take();
         if let Some(old) = previous {
@@ -227,23 +316,21 @@ impl Gateway {
         version: &str,
         out: OutTx,
     ) -> Result<(), String> {
-        let mut nodes = self.nodes.write().await;
-        if nodes.contains_key(name) {
-            return Err(format!("节点重名在线:{name}"));
-        }
-        nodes.insert(
-            name.to_owned(),
-            NodeConn {
-                out,
-                version: version.to_owned(),
-                since: mixum_protocol::envelope::now_ms(),
-            },
-        );
+        let record = NodeRecord {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            since: mixum_protocol::envelope::now_ms(),
+            owner: self.instance_id.clone(),
+            owner_addr: self.advertise.clone(),
+        };
+        self.nodes.register(record).await?;
+        self.local.write().await.insert(name.to_owned(), out);
         Ok(())
     }
 
     pub async fn node_disconnected(&self, name: &str) {
-        self.nodes.write().await.remove(name);
+        self.nodes.remove(name, &self.instance_id).await;
+        self.local.write().await.remove(name);
         // 该节点上的客户端会话标记清除:节点回归后下一封重开 session。
         let mut clients = self.clients.lock().await;
         for client in clients.values_mut() {
@@ -252,7 +339,18 @@ impl Gateway {
     }
 
     pub async fn node_offline(&self) -> Vec<String> {
-        self.nodes.read().await.keys().cloned().collect()
+        self.nodes.online().await
+    }
+
+    /// 节点心跳续约(relay 每 20s 一次)。
+    pub async fn renew_node(&self, name: &str) -> Result<(), String> {
+        self.nodes
+            .renew(name, &self.instance_id, mixum_protocol::envelope::now_ms())
+            .await
+    }
+
+    pub async fn local_outbox(&self, name: &str) -> Option<OutTx> {
+        self.local.read().await.get(name).cloned()
     }
 
     pub async fn client_connected(&self, sub: &str, out: OutTx) -> String {
@@ -303,9 +401,13 @@ impl Gateway {
             "op":"gateway.session.close","payload":{"gatewaySession":session}
         })
         .to_string();
-        let nodes = self.nodes.read().await;
-        for node in nodes.values() {
-            let _ = node.out.send(Outbound::Text(notice.clone())).await;
+        let outboxes: Vec<OutTx> = self.local.read().await.values().cloned().collect();
+        for out in outboxes {
+            let _ = out.send(Outbound::Text(notice.clone())).await;
+        }
+        // 跨副本会话:通知 owner 侧关闭对应回环。
+        if let Some(mesh) = &self.mesh {
+            mesh.close_client(session).await;
         }
         self.clients.lock().await.remove(session);
     }
@@ -374,49 +476,65 @@ impl Gateway {
             }
         }
         let out = Vec::new();
-        {
-            let nodes = self.nodes.read().await;
-            let Some(node) = nodes.get(&node_name) else {
+        let Some(node) = self.nodes.get(&node_name).await else {
+            return vec![Outbound::Text(err_envelope(
+                Some(&env),
+                ErrCode::NotFound,
+                &format!("节点不在线: {node_name}"),
+            ))];
+        };
+        // 跨副本(M3b):把信封转给 owner 副本,应答由 mesh 通道回送。
+        if node.owner != self.instance_id {
+            let Some(mesh) = &self.mesh else {
                 return vec![Outbound::Text(err_envelope(
                     Some(&env),
-                    ErrCode::NotFound,
-                    &format!("节点不在线: {node_name}"),
+                    ErrCode::Unavailable,
+                    &format!("节点由其他 gateway 副本持有: {node_name}"),
                 ))];
             };
-            // 该 (会话, 节点) 首次路由:先开 relay 侧回环会话(重复 open
-            // 由 relay 幂等忽略),再转信封。
-            let need_open = self
-                .clients
-                .lock()
+            let mut forwarded = env.clone();
+            forwarded["node"] = json!(node_name);
+            return match mesh
+                .forward_text(session, &node, &forwarded.to_string())
                 .await
-                .get(session)
-                .map(|c| !c.nodes.contains(&node_name))
-                .unwrap_or(false);
-            if need_open {
-                let open = json!({
-                    "v":1,"id":mixum_protocol::envelope::new_id(),
-                    "op":"gateway.session.open",
-                    "payload":{"gatewaySession":session,"node":node_name}
-                });
-                if node
-                    .out
-                    .send(Outbound::Text(open.to_string()))
-                    .await
-                    .is_err()
-                {
-                    return vec![Outbound::Text(err_envelope(
-                        Some(&env),
-                        ErrCode::Internal,
-                        &format!("节点连接异常: {node_name}"),
-                    ))];
+            {
+                Ok(_) => {
+                    if let Some(client) = self.clients.lock().await.get_mut(session) {
+                        client.nodes.insert(node_name.clone());
+                    }
+                    out
                 }
-            }
-            // 会话标记:gateway↔节点私有通道约定(见模块注释)。
-            let mut tagged = env.clone();
-            tagged["gatewaySession"] = json!(session);
-            if node
-                .out
-                .send(Outbound::Text(tagged.to_string()))
+                Err(e) => vec![Outbound::Text(err_envelope(
+                    Some(&env),
+                    ErrCode::Unavailable,
+                    &e,
+                ))],
+            };
+        }
+        let Some(node_out) = self.local_outbox(&node_name).await else {
+            return vec![Outbound::Text(err_envelope(
+                Some(&env),
+                ErrCode::Unavailable,
+                &format!("节点连接已失效: {node_name}"),
+            ))];
+        };
+        // 该 (会话, 节点) 首次路由:先开 relay 侧回环会话(重复 open
+        // 由 relay 幂等忽略),再转信封。
+        let need_open = self
+            .clients
+            .lock()
+            .await
+            .get(session)
+            .map(|c| !c.nodes.contains(&node_name))
+            .unwrap_or(false);
+        if need_open {
+            let open = json!({
+                "v":1,"id":mixum_protocol::envelope::new_id(),
+                "op":"gateway.session.open",
+                "payload":{"gatewaySession":session,"node":node_name}
+            });
+            if node_out
+                .send(Outbound::Text(open.to_string()))
                 .await
                 .is_err()
             {
@@ -427,6 +545,20 @@ impl Gateway {
                 ))];
             }
         }
+        // 会话标记:gateway↔节点私有通道约定(见模块注释)。
+        let mut tagged = env.clone();
+        tagged["gatewaySession"] = json!(session);
+        if node_out
+            .send(Outbound::Text(tagged.to_string()))
+            .await
+            .is_err()
+        {
+            return vec![Outbound::Text(err_envelope(
+                Some(&env),
+                ErrCode::Internal,
+                &format!("节点连接异常: {node_name}"),
+            ))];
+        }
         if let Some(client) = self.clients.lock().await.get_mut(session) {
             client.nodes.insert(node_name.clone());
         }
@@ -434,13 +566,18 @@ impl Gateway {
         out
     }
 
-    /// 节点文本入口:带 gatewaySession → 剥离标记后直投客户端;否则忽略
-    /// (gateway.heartbeat 等节点侧控制消息)。投递直接走客户端连接的
-    /// 出站口——bin 层不得把返回值发回节点(那是节点的下行口)。
-    pub async fn on_node_text(&self, _node: &str, text: &str) {
+    /// 节点文本入口:带 gatewaySession → 剥离标记后直投客户端;heartbeat
+    /// 就地续约;`ms-` 前缀是跨副本会话,交 mesh 回送 owner 的请求方。
+    /// 投递直接走客户端连接的出站口——bin 层不得把返回值发回节点。
+    pub async fn on_node_text(&self, node: &str, text: &str) {
         let Ok(env) = serde_json::from_str::<Value>(text) else {
             return;
         };
+        let op = env.get("op").and_then(Value::as_str).unwrap_or_default();
+        if op == "gateway.heartbeat" {
+            let _ = self.renew_node(node).await;
+            return;
+        }
         let Some(session) = env.get("gatewaySession").and_then(Value::as_str) else {
             return;
         };
@@ -448,13 +585,19 @@ impl Gateway {
         if let Some(obj) = clean.as_object_mut() {
             obj.remove("gatewaySession");
         }
+        if is_mesh_session(session) {
+            if let Some(mesh) = &self.mesh {
+                mesh.reply_text(session, &clean.to_string()).await;
+            }
+            return;
+        }
         let clients = self.clients.lock().await;
         if let Some(client) = clients.get(session) {
             let _ = client.out.send(Outbound::Text(clean.to_string())).await;
         }
     }
 
-    /// 节点二进制入口:剥离会话前缀后直投对应客户端(同上,不走返回值)。
+    /// 节点二进制入口:剥离会话前缀后直投对应客户端;跨副本会话走 mesh。
     pub async fn on_node_binary(&self, bytes: &[u8]) {
         if bytes.len() < 4 {
             return;
@@ -464,12 +607,150 @@ impl Gateway {
             return;
         }
         let session = String::from_utf8_lossy(&bytes[4..4 + len]).to_string();
+        let frame = bytes[4 + len..].to_vec();
+        if is_mesh_session(&session) {
+            if let Some(mesh) = &self.mesh {
+                mesh.reply_binary(&session, &frame).await;
+            }
+            return;
+        }
         let clients = self.clients.lock().await;
         if let Some(client) = clients.get(&session) {
-            let _ = client
-                .out
-                .send(Outbound::Binary(bytes[4 + len..].to_vec()))
+            let _ = client.out.send(Outbound::Binary(frame)).await;
+        }
+    }
+
+    /// mesh 文本入口。
+    /// - 本副本是请求发起方(会话在 `client_session` 表里)→ 投给本地客户端;
+    /// - 本副本是节点 owner → 校验归属后送本地节点,失败用 mesh 回错误信封。
+    pub async fn on_mesh_text(&self, session: &str, text: &str) {
+        if let Some(mesh) = &self.mesh {
+            if let Some(client_session) = mesh.client_session(session).await {
+                let mut clean: Value = match serde_json::from_str(text) {
+                    Ok(value) => value,
+                    Err(_) => return,
+                };
+                if let Some(obj) = clean.as_object_mut() {
+                    obj.remove("gatewaySession");
+                }
+                let clients = self.clients.lock().await;
+                if let Some(client) = clients.get(&client_session) {
+                    let _ = client.out.send(Outbound::Text(clean.to_string())).await;
+                }
+                return;
+            }
+        }
+        self.route_mesh_to_local(session, text).await;
+    }
+
+    pub async fn on_mesh_binary(&self, session: &str, frame: &[u8]) {
+        let Some(mesh) = &self.mesh else {
+            return;
+        };
+        if let Some(client_session) = mesh.client_session(session).await {
+            let clients = self.clients.lock().await;
+            if let Some(client) = clients.get(&client_session) {
+                let _ = client.out.send(Outbound::Binary(frame.to_vec())).await;
+            }
+        }
+    }
+
+    pub async fn on_mesh_close(&self, session: &str) {
+        let node = self.mesh_open.lock().await.remove(session);
+        if let (Some(mesh), Some(node)) = (&self.mesh, node) {
+            mesh.close_inbound(session).await;
+            if let Some(out) = self.local_outbox(&node).await {
+                let close = json!({
+                    "v":1,"id":mixum_protocol::envelope::new_id(),
+                    "op":"gateway.session.close","payload":{"gatewaySession":session}
+                })
+                .to_string();
+                let _ = out.send(Outbound::Text(close)).await;
+            }
+        }
+    }
+
+    async fn route_mesh_to_local(&self, session: &str, text: &str) {
+        let Ok(env) = serde_json::from_str::<Value>(text) else {
+            return;
+        };
+        let node_name = env
+            .get("node")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let Some(record) = self.nodes.get(&node_name).await else {
+            self.mesh_error(
+                session,
+                &env,
+                ErrCode::NotFound,
+                &format!("节点不在线: {node_name}"),
+            )
+            .await;
+            return;
+        };
+        if record.owner != self.instance_id {
+            self.mesh_error(
+                session,
+                &env,
+                ErrCode::Unavailable,
+                &format!("节点由其他 gateway 副本持有: {node_name}"),
+            )
+            .await;
+            return;
+        }
+        let Some(out) = self.local_outbox(&node_name).await else {
+            self.mesh_error(
+                session,
+                &env,
+                ErrCode::Unavailable,
+                &format!("节点连接已失效: {node_name}"),
+            )
+            .await;
+            return;
+        };
+        let first = self
+            .mesh_open
+            .lock()
+            .await
+            .insert(session.to_owned(), node_name.clone())
+            .is_none();
+        if first {
+            let open = json!({
+                "v":1,"id":mixum_protocol::envelope::new_id(),
+                "op":"gateway.session.open",
+                "payload":{"gatewaySession":session,"node":node_name}
+            });
+            if out.send(Outbound::Text(open.to_string())).await.is_err() {
+                self.mesh_open.lock().await.remove(session);
+                self.mesh_error(
+                    session,
+                    &env,
+                    ErrCode::Internal,
+                    &format!("节点连接异常: {node_name}"),
+                )
                 .await;
+                return;
+            }
+        }
+        let mut tagged = env.clone();
+        tagged["gatewaySession"] = json!(session);
+        if out.send(Outbound::Text(tagged.to_string())).await.is_err() {
+            self.mesh_open.lock().await.remove(session);
+            self.mesh_error(
+                session,
+                &env,
+                ErrCode::Internal,
+                &format!("节点连接异常: {node_name}"),
+            )
+            .await;
+        }
+    }
+
+    async fn mesh_error(&self, session: &str, env: &Value, code: ErrCode, message: &str) {
+        if let Some(mesh) = &self.mesh {
+            let error = err_envelope(Some(env), code, message);
+            mesh.reply_text(session, &error).await;
         }
     }
 
@@ -977,6 +1258,28 @@ mod tests {
             }
             other => panic!("期望 close 通知,实际 {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn node_held_by_another_replica_reports_unavailable() {
+        // M3b 预留路径:注册表里有节点,但本副本没有它的出站连接。
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(NodeRecord {
+                name: "remote".into(),
+                version: "0.1.0".into(),
+                since: 1,
+                owner: "gw-other".into(),
+                owner_addr: "ws://127.0.0.1:1/mesh".into(),
+            })
+            .await
+            .unwrap();
+        let gw = Gateway::with_registry(Signer::generate(), registry);
+        let (ctx, _crx) = mpsc_pair();
+        let session = gw.client_connected("user:u1", ctx).await;
+        let req = json!({"v":1,"id":"r5","op":"task.list","node":"remote","payload":{}});
+        let out = gw.on_client_text(&session, &req.to_string()).await;
+        assert!(matches!(&out[0], Outbound::Text(t) if t.contains("unavailable")));
     }
 
     #[tokio::test]

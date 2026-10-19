@@ -36,6 +36,18 @@
 - WS 帧上限:控制 32 MiB / 二进制记录 16 MiB;连接级令牌桶限速;
   慢消费者(帧通道持续满)2 秒后断连,防止拖垮 broker。
 
+### 3.1 gateway 多副本(M3)
+
+- 共享注册表落 k8s Lease,只含节点元数据(name/owner mesh 地址/version),
+  不含节点令牌、任务内容或帧数据;
+- 副本间 mesh 是集群内明文 WS + Secret 注入的共享 token,只监听
+  ClusterIP/headless Service;跨集群或公网部署需自行加 TLS/隧道
+  (v1 不做副本间端到端加密,记录在案);
+- 副本必须共享 `identity.key`(Secret 挂载)作为令牌签发根,否则 A 签的
+  令牌在 B 上验不过;TLS 证书同理共享时才能稳定使用 wss;
+- mesh 会话 id(`ms-*`)只下发给节点 relay 作回环标记,节点无法据此跨副本
+  提权;节点令牌仍按 `node:*` 前缀在 owner 副本本地校验。
+
 ## 4. 快照子系统
 
 - 块哈希 = 明文 SHA-256,读取时全量校验(防静默损坏与块挪用);

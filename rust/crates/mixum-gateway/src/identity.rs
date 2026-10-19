@@ -74,6 +74,7 @@ pub fn load_or_create_identity(
     }
     tighten_private(&seed_path);
     tighten_private(&key_path);
+
     mixum_protocol::token::ensure_crypto_provider();
     let cert_bytes = std::fs::read(&cert_path)?;
     let key_bytes = std::fs::read(&key_path)?;

@@ -11,6 +11,7 @@ path = "src/bin/mixum-gateway.rs"
 
 [dependencies]
 mixum-protocol = { path = "../mixum-protocol" }
+async-trait = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,3 +23,7 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 sha2 = { workspace = true }
+base64 = { workspace = true }
+kube = { version = "0.97", features = ["runtime", "derive", "client"] }
+k8s-openapi = { version = "0.23", features = ["v1_30"] }
+chrono = "0.4"

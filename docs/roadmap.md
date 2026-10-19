@@ -72,9 +72,18 @@
 
 ## 阶段 5:云端与多设备
 
-- [ ] k8s operator(kube-rs):MixumTask CRD、节点池亲和(arm64/x86_64)、
-      快照卷挂载;
-- [ ] gateway:多容器路由、设备配对、令牌分发;
+- [x] k8s operator(kube-rs)(2026-10-19 kind 集群 e2e 验证):MixumTask CRD
+      (instruction/agent/arch/runnerImage/snapshotPvc/ttl)、任务 Pod 编排
+      (显式直起 mixumd——dist 镜像无 ENTRYPOINT;MIXUM_RUN_ONCE 一次性
+      语义)、状态回写 pending→running→completed/failed、arch 注入
+      nodeSelector、快照 PVC 挂载 /var/lib/mixum、TTL 回收+终态不重建;
+      tests/integration/operator-e2e.mjs(kind 镜像装载/清单/CRD 竞态等待);
+- [x] gateway M1/M2(2026-10-18,gateway-e2e 全链):节点出站注册、
+      envelope 路由(文本+二进制)、用户/节点令牌签发、设备配对/吊销、
+      TLS、console 节点选择器;
+- [x] gateway M3(2026-10-19,gateway-m3-e2e):`NodeRegistry` trait +
+      k8s Lease 共享注册表(心跳续约)、副本间 WS mesh 双向跨副本路由、
+      节点掉线跨副本清理;部署清单 cloud/k8s/60-gateway.yaml;
 - [ ] 内存快照跨内核迁移的可行性验证(CRIU 同内核约束的工程对策)。
 
 ## 持续事项
