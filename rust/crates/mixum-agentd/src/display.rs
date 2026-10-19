@@ -15,12 +15,16 @@ pub const MODE_USER: &str = "user";
 pub const MODE_FREE: &str = "free";
 pub const CODEC_JPEG: &str = "jpeg";
 pub const CODEC_H264: &str = "h264";
+/// 无损 PNG + damage 补丁流（订阅者按需协商；旧客户端不受影响）。
+pub const CODEC_PNG: &str = "png";
 
 /// mixumd↔mixcomp 私有通道的记录类型(0x01 JSON 控制之外):
 /// 0x02 = JPEG 视频帧,0x03 = H.264 视频帧(负载同为协议 §5 的
 /// 0x01 + 27 字节头 + 编码数据,公有 WS 帧格式不区分)。
 const COMP_REC_VIDEO: u8 = 0x02;
 const COMP_REC_VIDEO_H264: u8 = 0x03;
+/// PNG 全帧/补丁（DB 帧头 + 可选 20 字节 patch 头 + PNG）。
+const COMP_REC_VIDEO_PNG: u8 = 0x04;
 /// 单帧上限,超过视为控制通道 framing 损坏。
 const MAX_COMP_FRAME: usize = 16 * 1024 * 1024;
 
@@ -299,9 +303,11 @@ impl Broker {
         subscriber_id: impl Into<String>,
         fps: u32,
         codec: &str,
+        quality: u32,
     ) -> Result<(u32, u32, u32, FrameSubscription), DisplayError> {
         let codec = match codec {
             CODEC_H264 => CODEC_H264.to_owned(),
+            CODEC_PNG => CODEC_PNG.to_owned(),
             _ => CODEC_JPEG.to_owned(),
         };
         let (tx, rx) = FrameQueue::pair(8);
@@ -321,10 +327,16 @@ impl Broker {
             );
             (state.window.width, state.window.height)
         };
-        self.send_json(
-            serde_json::json!({"type":"stream.start","id":id,"fps":fps.clamp(1,60),"codec":codec}),
-        )
-        .await;
+        let mut start = serde_json::json!({
+            "type": "stream.start",
+            "id": id,
+            "fps": fps.clamp(1, 60),
+            "codec": codec,
+        });
+        if quality > 0 {
+            start["quality"] = serde_json::json!(quality.clamp(1, 100));
+        }
+        self.send_json(start).await;
         Ok((
             width,
             height,
@@ -520,6 +532,9 @@ impl Broker {
                 COMP_REC_VIDEO_H264 => {
                     self.broadcast_video_record(&payload, CODEC_H264).await;
                 }
+                COMP_REC_VIDEO_PNG => {
+                    self.broadcast_video_record(&payload, CODEC_PNG).await;
+                }
                 unknown => {
                     // EmergeShift#8:私有通道按增量演进,未知记录类型忽略并计数,
                     // 不再断连(新 mixcomp + 旧 mixumd 不再死链)。
@@ -671,8 +686,8 @@ mod tests {
                 codec: None,
             })
             .await;
-        let jpeg_sub = broker.attach(7, "s-jpeg", 30, CODEC_JPEG).await.unwrap();
-        let h264_sub = broker.attach(7, "s-h264", 30, CODEC_H264).await.unwrap();
+        let jpeg_sub = broker.attach(7, "s-jpeg", 30, CODEC_JPEG, 0).await.unwrap();
+        let h264_sub = broker.attach(7, "s-h264", 30, CODEC_H264, 0).await.unwrap();
         assert_eq!(jpeg_sub.3.codec, CODEC_JPEG);
         assert_eq!(h264_sub.3.codec, CODEC_H264);
         // 能力回告前窗口 codec 未定
@@ -770,7 +785,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         *broker.comp.lock().await = Some(CompConn { id: 1, tx });
         assert!(matches!(
-            broker.attach(42, "s", 30, CODEC_JPEG).await,
+            broker.attach(42, "s", 30, CODEC_JPEG, 0).await,
             Err(DisplayError::NotFound(42))
         ));
         assert!(rx.try_recv().is_err(), "窗口不存在时不得发 stream.start");
@@ -788,15 +803,47 @@ mod tests {
             })
             .await;
         let (width, height, _, subscription) =
-            broker.attach(7, "s", 30, CODEC_JPEG).await.unwrap();
+            broker.attach(7, "s", 30, CODEC_JPEG, 0).await.unwrap();
         assert_eq!((width, height), (640, 480));
         // close 紧跟在 attach 之后:attach 的返回值已经完整,不再二次查表。
         broker.close(7).await;
         assert!(matches!(
-            broker.attach(7, "s2", 30, CODEC_JPEG).await,
+            broker.attach(7, "s2", 30, CODEC_JPEG, 0).await,
             Err(DisplayError::NotFound(7))
         ));
         drop(subscription);
+    }
+
+    /// codec=png + quality 要原样出现在给 mixcomp 的 stream.start 里。
+    #[tokio::test]
+    async fn attach_png_negotiates_quality_and_codec() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-png.sock");
+        broker
+            .open_or_update(Window {
+                id: 3,
+                app_id: "a".into(),
+                title: "A".into(),
+                width: 320,
+                height: 200,
+                focused: true,
+                mode: MODE_FREE.into(),
+                codec: None,
+            })
+            .await;
+        let (tx, mut rx) = mpsc::channel(8);
+        *broker.comp.lock().await = Some(CompConn { id: 1, tx });
+        let (_, _, _, subscription) = broker
+            .attach(3, "s-png", 10, CODEC_PNG, 90)
+            .await
+            .unwrap();
+        assert_eq!(subscription.codec, CODEC_PNG);
+        match rx.recv().await.expect("stream.start") {
+            CompMessage::Json(value) => {
+                assert_eq!(value["type"], "stream.start");
+                assert_eq!(value["codec"], "png");
+                assert_eq!(value["quality"], 90);
+            }
+        }
     }
 
     #[tokio::test]
@@ -860,9 +907,9 @@ mod tests {
                 codec: None,
             })
             .await;
-        broker.attach(7, "s1", 30, CODEC_JPEG).await.unwrap();
-        broker.attach(7, "s2", 30, CODEC_JPEG).await.unwrap();
-        broker.attach(7, "s3", 30, CODEC_H264).await.unwrap();
+        broker.attach(7, "s1", 30, CODEC_JPEG, 0).await.unwrap();
+        broker.attach(7, "s2", 30, CODEC_JPEG, 0).await.unwrap();
+        broker.attach(7, "s3", 30, CODEC_H264, 0).await.unwrap();
         // 三次 attach 的 stream.start
         for _ in 0..3 {
             let (kind, payload) = read_record(&mut client).await;
