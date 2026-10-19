@@ -12,8 +12,8 @@
 #   - 缓存:container-build.sh 经 MIXUM_CARGO_HOME/MIXUM_CARGO_TARGET_DIR
 #     指向持久卷(二次构建增量);缺省回退到 $startdir 内(行为同旧版)
 pkgname=mixum-agentd
-pkgver=0.1.0
-pkgrel=3
+pkgver=0.1.1
+pkgrel=1
 pkgdesc="mixumOS 容器内守护进程:任务引擎/快照引擎/显示 broker/WSS 服务"
 arch=(aarch64 x86_64)
 url="https://github.com/mixumos/mixumos"
