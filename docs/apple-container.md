@@ -110,9 +110,7 @@ mixcomp headless(pixman)→ 宿主 TS SDK 经 `wss://127.0.0.1:17601/ws`
 
 **版本缝隙(旧 0.1.0 ↔ MAP 命名,实证 RFC 0001「adapter trivial」)**:
 子协议 `mixum.v1`↔`map.v1`、握手 op `hello`↔`session.hello`、state 事件
-`data: "queued"`↔`{state:"queued"}`。2026-10-19 已在 agentd 侧采纳 MAP
-命名并同时接受旧子协议/旧握手名;TS SDK 提供 `legacy: "mixum-v1"` 选项
-直连旧镜像,不再需要冒烟脚本里的 WebSocket 子类。
+`data: "queued"`↔`{state:"queued"}`——WebSocket 子类各改一行即可桥接。
 
 ## 6. 快照体积实测(真实节点)
 
