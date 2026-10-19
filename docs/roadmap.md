@@ -80,8 +80,19 @@
 ## 持续事项
 
 - 安全:威胁模型随阶段更新(security.md);
-- 兼容:mixumd↔mixcomp 私有通道未知记录类型改忽略+告警(现直接断连,
-  EmergeShift#8;新 mixcomp 配旧 mixumd 会死链,违反 MAP 前向兼容原则);
-- display.attach 插入订阅者与二次查表的低概率竞态(PR#6 遗留);
+- 兼容:mixumd↔mixcomp 私有通道未知记录类型忽略 + 告警计数(2026-10-19
+  完成,EmergeShift#8 实现侧;规范侧 MAP display.md 同步补充);
+- display.attach 插入订阅者与二次查表竞态(PR#6 遗留②,2026-10-19 以单锁
+  区间消除,`attach` 不再二次查表);
 - 文档:每个阶段的实现与设计偏差回写设计文档;
 - mixcomp 上游跟踪:wlroots 0.19 变更评估。
+
+## 2026-10-19:agentd 采纳 MAP v1
+
+- `session.hello`(保留 `hello` 别名)、`map.v1`/`mixum.v1` 双子协议;
+- task.event data 统一为对象(`state`/`log`/`step`/`progress`/`error`/`input`);
+- 新实现:`task.reply` 人机输入通道、`session.resume`(≥256 事件重放环)、
+  `mem.*` 与 `builtin` provider、`map1.` 令牌前缀(旧前缀仍接受);
+- 标识符改 ULID(envelope/task/snapshot/memory);
+- 验收:`scripts/map-sdk-e2e.sh`(TS SDK 零适配全环 + legacy 方言);
+  规范见 `Mixum-Agent-Protocol/site/src/content/docs/spec/`。
