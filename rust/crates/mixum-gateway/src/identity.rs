@@ -13,7 +13,6 @@ pub struct Identity {
     pub fingerprint: String,
 }
 
-
 /// 写入私钥类文件:创建即 0600,已存在的文件也收紧权限。
 fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -73,7 +72,7 @@ pub fn load_or_create_identity(
         std::fs::write(&cert_path, cert.cert.pem())?;
         write_private(&key_path, cert.key_pair.serialize_pem().as_bytes())?;
     }
-        tighten_private(&seed_path);
+    tighten_private(&seed_path);
     tighten_private(&key_path);
     mixum_protocol::token::ensure_crypto_provider();
     let cert_bytes = std::fs::read(&cert_path)?;
@@ -88,7 +87,10 @@ pub fn load_or_create_identity(
         .ok_or("TLS 私钥 PEM 为空")??;
     let tls = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()
-        .with_single_cert(vec![cert.clone()], rustls::pki_types::PrivateKeyDer::Pkcs8(key))?;
+        .with_single_cert(
+            vec![cert.clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(key),
+        )?;
     let digest = sha2::Sha256::digest(cert.as_ref());
     let fingerprint = digest
         .iter()

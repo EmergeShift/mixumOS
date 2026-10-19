@@ -2,6 +2,10 @@
 
 use mixum_protocol::ops::{Cap, ErrCode};
 use mixum_protocol::token::{Claims, Error as TokenError, Signer, Verifier};
+use rustls::crypto::{
+    verify_tls12_signature as verify_tls12, verify_tls13_signature as verify_tls13,
+    WebPkiSupportedAlgorithms,
+};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
@@ -124,6 +128,7 @@ impl AuthError {
 mod tests {
     use super::*;
     use mixum_protocol::token::{Claims, Signer};
+    use rustls::client::danger::ServerCertVerifier;
     use tempfile::tempdir;
 
     #[test]
@@ -174,6 +179,69 @@ mod tests {
         assert!(dir.path().join("identity.key").exists());
         assert!(dir.path().join("tls-cert.pem").exists());
         assert!(dir.path().join("tls-key.pem").exists());
+    }
+
+    #[test]
+    fn pin_file_is_loaded_and_normalized() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gateway-fingerprint");
+        std::fs::write(&path, "aa:bb:cc\n").unwrap();
+        assert_eq!(load_pinned(Some(&path)).as_deref(), Some("AABBCC"));
+        assert_eq!(normalize_fingerprint("AA:bb:CC"), "AABBCC");
+    }
+
+    fn cert_der(name: &str) -> (rustls::pki_types::CertificateDer<'static>, String) {
+        let cert = rcgen::generate_simple_self_signed(vec![name.to_owned()]).unwrap();
+        let der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
+        let fingerprint = fingerprint_of(der.as_ref());
+        (der, fingerprint)
+    }
+
+    #[test]
+    fn pinned_verifier_accepts_only_matching_certificate() {
+        ensure_crypto_provider();
+        let (cert, fingerprint) = cert_der("gateway.local");
+        let (other, _) = cert_der("other.local");
+        let verifier = PinnedVerifier {
+            expected: std::sync::Mutex::new(Some(fingerprint)),
+            pin_path: None,
+            algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        };
+        let name = rustls::pki_types::ServerName::try_from("gateway.local").unwrap();
+        let now = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+        assert!(verifier
+            .verify_server_cert(&cert, &[], &name, &[], now)
+            .is_ok());
+        assert!(verifier
+            .verify_server_cert(&other, &[], &name, &[], now)
+            .is_err());
+    }
+
+    #[test]
+    fn first_tofu_writes_pin_with_0600() {
+        ensure_crypto_provider();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("gateway-fingerprint");
+        let (cert, fingerprint) = cert_der("gateway.local");
+        let verifier = PinnedVerifier {
+            expected: std::sync::Mutex::new(None),
+            pin_path: Some(path.clone()),
+            algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        };
+        let name = rustls::pki_types::ServerName::try_from("gateway.local").unwrap();
+        let now = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+        verifier
+            .verify_server_cert(&cert, &[], &name, &[], now)
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), fingerprint);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 }
 
@@ -229,19 +297,27 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     }
 }
 
-/// TOFU/固定指纹的 relay TLS 客户端:首次连接记录证书指纹,之后必须匹配。
-/// 签名校验仍不做(自签 TOFU 场景),身份由证书指纹固定保证。
+/// TOFU/固定指纹的 relay TLS 客户端:首次连接记录证书指纹,之后必须匹配；
+/// 仍按 rustls 的 CertificateVerify 校验服务端握手签名。
 pub fn pinned_tls_client(
     expected: Option<String>,
     pin_path: Option<std::path::PathBuf>,
 ) -> rustls::ClientConfig {
-    let expected = expected.map(|value| normalize_fingerprint(&value));
+    // 显式指纹优先；否则读上次 TOFU 落盘的 pin；都没有才首次 TOFU。
+    let expected = expected
+        .map(|value| normalize_fingerprint(&value))
+        .or_else(|| load_pinned(pin_path.as_deref()));
     crate::auth::ensure_crypto_provider();
-    rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+    let provider = rustls::crypto::ring::default_provider();
+    let algorithms = provider.signature_verification_algorithms;
+    rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS13 由 ring provider 支持")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedVerifier {
             expected: std::sync::Mutex::new(expected),
             pin_path,
+            algorithms,
         }))
         .with_no_client_auth()
 }
@@ -254,10 +330,22 @@ fn normalize_fingerprint(value: &str) -> String {
         .to_ascii_uppercase()
 }
 
+fn load_pinned(path: Option<&std::path::Path>) -> Option<String> {
+    path.and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|value| normalize_fingerprint(&value))
+        .filter(|value| !value.is_empty())
+}
+
+fn fingerprint_of(cert: &[u8]) -> String {
+    let digest = Sha256::digest(cert);
+    digest.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
 #[derive(Debug)]
 struct PinnedVerifier {
     expected: std::sync::Mutex<Option<String>>,
     pin_path: Option<std::path::PathBuf>,
+    algorithms: WebPkiSupportedAlgorithms,
 }
 
 impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
@@ -269,15 +357,12 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(end_entity.as_ref());
-        let fingerprint = digest
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<String>();
+        let fingerprint = fingerprint_of(end_entity.as_ref());
         let mut expected = self.expected.lock().expect("pin lock");
         match expected.as_deref() {
-            Some(want) if want == fingerprint => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+            Some(want) if want == fingerprint => {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
             Some(want) => Err(rustls::Error::General(format!(
                 "gateway 证书指纹不匹配: got {fingerprint} want {want}"
             ))),
@@ -313,20 +398,20 @@ impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_tls12(message, cert, dss, &self.algorithms)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        verify_tls13(message, cert, dss, &self.algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {

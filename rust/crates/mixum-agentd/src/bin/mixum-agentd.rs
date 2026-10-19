@@ -245,9 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             local_token,
             server: Arc::clone(&server),
             fingerprint: (!gateway_fingerprint.is_empty()).then_some(gateway_fingerprint),
-            pin_path: Some(
-                std::path::Path::new(&config.data_dir).join("gateway-fingerprint"),
-            ),
+            pin_path: Some(std::path::Path::new(&config.data_dir).join("gateway-fingerprint")),
         });
         eprintln!("gateway relay: {gateway_url}(出站注册)");
     }
