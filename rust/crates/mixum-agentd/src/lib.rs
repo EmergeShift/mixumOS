@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod display;
+pub mod memory;
 pub mod server;
 pub mod snapshot;
 pub mod task;

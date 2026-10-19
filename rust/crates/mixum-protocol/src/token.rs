@@ -1,6 +1,7 @@
-//! 能力令牌:`mixum1.<base64url(payload)>.<base64url(sig)>`,ed25519 签名。
+//! 能力令牌:`map1.<base64url(payload)>.<base64url(sig)>`,ed25519 签名。
 //! 语义与 reference/internal/auth/token.go 一致:
 //! 长期令牌允许跨连接复用(jti 留给吊销列表),过期即拒。
+//! 过渡期:旧前缀 `mixum1.` 仍被接受(验证端双读),签发端只发 `map1.`。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
@@ -10,7 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ops::Cap;
 
-pub const TOKEN_PREFIX: &str = "mixum1.";
+/// MAP 规范前缀(token.schema.json 标题为 `map1.`)。
+pub const TOKEN_PREFIX: &str = "map1.";
+/// 过渡期兼容前缀:已签发的旧令牌继续有效,不再签发。
+pub const LEGACY_TOKEN_PREFIX: &str = "mixum1.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -115,6 +119,7 @@ impl Verifier {
         let raw = raw.trim();
         let rest = raw
             .strip_prefix(TOKEN_PREFIX)
+            .or_else(|| raw.strip_prefix(LEGACY_TOKEN_PREFIX))
             .ok_or(Error::Malformed)?;
         let dot = rest.rfind('.').ok_or(Error::Malformed)?;
         let payload = B64
@@ -277,5 +282,30 @@ mod tests {
         let claims = verifier.verify(v["token"].as_str().unwrap()).unwrap();
         assert_eq!(claims.sub, v["expect"]["sub"].as_str().unwrap());
         assert_eq!(claims.caps.len(), v["expect"]["caps"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn mint_emits_map1_prefix_and_accepts_legacy_prefix() {
+        let (s, v) = pair();
+        let claims = Claims {
+            sub: "phase".into(),
+            caps: vec![Cap::MemRead, Cap::MemWrite],
+            iat: 0,
+            exp: 0,
+            jti: String::new(),
+            task_id: String::new(),
+            windows: vec![],
+        };
+        let map_token = s.mint(claims.clone()).unwrap();
+        assert!(map_token.starts_with("map1."), "签发端必须使用 MAP 前缀");
+        assert!(v.verify(&map_token).is_ok());
+
+        // 旧镜像签发的 mixum1. 令牌在过渡期继续可用。
+        let legacy = format!(
+            "mixum1.{}",
+            map_token.strip_prefix("map1.").unwrap()
+        );
+        let verified = v.verify(&legacy).expect("旧前缀应继续被接受");
+        assert!(has_cap(&verified, Cap::MemWrite));
     }
 }
