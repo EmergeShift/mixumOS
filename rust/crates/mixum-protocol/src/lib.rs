@@ -1,6 +1,6 @@
 //! mixum-protocol —— mixumOS wire 协议 v1。
 //!
-//! 规格:[docs/protocol.md];行为参照:reference/(Go 参考实现)。
+//! 规格:[docs/protocol.md];跨实现行为锁:tests/cross-protocol 回归向量。
 //! 本 crate 是 Rust 侧唯一协议事实来源:envelope、op 常量、能力令牌、
 //! 二进制帧头。任何不兼容变更必须递增 [`PROTOCOL_VERSION`] 并更新文档。
 
@@ -18,7 +18,7 @@ mod tests {
 
     #[test]
     fn version_matches_reference() {
-        // reference/internal/wire:ProtoVersion = 1
+        // Go 参考实现(已移除)的 ProtoVersion = 1
         assert_eq!(PROTOCOL_VERSION, 1);
     }
 }

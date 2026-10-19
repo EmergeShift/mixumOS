@@ -206,14 +206,44 @@ fn tree_persists_and_renames_branch() {
             .unwrap()
             .id;
         let branch = tree.fork_branch(&node_id, "experiment").unwrap();
+        // 分支上落一个真实节点,rename 后其 branch 字段必须跟着改写。
+        tree.add(TreeNode::new("child", &node_id, &branch, KIND_DISK))
+            .unwrap();
         assert_eq!(tree.rename_branch(&branch, "renamed").unwrap(), "renamed");
         assert_eq!(tree.current_branch().unwrap(), "main");
     }
     let tree = Tree::open(dir.path()).unwrap();
     assert_eq!(tree.get(&node_id).unwrap().id, node_id);
     assert!(tree.branches().unwrap().contains_key("renamed"));
+    assert!(!tree.branches().unwrap().contains_key("experiment"));
+    assert_eq!(tree.get("child").unwrap().branch, "renamed");
 }
 
+#[test]
+fn delete_branch_head_hands_head_to_parent() {
+    let dir = TempDir::new().unwrap();
+    let tree = Tree::open(dir.path()).unwrap();
+    let root = tree.add(TreeNode::new("a", "", "main", KIND_DISK)).unwrap();
+    let child = tree
+        .add(TreeNode::new("b", "a", "main", KIND_DISK))
+        .unwrap();
+    assert_eq!(
+        tree.head_id("main").unwrap().as_deref(),
+        Some(child.id.as_str())
+    );
+    // 删除 head:分支头移交父节点,分支不失头。
+    tree.delete(&child.id).unwrap();
+    assert_eq!(
+        tree.head_id("main").unwrap().as_deref(),
+        Some(root.id.as_str())
+    );
+    // 删除根节点:没有父节点可移交,分支条目随之移除。
+    tree.delete(&root.id).unwrap();
+    assert!(tree.head_id("main").unwrap().is_none());
+}
+
+// symlink 攻击面构造依赖 unix symlink;Windows 上无断言意义,整测门控。
+#[cfg(unix)]
 #[test]
 fn materialize_rejects_symlink_parent() {
     let dir = TempDir::new().unwrap();
