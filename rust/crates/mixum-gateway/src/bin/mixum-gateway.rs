@@ -13,7 +13,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut listen = "ws://0.0.0.0:7701".to_owned();
+    // 默认只监听回环;对外部署显式改 --listen wss://0.0.0.0:7701。
+    let mut listen = "wss://127.0.0.1:7701".to_owned();
     let mut data_dir = "/var/lib/mixum-gateway".to_owned();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -44,7 +45,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None
     };
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer_addr) = listener.accept().await?;
+        let peer = peer_addr.to_string();
         let gw = Arc::clone(&gw);
         let tls_acceptor = tls_acceptor.clone();
         tokio::spawn(async move {
@@ -52,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Some(acceptor) => match acceptor.accept(stream).await {
                     Ok(tls_stream) => match tokio_tungstenite::accept_async(tls_stream).await {
                         Ok(ws) => {
-                            let _ = handle_connection(gw, ws).await;
+                            let _ = handle_connection(gw, ws, peer.clone()).await;
                         }
                         Err(e) => eprintln!("WS 握手失败(TLS): {e}"),
                     },
@@ -60,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 },
                 None => {
                     if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
-                        let _ = handle_connection(gw, ws).await;
+                        let _ = handle_connection(gw, ws, peer.clone()).await;
                     }
                 }
             }
@@ -79,6 +81,7 @@ enum Side {
 async fn handle_connection<S>(
     gw: Arc<Gateway>,
     ws: tokio_tungstenite::WebSocketStream<S>,
+    peer: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -115,7 +118,7 @@ where
                 let t = t.to_string();
                 match &side {
                     Side::Pending => {
-                        side = classify(&gw, &t, out_tx.clone()).await;
+                        side = classify(&gw, &t, out_tx.clone(), &peer).await;
                         if let Side::Pending = side {
                             break; // 分类失败已回错误,断开
                         }
@@ -154,7 +157,7 @@ where
 /// 首条消息分类:gateway.register(节点令牌)→ Node;hello(用户/设备令牌)
 /// → Client;gateway.pair.claim(无凭据)→ 签发设备令牌后保持 Pending(设备
 /// 拿到令牌即自行重连 hello)。
-async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
+async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Side {
     let env: Value = serde_json::from_str(text).unwrap_or(Value::Null);
     let op = env.get("op").and_then(Value::as_str).unwrap_or_default();
     let token = env
@@ -179,6 +182,15 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
             }
             match gw.verify(token).await {
                 Ok(claims) if claims.sub.starts_with("node:") => {
+                    if claims.sub != format!("node:{name}") {
+                        let _ = out
+                            .send(Outbound::Text(err_text(
+                                Some(&env),
+                                "节点令牌与 name 不匹配",
+                            )))
+                            .await;
+                        return Side::Pending;
+                    }
                     if let Err(e) = gw.node_connected(&name, &version, out.clone()).await {
                         let _ = out.send(Outbound::Text(err_text(Some(&env), &e))).await;
                         return Side::Pending;
@@ -210,7 +222,7 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
                 .pointer("/payload/deviceName")
                 .and_then(Value::as_str)
                 .unwrap_or("未命名设备");
-            let reply = match gw.pair_claim(code, device_name).await {
+            let reply = match gw.pair_claim(source, code, device_name).await {
                 Ok((token, device_id, _user)) => json!({
                     "v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.pair.claim.ok",
                     "replyTo":env.get("id").cloned().unwrap_or_default(),
@@ -241,7 +253,9 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
                     return Side::Pending;
                 }
             };
-            let session = gw.client_connected(&claims.sub, out.clone()).await;
+            let session = gw
+                .client_connected_with_caps(&claims.sub, claims.caps.clone(), out.clone())
+                .await;
             eprintln!("客户端接入: {} ({})", claims.sub, session);
             let mut hello = Envelope::new(
                 &format!("{op}.ok"),

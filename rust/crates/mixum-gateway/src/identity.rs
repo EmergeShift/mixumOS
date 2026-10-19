@@ -13,6 +13,41 @@ pub struct Identity {
     pub fingerprint: String,
 }
 
+
+/// 写入私钥类文件:创建即 0600,已存在的文件也收紧权限。
+fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(data)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, data)
+    }
+}
+
+fn tighten_private(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 pub fn load_or_create_identity(
     data_dir: impl AsRef<Path>,
     hosts: &[String],
@@ -26,7 +61,7 @@ pub fn load_or_create_identity(
             use rand::RngCore;
             let mut seed = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut seed);
-            std::fs::write(&seed_path, seed)?;
+            write_private(&seed_path, &seed)?;
             seed.to_vec()
         }
     };
@@ -36,9 +71,12 @@ pub fn load_or_create_identity(
         let names: Vec<String> = hosts.iter().filter(|h| !h.is_empty()).cloned().collect();
         let cert = rcgen::generate_simple_self_signed(names)?;
         std::fs::write(&cert_path, cert.cert.pem())?;
-        std::fs::write(&key_path, cert.key_pair.serialize_pem())?;
+        write_private(&key_path, cert.key_pair.serialize_pem().as_bytes())?;
     }
-    mixum_protocol::token::ensure_crypto_provider();    let cert_bytes = std::fs::read(&cert_path)?;
+        tighten_private(&seed_path);
+    tighten_private(&key_path);
+    mixum_protocol::token::ensure_crypto_provider();
+    let cert_bytes = std::fs::read(&cert_path)?;
     let key_bytes = std::fs::read(&key_path)?;
     let mut cert_reader = &cert_bytes[..];
     let cert = rustls_pemfile::certs(&mut cert_reader)
