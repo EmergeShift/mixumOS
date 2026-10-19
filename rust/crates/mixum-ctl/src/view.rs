@@ -13,8 +13,33 @@ const HTML: &str = r#"<!doctype html><meta charset=utf-8><title>mixum 视图</ti
 <h1>mixum 窗口</h1><div id=list>正在连接…</div><canvas id=c></canvas><pre id=meta></pre>
 <script>
 const list=document.querySelector('#list'), c=document.querySelector('#c'), x=c.getContext('2d'), meta=document.querySelector('#meta');
-async function load(){const r=await fetch('/api/windows');const ws=await r.json();list.textContent='';ws.windows.forEach(w=>{const b=document.createElement('button');b.textContent=`${w.id}: ${w.title||w.appId}`;b.onclick=()=>watch(w.id);list.append(b)})}
-function watch(id){const s=new WebSocket(`ws://${location.host}/api/stream/${id}`);s.binaryType='arraybuffer';s.onmessage=e=>{const b=new Uint8Array(e.data), dv=new DataView(e.data);if(b[0]!==1)return;const w=dv.getUint32(5,true),h=dv.getUint32(9,true),n=dv.getUint32(13,true),cx=dv.getInt16(19,true),cy=dv.getInt16(21,true);c.width=w;c.height=h;const blob=new Blob([b.slice(27,27+n)],{type:'image/jpeg'});createImageBitmap(blob).then(i=>{x.drawImage(i,0,0);i.close();if((dv.getUint16(17,true)&2)!==0){x.strokeStyle='#f44';x.strokeRect(cx,cy,dv.getUint16(23,true),dv.getUint16(25,true))}});meta.textContent=`窗口 ${id} ${w}x${h} 光标 ${cx},${cy}`};}
+let socket=null;
+async function load(){const r=await fetch('/api/windows',{cache:'no-store'});const data=await r.json();list.textContent='';data.windows.forEach(w=>{const b=document.createElement('button');b.textContent=`${w.id}: ${w.title||w.appId}`;b.onclick=()=>watch(w.id);list.append(b)})}
+function watch(id){
+  if(socket){try{socket.close()}catch(e){}}
+  const s=new WebSocket(`ws://${location.host}/api/stream/${id}`);socket=s;s.binaryType='arraybuffer';
+  let pending=false, latest=null;
+  s.onmessage=e=>{
+    const b=new Uint8Array(e.data); if(b.length<27||b[0]!==1)return;
+    const dv=new DataView(e.data);
+    latest={jpeg:b.slice(27,27+dv.getUint32(13,true)),w:dv.getUint32(5,true),h:dv.getUint32(9,true),
+            cx:dv.getInt16(19,true),cy:dv.getInt16(21,true),cw:dv.getUint16(23,true),ch:dv.getUint16(25,true),
+            cursor:(dv.getUint16(17,true)&2)!==0};
+    if(!pending) pump();
+  };
+  // 只保留最新帧、串行解码:避免旧帧晚到覆盖新帧,也避免每帧重设 canvas 尺寸清屏。
+  function pump(){
+    if(!latest){pending=false;return}
+    pending=true; const f=latest; latest=null;
+    createImageBitmap(new Blob([f.jpeg],{type:'image/jpeg'})).then(img=>{
+      if(c.width!==f.w||c.height!==f.h){c.width=f.w;c.height=f.h}
+      x.drawImage(img,0,0); img.close();
+      if(f.cursor){x.strokeStyle='#f44';x.strokeRect(f.cx,f.cy,f.cw,f.ch)}
+      meta.textContent=`窗口 ${id} ${f.w}x${f.h} 光标 ${f.cx},${f.cy}`;
+      pending=false; pump();
+    }).catch(()=>{pending=false; pump()});
+  }
+}
 load();
 </script>"#;
 
@@ -77,11 +102,11 @@ pub async fn serve(client: Client, bind: &str) -> Result<(), Error> {
                         .to_string(),
                     Err(_) => r#"{"windows":[]}"#.to_owned(),
                 };
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                 let _ = stream.write_all(response.as_bytes()).await;
             } else {
                 let body = HTML.as_bytes();
-                let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n", body.len());
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n", body.len());
                 let _ = stream.write_all(header.as_bytes()).await;
                 let _ = stream.write_all(body).await;
             }
