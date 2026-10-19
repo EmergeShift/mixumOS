@@ -1,5 +1,5 @@
 //! 二进制帧:通道标签 + video 帧头。
-//! 布局必须与 reference/internal/wire/frames.go 逐字节一致(小端)。
+//! 布局与已移除的 Go 参考实现逐字节一致(小端),由 tests/cross-protocol 锁定。
 
 /// 二进制帧首字节的通道标签。文本帧是 envelope JSON,二者互斥。
 pub mod chan {
@@ -157,4 +157,3 @@ mod tests {
         assert!(unmarshal_video(&[chan::VIDEO, 0, 0]).is_err());
     }
 }
-

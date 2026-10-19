@@ -32,7 +32,12 @@ where
 
     // 回调错误类型为 tungstenite 约定的 Response<Option<String>>;
     // 未请求 mixum.v1 的客户端不报错、仅不回子协议头。
-    let cb = |req: &Request, resp: Response| -> Result<Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse> {
+    let cb = |req: &Request,
+              resp: Response|
+     -> Result<
+        Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
         let requested = req
             .headers()
             .get("sec-websocket-protocol")
@@ -49,7 +54,6 @@ where
     };
     async move { accept_hdr_async(stream, cb).await.map_err(Box::new) }
 }
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,7 +163,9 @@ impl Server {
             let (stream, _) = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
-                let _ = this.handle_stream(accept_with_subprotocol(stream).await).await;
+                let _ = this
+                    .handle_stream(accept_with_subprotocol(stream).await)
+                    .await;
             });
         }
     }
@@ -206,6 +212,7 @@ impl Server {
             claims: None,
             limiter: RateLimiter::new(50.0, 100.0),
             id: mixum_protocol::envelope::new_id(),
+            forwarders: Vec::new(),
             #[cfg(feature = "real-snapshot")]
             sync_stage: None,
         };
@@ -237,6 +244,10 @@ impl Server {
             }
         }
         writer.abort();
+        // 帧转发任务持有会话出站通道,断连后必须终止,否则永久泄漏。
+        for forwarder in session.forwarders.drain(..) {
+            forwarder.abort();
+        }
         Ok(())
     }
 }
@@ -247,6 +258,8 @@ pub struct Session {
     claims: Option<mixum_protocol::token::Claims>,
     limiter: RateLimiter,
     id: String,
+    /// display.attach 的帧转发任务:会话结束时统一 abort(队列关闭是常规路径)。
+    forwarders: Vec<tokio::task::JoinHandle<()>>,
     /// 远端导入暂存:一次 import 对账到 commit 之间有效(协议 §6)。
     #[cfg(feature = "real-snapshot")]
     sync_stage: Option<crate::sync::ImportStage>,
@@ -668,15 +681,15 @@ impl Session {
         )
         .await
         {
-            Ok(stats) => {
-                self.reply(env, serde_json::to_value(stats).unwrap())
-                    .await
-            }
+            Ok(stats) => self.reply(env, serde_json::to_value(stats).unwrap()).await,
             Err(crate::sync::SyncError::NotFound(m)) => self.err(env, ErrCode::NotFound, &m).await,
             Err(crate::sync::SyncError::Unsupported(m)) => {
                 self.err(env, ErrCode::Unsupported, &m).await
             }
-            Err(e) => self.err(env, ErrCode::Internal, &format!("推送失败: {e}")).await,
+            Err(e) => {
+                self.err(env, ErrCode::Internal, &format!("推送失败: {e}"))
+                    .await
+            }
         }
     }
 
@@ -770,11 +783,12 @@ impl Session {
             Ok((width, height, fps, mut sub)) => {
                 let codec = sub.codec.clone();
                 let tx = self.tx.clone();
-                tokio::spawn(async move {
+                let forwarder = tokio::spawn(async move {
                     while let Some(frame) = sub.frames.recv().await {
                         let _ = tx.send(Message::Binary(frame.into())).await;
                     }
                 });
+                self.forwarders.push(forwarder);
                 self.reply(
                     env,
                     json!({"window":id,"codec":codec,"width":width,"height":height,"fps":fps}),
