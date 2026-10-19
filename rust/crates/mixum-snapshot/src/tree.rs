@@ -111,7 +111,9 @@ impl Tree {
                 Err(e) => return Err(e.into()),
             }
         }
-        let db = db.ok_or(sled::Error::Io(std::io::Error::other("could not acquire sled lock after 20 retries")))?;
+        let db = db.ok_or(sled::Error::Io(std::io::Error::other(
+            "could not acquire sled lock after 20 retries",
+        )))?;
         let nodes = db.open_tree("nodes")?;
         let heads = db.open_tree("heads")?;
         let meta = db.open_tree("meta")?;
