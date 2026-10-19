@@ -266,9 +266,7 @@ impl Broker {
             ..window
         };
         let changed = entry.window.clone();
-        let size = all.len();
         drop(all);
-        eprintln!("broker open_or_update: id={} 地图大小={}", window.id, size);
         let _ = self.window_events.send(changed);
     }
     pub async fn close(&self, id: u32) {

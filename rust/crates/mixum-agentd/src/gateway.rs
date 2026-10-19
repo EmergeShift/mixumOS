@@ -23,6 +23,10 @@ pub struct GatewayRelay {
     pub local_token: String,
     /// 本机 mixumd 的 Server 句柄:relay 在其上起回环明文监听。
     pub server: Arc<crate::server::Server>,
+    /// 期望的 gateway 证书指纹(--gateway-fingerprint);缺省 TOFU。
+    pub fingerprint: Option<String>,
+    /// TOFU 指纹落盘路径(dataDir/gateway-fingerprint)。
+    pub pin_path: Option<std::path::PathBuf>,
 }
 
 pub fn start(
@@ -132,7 +136,9 @@ async fn pump(
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                     {
-                        sessions.lock().await.remove(&gs);
+                        if let Some(lb) = sessions.lock().await.remove(&gs) {
+                            lb.read_task.abort();
+                        }
                     }
                     continue;
                 }
@@ -187,7 +193,10 @@ async fn pump(
 #[derive(Clone)]
 struct Loopback {
     tx: mpsc::Sender<Message>,
+    /// 读泵句柄:会话关闭/重连时 abort,避免任务泄漏。
+    read_task: Arc<tokio::task::JoinHandle<()>>,
 }
+
 
 impl Loopback {
     async fn connect(
@@ -229,7 +238,7 @@ impl Loopback {
         // 读泵:mixumd → gateway(文本补 gatewaySession 字段;二进制加
         // [u32 LE len][session] 前缀——节点通道私有约定,gateway 剥离后回送)
         let session_id = session.to_owned();
-        tokio::spawn(async move {
+        let read_task = Arc::new(tokio::spawn(async move {
             while let Some(Ok(msg)) = source.next().await {
                 let tagged = match msg {
                     Message::Text(t) => {
@@ -251,8 +260,8 @@ impl Loopback {
                     break;
                 }
             }
-        });
-        Ok(Self { tx })
+        }));
+        Ok(Self { tx, read_task })
     }
 
     async fn send_text(&self, text: &str) -> Result<(), String> {

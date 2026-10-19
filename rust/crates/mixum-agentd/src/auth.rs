@@ -228,3 +228,112 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
         ]
     }
 }
+
+/// TOFU/固定指纹的 relay TLS 客户端:首次连接记录证书指纹,之后必须匹配。
+/// 签名校验仍不做(自签 TOFU 场景),身份由证书指纹固定保证。
+pub fn pinned_tls_client(
+    expected: Option<String>,
+    pin_path: Option<std::path::PathBuf>,
+) -> rustls::ClientConfig {
+    let expected = expected.map(|value| normalize_fingerprint(&value));
+    crate::auth::ensure_crypto_provider();
+    rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedVerifier {
+            expected: std::sync::Mutex::new(expected),
+            pin_path,
+        }))
+        .with_no_client_auth()
+}
+
+fn normalize_fingerprint(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+#[derive(Debug)]
+struct PinnedVerifier {
+    expected: std::sync::Mutex<Option<String>>,
+    pin_path: Option<std::path::PathBuf>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(end_entity.as_ref());
+        let fingerprint = digest
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<String>();
+        let mut expected = self.expected.lock().expect("pin lock");
+        match expected.as_deref() {
+            Some(want) if want == fingerprint => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+            Some(want) => Err(rustls::Error::General(format!(
+                "gateway 证书指纹不匹配: got {fingerprint} want {want}"
+            ))),
+            None => {
+                *expected = Some(fingerprint.clone());
+                if let Some(path) = &self.pin_path {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::io::Write;
+                        use std::os::unix::fs::OpenOptionsExt;
+                        if let Ok(mut file) = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o600)
+                            .open(path)
+                        {
+                            let _ = file.write_all(fingerprint.as_bytes());
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = std::fs::write(path, &fingerprint);
+                    }
+                }
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}

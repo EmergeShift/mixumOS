@@ -16,6 +16,7 @@ pub mod identity;
 
 use mixum_protocol::ops::{ErrCode, Cap};
 use mixum_protocol::token::{Claims, Signer};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,7 +58,7 @@ pub struct PairCode {
     pub attempts: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceEntry {
     pub name: String,
     pub sub: String,
@@ -77,6 +78,10 @@ pub struct Gateway {
     devices: Mutex<HashMap<String, DeviceEntry>>,
     /// 配对码失败尝试(来源 → 时间戳),用于按来源限速。
     pair_failures: Mutex<HashMap<String, Vec<i64>>>,
+    /// 持久化状态文件(--data-dir/gateway-state.json);None 表示不持久化。
+    state_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// 最近一次签发的 bootstrap jti:重启时轮换(旧令牌立即失效)。
+    bootstrap_jti: std::sync::Mutex<Option<String>>,
     seq: AtomicU64,
     started_at: i64,
 }
@@ -110,24 +115,102 @@ impl Gateway {
             pairs: Mutex::new(HashMap::new()),
             devices: Mutex::new(HashMap::new()),
             pair_failures: Mutex::new(HashMap::new()),
+            state_path: std::sync::Mutex::new(None),
+            bootstrap_jti: std::sync::Mutex::new(None),
             seq: AtomicU64::new(1),
             started_at: mixum_protocol::envelope::now_ms(),
         })
     }
 
-    pub fn bootstrap_token(&self) -> Result<String, String> {
+    /// 加载持久化状态(撤销表/设备表/bootstrap jti)。bin 在启动时调用。
+    pub async fn load_state(&self, path: std::path::PathBuf) {
+        *self.state_path.lock().expect("state path lock") = Some(path.clone());
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        #[derive(Default, Serialize, Deserialize)]
+        struct Persisted {
+            revoked: HashSet<String>,
+            devices: HashMap<String, DeviceEntry>,
+            bootstrap_jti: Option<String>,
+        }
+        let Ok(state) = serde_json::from_str::<Persisted>(&text) else {
+            eprintln!("gateway 状态文件解析失败,忽略: {}", path.display());
+            return;
+        };
+        *self.revoked.write().await = state.revoked;
+        *self.devices.lock().await = state.devices;
+        *self.bootstrap_jti.lock().expect("bootstrap lock") = state.bootstrap_jti;
+    }
+
+    async fn persist(&self) {
+        let path = self
+            .state_path
+            .lock()
+            .expect("state path lock")
+            .clone();
+        let Some(path) = path else {
+            return;
+        };
+        #[derive(Serialize)]
+        struct Persisted<'a> {
+            revoked: &'a HashSet<String>,
+            devices: &'a HashMap<String, DeviceEntry>,
+            bootstrap_jti: Option<String>,
+        }
+        let revoked = self.revoked.read().await.clone();
+        let devices = self.devices.lock().await.clone();
+        let bootstrap_jti = self.bootstrap_jti.lock().expect("bootstrap lock").clone();
+        let state = Persisted {
+            revoked: &revoked,
+            devices: &devices,
+            bootstrap_jti,
+        };
+        let Ok(text) = serde_json::to_string_pretty(&state) else {
+            return;
+        };
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, text) {
+            eprintln!("gateway 状态写入失败: {e}");
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            eprintln!("gateway 状态落盘失败: {e}");
+        }
+    }
+
+    /// 启动时轮换 bootstrap:旧 jti 进撤销表,签发新的短期管理令牌。
+    pub async fn bootstrap_token(&self) -> Result<String, String> {
         let now = mixum_protocol::envelope::now_ms();
-        self.signer
+        let previous = self
+            .bootstrap_jti
+            .lock()
+            .expect("bootstrap lock")
+            .take();
+        if let Some(old) = previous {
+            self.revoked.write().await.insert(old);
+        }
+        let jti = mixum_protocol::envelope::new_id();
+        *self.bootstrap_jti.lock().expect("bootstrap lock") = Some(jti.clone());
+        let token = self
+            .signer
             .mint(Claims {
                 sub: "gateway-admin".into(),
                 caps: vec![Cap::Admin],
                 iat: now,
-                exp: now + 10 * 365 * 24 * 3600,
-                jti: String::new(),
+                exp: now + 30 * 24 * 3600,
+                jti,
                 task_id: String::new(),
                 windows: vec![],
             })
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.persist().await;
+        Ok(token)
     }
 
     pub async fn verify(&self, token: &str) -> Result<Claims, String> {
@@ -462,6 +545,7 @@ impl Gateway {
             },
         );
         eprintln!("gateway 配对成功: device={device_id} owner={user_sub}");
+        self.persist().await;
         Ok((token, device_id, user_sub))
     }
 
@@ -525,6 +609,7 @@ impl Gateway {
         };
         self.revoked.write().await.insert(jti.clone());
         eprintln!("gateway 设备吊销: jti={jti} by={caller_sub}");
+        self.persist().await;
         Outbound::Text(
             json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.device.revoke.ok","replyTo":id,"payload":{"revoked":removed}})
                 .to_string(),
@@ -549,6 +634,7 @@ impl Gateway {
         }
         self.revoked.write().await.insert(jti.clone());
         eprintln!("gateway 令牌吊销: jti={jti} by={sub}");
+        self.persist().await;
         Outbound::Text(
             json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.token.revoke.ok","replyTo":id,"payload":{"revoked":true}})
                 .to_string(),
@@ -788,7 +874,7 @@ mod tests {
     #[tokio::test]
     async fn token_issue_requires_admin_and_node_token_registers() {
         let gw = Gateway::new(Signer::generate());
-        let bootstrap = gw.bootstrap_token().unwrap();
+        let bootstrap = gw.bootstrap_token().await.unwrap();
         let claims = gw.verify(&bootstrap).await.unwrap();
         assert_eq!(claims.sub, "gateway-admin");
 
