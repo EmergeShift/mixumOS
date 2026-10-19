@@ -70,6 +70,8 @@ mixumOS 是一个基于 Arch Linux 的 **Agent OS 发行版**:它把容器变成
 3. AgentDriver(嵌入的 agent crate 或 external 桥)通过 Sandbox 执行命令、
    打开 GUI 应用;
 4. GUI 应用的窗口经 mixcomp 隔离捕获,帧流推到用户端,光标位置随帧头映射;
+   display broker 支持多个 comp 连接(mixcomp 与 B compositor 可并存),窗口
+   记录 owner,`stream.start/stop`、`display.input` 和视频帧都按 owner 路由;
 5. 过程事件(task.event)实时推送,用户随时接管(display.takeover);
 6. 任务结束:状态与产物落盘,失败可按策略自动回退到前置快照。
 
