@@ -4,6 +4,8 @@ WLROOTS_PC := $(shell for n in wlroots-0.18 wlroots0.18 wlroots; do pkg-config -
 JSONC_CFLAGS := $(shell pkg-config --cflags json-c 2>/dev/null)
 JSONC_LIBS   := $(shell pkg-config --libs json-c 2>/dev/null || echo -ljson-c)
 JPEG_LIBS    := $(shell pkg-config --silence-errors --libs libjpeg 2>/dev/null || echo -ljpeg)
+PNG_CFLAGS   := $(shell pkg-config --cflags libpng 2>/dev/null)
+PNG_LIBS     := $(shell pkg-config --libs libpng 2>/dev/null || echo -lpng)
 XKB_LIBS     := $(shell pkg-config --libs xkbcommon 2>/dev/null || echo -lxkbcommon)
 # H.264:pkg-config 探测到 openh264 才编入(否则纯 JPEG 路径,行为同 v1)
 HAVE_OPENH264 := $(shell pkg-config --exists openh264 2>/dev/null && echo 1)
@@ -11,9 +13,9 @@ WAYLAND_SCANNER := wayland-scanner
 
 CFLAGS  := -std=c11 -g -O2 -Wall -Wextra -Wno-unused-parameter -Isrc \
 	$(shell pkg-config --cflags $(WLROOTS_PC) wayland-server xkbcommon 2>/dev/null) \
-	$(JSONC_CFLAGS) -D_GNU_SOURCE -DWLR_USE_UNSTABLE
+	$(JSONC_CFLAGS) $(PNG_CFLAGS) -D_GNU_SOURCE -DWLR_USE_UNSTABLE
 LDLIBS  := $(shell pkg-config --libs $(WLROOTS_PC) wayland-server xkbcommon 2>/dev/null) \
-	$(JSONC_LIBS) $(JPEG_LIBS) $(XKB_LIBS) -lwayland-client -lrt
+	$(JSONC_LIBS) $(JPEG_LIBS) $(PNG_LIBS) $(XKB_LIBS) -lwayland-client -lrt
 
 ifeq ($(HAVE_OPENH264),1)
 CFLAGS += -DHAVE_OPENH264 $(shell pkg-config --cflags openh264 2>/dev/null)

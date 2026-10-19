@@ -1301,6 +1301,10 @@ impl Session {
             .get("codec")
             .and_then(Value::as_str)
             .unwrap_or(crate::display::CODEC_JPEG);
+        let quality = payload
+            .get("quality")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
         match self
             .server
             .broker
@@ -1309,6 +1313,7 @@ impl Session {
                 sub_id,
                 payload.get("fps").and_then(Value::as_u64).unwrap_or(30) as u32,
                 codec,
+                quality,
             )
             .await
         {

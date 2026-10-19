@@ -14,6 +14,12 @@ pub const VIDEO_HEADER_SIZE: usize = 27;
 
 pub const FRAME_FLAG_KEYFRAME: u16 = 1 << 0;
 pub const FRAME_FLAG_HAS_CURSOR: u16 = 1 << 1;
+/// 这是 damage 补丁：27 字节帧头后先跟 20 字节 patch 头，再是编码数据。
+pub const FRAME_FLAG_PATCH: u16 = 1 << 2;
+/// patch 头：x/y/w/h/format 各 u32（小端）。
+pub const PATCH_HEADER_SIZE: usize = 20;
+pub const PATCH_FORMAT_NONE: u32 = 0;
+pub const PATCH_FORMAT_PNG: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoFrame<'a> {
