@@ -271,3 +271,44 @@ mod tests {
         assert!(!K8sRegistry::expired(&lease, now));
     }
 }
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn lease_name_is_deterministic_and_stable() {
+        assert_eq!(
+            K8sRegistry::lease_name("desktop-01"),
+            K8sRegistry::lease_name("desktop-01")
+        );
+        assert_ne!(
+            K8sRegistry::lease_name("desktop-01"),
+            K8sRegistry::lease_name("desktop-02")
+        );
+    }
+
+    #[test]
+    fn lease_name_is_a_valid_dns_label() {
+        for name in ["My Node!!", "节点", "", "a".repeat(200).as_str()] {
+            let lease = K8sRegistry::lease_name(name);
+            assert!(lease.len() <= 63, "{lease} too long");
+            assert!(lease.starts_with("mixum-node-"), "{lease}");
+            assert!(
+                lease.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{lease} not a DNS label"
+            );
+            assert!(!lease.contains("--"), "{lease}");
+            assert!(!lease.ends_with('-'), "{lease}");
+        }
+    }
+
+    #[test]
+    fn lease_name_collapses_specials_but_hashes_original() {
+        assert!(K8sRegistry::lease_name("My Node!!").contains("-my-node-"));
+        assert_ne!(
+            K8sRegistry::lease_name("node a"),
+            K8sRegistry::lease_name("node-a")
+        );
+    }
+}
