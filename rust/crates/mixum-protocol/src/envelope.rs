@@ -27,6 +27,9 @@ pub struct Envelope {
     pub seq: i64,
     #[serde(default, rename = "replyTo", skip_serializing_if = "String::is_empty")]
     pub reply_to: String,
+    /// 可选:gateway 路由目标节点名(直连 mixumd 时不存在,忽略即可)。
+    #[serde(default, rename = "node", skip_serializing_if = "String::is_empty")]
+    pub node: String,
     #[serde(default)]
     pub ts: i64,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "payload")]
@@ -64,6 +67,14 @@ pub fn ulid_from_bytes(bytes: &[u8; 16]) -> String {
     String::from_utf8(out.to_vec()).expect("Crockford alphabet 是 ASCII")
 }
 
+/// 当前 unix 毫秒(信封 ts 与事件时间戳共用)。
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 impl Envelope {
     /// 构造一条外发消息,自动填充版本、id 与时间戳。
     pub fn new(op: &str, payload: Option<Value>) -> Self {
@@ -73,6 +84,7 @@ impl Envelope {
             op: op.to_string(),
             seq: 0,
             reply_to: String::new(),
+            node: String::new(),
             ts: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)

@@ -21,12 +21,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // --config <path> 与 --config=<path> 两种形式都接受(entrypoint 用空格形式)。
     let mut args = std::env::args().skip(1);
     let mut config_path = "/etc/mixum/mixumd.json".to_owned();
+    let mut gateway_url = String::new();
+    let mut gateway_name = String::new();
+    let mut gateway_token = String::new();
+    let mut gateway_fingerprint = String::new();
     while let Some(arg) = args.next() {
         if let Some(value) = arg.strip_prefix("--config=") {
             config_path = value.to_owned();
         } else if arg == "--config" {
             if let Some(value) = args.next() {
                 config_path = value;
+            }
+        } else if let Some(value) = arg.strip_prefix("--gateway=") {
+            gateway_url = value.to_owned();
+        } else if arg == "--gateway" {
+            if let Some(value) = args.next() {
+                gateway_url = value;
+            }
+        } else if let Some(value) = arg.strip_prefix("--gateway-name=") {
+            gateway_name = value.to_owned();
+        } else if arg == "--gateway-name" {
+            if let Some(value) = args.next() {
+                gateway_name = value;
+            }
+        } else if let Some(value) = arg.strip_prefix("--gateway-fingerprint=") {
+            gateway_fingerprint = value.to_owned();
+        } else if arg == "--gateway-fingerprint" {
+            if let Some(value) = args.next() {
+                gateway_fingerprint = value;
+            }
+        } else if let Some(value) = arg.strip_prefix("--gateway-token=") {
+            gateway_token = value.to_owned();
+        } else if arg == "--gateway-token" {
+            if let Some(value) = args.next() {
+                gateway_token = value;
             }
         }
     }
@@ -189,6 +217,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Err(e) => return Err(format!("事件通道中断: {e}").into()),
             }
         }
+    }
+
+    // gateway 出站 relay(可选):--gateway <url> + 令牌;节点名缺省 hostname。
+    if !gateway_url.is_empty() {
+        let name = if gateway_name.is_empty() {
+            config.hostname.clone()
+        } else {
+            gateway_name
+        };
+        let local_token = signer.mint(mixum_protocol::token::Claims {
+            sub: "local-relay".into(),
+            caps: vec![Cap::Admin],
+            iat: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or_default(),
+            exp: i64::MAX / 2,
+            jti: String::new(),
+            task_id: String::new(),
+            windows: vec![],
+        })?;
+        mixum_agentd::gateway::start(mixum_agentd::gateway::GatewayRelay {
+            url: gateway_url.clone(),
+            name,
+            token: gateway_token,
+            local_token,
+            server: Arc::clone(&server),
+            fingerprint: (!gateway_fingerprint.is_empty()).then_some(gateway_fingerprint),
+            pin_path: Some(std::path::Path::new(&config.data_dir).join("gateway-fingerprint")),
+        });
+        eprintln!("gateway relay: {gateway_url}(出站注册)");
     }
 
     let listener: std::net::SocketAddr = config.listen.parse()?;
