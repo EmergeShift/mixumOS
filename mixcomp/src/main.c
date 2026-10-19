@@ -27,6 +27,24 @@ static struct mixcomp_server server = {0};
 
 // ---------- 注入事件 → seat 路由 ----------
 
+// 键盘 focus：pointer 的 enter 不会自动设置 seat 键盘焦点，
+// 注入按键前必须显式 enter，否则客户端收不到 key 事件。
+static void focus_keyboard(struct mixcomp_server *s, struct mixcomp_window *w) {
+	if (w == NULL || w->surface == NULL) {
+		return;
+	}
+	if (s->seat->keyboard_state.focused_surface == w->surface) {
+		return;
+	}
+	struct wlr_keyboard *kb = wlr_seat_get_keyboard(s->seat);
+	if (kb != NULL) {
+		wlr_seat_keyboard_notify_enter(s->seat, w->surface, kb->keycodes,
+				kb->num_keycodes, &kb->modifiers);
+	} else {
+		wlr_seat_keyboard_notify_enter(s->seat, w->surface, NULL, 0, NULL);
+	}
+}
+
 static void route_motion_absolute(struct wl_listener *l, void *data) {
 	struct wlr_pointer_motion_absolute_event *ev = data;
 	struct mixcomp_server *s = wl_container_of(l, s, inj_motion);
@@ -53,6 +71,9 @@ static void route_button(struct wl_listener *l, void *data) {
 	if (s->focus_window == NULL) {
 		return;
 	}
+	if (ev->state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		focus_keyboard(s, s->focus_window);
+	}
 	wlr_seat_pointer_notify_button(s->seat, ev->time_msec, ev->button, ev->state);
 }
 
@@ -72,6 +93,7 @@ static void route_key(struct wl_listener *l, void *data) {
 	if (s->focus_window == NULL) {
 		return;
 	}
+	focus_keyboard(s, s->focus_window);
 	wlr_seat_keyboard_notify_key(s->seat, ev->time_msec, ev->keycode, ev->state);
 }
 
