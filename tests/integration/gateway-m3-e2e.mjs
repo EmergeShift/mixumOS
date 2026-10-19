@@ -8,7 +8,7 @@
 // 用法:node tests/integration/gateway-m3-e2e.mjs
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 process.env.MSYS_NO_PATHCONV = "1";
@@ -51,7 +51,8 @@ writeFileSync(KUBECONFIG, kubeconfig);
 process.env.KUBECONFIG = KUBECONFIG;
 sh("kubectl", ["--context", "kind-mixum-e2e", "delete", "lease", "-n", NS,
   "-l", "mixumos.io/registry=gateway", "--ignore-not-found"]);
-rmSync(`${ROOT}/build/gw-m3-data`, { recursive: true, force: true });
+rmSync(`${ROOT}/build/gw-m3-data-a`, { recursive: true, force: true });
+  rmSync(`${ROOT}/build/gw-m3-data-b`, { recursive: true, force: true });
 cleanup();
 
 function startGateway(instance, listen, mesh, dataDir) {
@@ -116,12 +117,17 @@ function ws(url) {
 }
 
 async function main() {
-  const sharedData = `${ROOT}/build/gw-m3-data`;
-  const a = startGateway(INSTANCE_A, GW_A, MESH_A, sharedData);
+  const dataA = `${ROOT}/build/gw-m3-data-a`;
+  const dataB = `${ROOT}/build/gw-m3-data-b`;
+  const a = startGateway(INSTANCE_A, GW_A, MESH_A, dataA);
   const token = await waitToken(a);
   console.log("1. gw-a 就绪 ✓");
-  // gw-b 复用同一 data-dir:同一签发根,令牌跨副本可验。
-  const b = startGateway(INSTANCE_B, GW_B, MESH_B, sharedData);
+  // gw-b 用独立 state(避免 bootstrap 轮换互踢),但复制同一 identity 文件。
+  mkdirSync(dataB, { recursive: true });
+  for (const name of ["identity.key", "tls-cert.pem", "tls-key.pem"]) {
+    copyFileSync(`${dataA}/${name}`, `${dataB}/${name}`);
+  }
+  const b = startGateway(INSTANCE_B, GW_B, MESH_B, dataB);
   await waitToken(b);
   console.log("2. gw-b 就绪(共享签发根)✓");
 
