@@ -169,6 +169,12 @@ gateway 的节点注册表就是 operator 的对账目标:
   relay 每 20s `gateway.heartbeat` 续约(60s 租约)。部署清单见
   `cloud/k8s/60-gateway.yaml`(2 副本 + RBAC + headless mesh Service,
   副本共享 identity Secret 作为签发根)。
+
+> 部署注意:副本必须共享 **identity**(同一签发根),但每个副本必须使用
+> **独立 data-dir**。`data-dir/gateway-state.json` 含本副本的 bootstrap jti,
+> bootstrap 启动轮换会撤销旧 jti;若多个副本共享 data-dir,后启动的副本会
+> 吊销先启动副本刚签发的 bootstrap 令牌。`gateway-m3-e2e` 用“独立 state +
+> 复制 identity 文件”复现这一点。
 - **M3b(✅ 2026-10-19 落地)**:副本间私有 WS mesh——`mesh.hello` 共享 token
   鉴权,`mesh.text/binary/close` 按 `ms-<发起实例>-<序号>` 会话转发;节点只连
   owner,客户端可连任意副本。`tests/integration/gateway-m3-e2e.mjs` 验证:
