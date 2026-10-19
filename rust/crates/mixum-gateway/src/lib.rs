@@ -252,8 +252,6 @@ impl Gateway {
         }
     }
 
-    /// 启动时轮换 bootstrap:旧 jti 进撤销表,签发新的短期管理令牌。
-    pub async fn bootstrap_token(&self) -> Result<String, String> {
     pub fn instance_id(&self) -> &str {
         &self.instance_id
     }
@@ -278,6 +276,9 @@ impl Gateway {
         });
     }
 
+    /// 启动时轮换 bootstrap:旧 jti 进撤销表,签发新的短期管理令牌。
+    /// 启动时轮换 bootstrap。
+    pub async fn bootstrap_token(&self) -> Result<String, String> {
         let now = mixum_protocol::envelope::now_ms();
         let previous = self.bootstrap_jti.lock().expect("bootstrap lock").take();
         if let Some(old) = previous {
