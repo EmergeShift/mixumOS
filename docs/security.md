@@ -21,7 +21,7 @@
 ## 2. 身份与令牌
 
 - 服务端身份 = ed25519 种子(`dataDir/identity.key`,0600,首启生成)+ 自签证书;
-- 能力令牌:`mixum1.<payload>.<sig>`,claims 见 protocol.md §3;
+- 能力令牌:`map1.<payload>.<sig>`(旧 `mixum1.` 过渡期仍接受),claims 见 protocol.md §3;
 - 授予原则:控制台/手机令牌只给 task.run+observe+display.view+input;
   快照同步令牌单独签发、单独 TTL;
 - jti 预留吊销列表;长期令牌跨连接复用是设计决策(TLS 防传输重放),
