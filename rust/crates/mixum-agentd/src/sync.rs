@@ -1,10 +1,11 @@
 //! 跨节点快照同步(协议 §6):接收端暂存区与推送端远端客户端。
 //!
 //! 仅在 `real-snapshot` 特性下编译——块对账依赖真实 CAS 与树存储。
-//! 行为逐字对齐 reference/internal/server/handlers_snap.go 与 client.go:
+//! 行为与已移除的 Go 参考实现逐字对齐,由 tests/cross-protocol 与 e2e 锁定:
 //! 推送流程严格单飞行(import → 缺失块二进制流 → commit)。
 
 use crate::snapshot::SharedEngine;
+use futures_util::{SinkExt, StreamExt};
 use mixum_protocol::envelope::Envelope;
 use mixum_protocol::ops::op;
 use mixum_snapshot::{Manifest, TreeNode};
@@ -16,7 +17,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 use tokio_tungstenite::Connector;
-use futures_util::{SinkExt, StreamExt};
 
 /// 远端导入的节点元数据。空字符串字段由接收端按 Go strOr 语义补默认值。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -322,14 +322,10 @@ impl RemoteClient {
         } else {
             Connector::Rustls(Arc::new(insecure_tls_client()))
         };
-        let (ws, _response) = tokio_tungstenite::connect_async_tls_with_config(
-            request,
-            None,
-            false,
-            Some(connector),
-        )
-        .await
-        .map_err(|e| SyncError::Protocol(format!("server: 连接远端失败: {e}")))?;
+        let (ws, _response) =
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+                .await
+                .map_err(|e| SyncError::Protocol(format!("server: 连接远端失败: {e}")))?;
         let (sink, mut source) = futures_util::StreamExt::split(ws);
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
@@ -345,10 +341,7 @@ impl RemoteClient {
                 }
             }
         });
-        let mut client = Self {
-            sink,
-            replies: rx,
-        };
+        let mut client = Self { sink, replies: rx };
         client.hello(token).await?;
         Ok(client)
     }
