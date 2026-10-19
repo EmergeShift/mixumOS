@@ -4,7 +4,7 @@
 # 包内只带说明文档;就绪后只改 build()/package()(crate 构建,
 # /usr/bin/mixum-ctl + 补全),其余不动。
 pkgname=mixum-ctl
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="mixumOS 主机侧 CLI(占位包,待 Rust crate 就绪)"
 arch=(aarch64 x86_64)

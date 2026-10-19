@@ -21,7 +21,7 @@ done
 
 # 2. mixcomp（连接 mixumd 控制通道）。e2eclient（gorilla 默认读缓冲 4096）
 # 扛不住大帧， JPEG 质量压低以保单帧 <4KiB。
-mixcomp --sock /run/mixum/display.sock --quality 30 &
+mixcomp --sock /run/mixum/display.sock --quality "${MIXUM_JPEG_QUALITY:-90}" &
 MIXCOMP_PID=$!
 sleep 1.5
 
