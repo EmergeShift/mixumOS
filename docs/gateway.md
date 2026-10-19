@@ -96,8 +96,8 @@ mac PWA ───┘                      └── WSS 出站注册 ── mixu
   `admin`/`snap.push`)→ 新设备持久化到 localStorage;
 - 设备列表与吊销:`gateway.device.list/revoke`(用户令牌),吊销进
   jti 撤销表;
-- v1 配对码单次使用、5 分钟过期;暴力破解由尝试限速(10 次/分钟)
-  覆盖。
+- v1 配对码单次使用、5 分钟过期;按来源 IP 限速(10 次失败/分钟,
+  不含 ephemeral port)。
 
 ## 6. 安全边界(诚实清单)
 
@@ -107,8 +107,8 @@ mac PWA ───┘                      └── WSS 出站注册 ── mixu
 - **节点侧二次验签缺失**:gateway→节点连接按可信内网对待(节点
   socket 仅监听本机/容器内网)。v2 可给节点配本地验证:gateway 转发
   时附带原始令牌,节点自验;
-- 限速:gateway 对未认证连接 50 req/min,认证后复用节点侧限速;
-- 审计:配对/吊销/注册事件落结构化日志(v1 stdout)。
+- 限速:配对入口按来源 IP 10 次失败/分钟;其他未认证连接暂无通用限速(v1);
+- 审计:配对成功/失败、设备吊销、令牌吊销、节点注册落 stdout 日志(v1)。
 
 ## 7. 与 k8s operator 的衔接(阶段 5)
 
@@ -155,7 +155,8 @@ gateway 的节点注册表就是 operator 的对账目标:
 - **M2(✅ 2026-10-18 落地)**:设备配对(`gateway.pair.create/claim`,
   6 位码 5 分钟单次)+ 设备注册表(`gateway.device.list/revoke`,
   jti 撤销表即时生效)+ gateway TLS(`--listen wss://`,自签证书
-  持久化于 --data-dir,TOFU;relay 侧 insecure connector 同信任域)
+  持久化于 --data-dir,TOFU;relay 侧用 --gateway-fingerprint 固定,
+  缺省首次 TOFU 落盘 dataDir/gateway-fingerprint)
   + console 节点选择器与配对/设备管理 UI(Settings 内);e2e 扩展
   配对/设备 hello/吊销失效三断言;
 - **M3**(阶段 5 合流):NodeRegistry 换 k8s 后端、多 gateway 副本。

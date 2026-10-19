@@ -51,22 +51,16 @@ async fn run(relay: GatewayRelay) -> Result<(), Box<dyn std::error::Error + Send
     // 客户端自行重连/重订阅(与直连 mixumd 的重连语义一致)。
     let mut backoff = 1u64;
     loop {
-        // wss 时用不校验自签证书的 connector(节点→gateway 属同一信任域,
-        // M2 限定;公网部署换受信证书后可去)。
+        // wss 时固定 gateway 证书指纹；缺省首次 TOFU 落盘，之后必须匹配。
         let connector = if relay.url.starts_with("wss://") {
             Some(tokio_tungstenite::Connector::Rustls(Arc::new(
-                crate::auth::insecure_tls_client(),
+                crate::auth::pinned_tls_client(relay.fingerprint.clone(), relay.pin_path.clone()),
             )))
         } else {
             None
         };
-        match tokio_tungstenite::connect_async_tls_with_config(
-            &relay.url,
-            None,
-            false,
-            connector,
-        )
-        .await
+        match tokio_tungstenite::connect_async_tls_with_config(&relay.url, None, false, connector)
+            .await
         {
             Ok((ws, _)) => {
                 eprintln!("gateway 已连接: {}", relay.url);
@@ -98,7 +92,8 @@ async fn pump(
         "v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.register",
         "payload":{"name":relay.name,"token":relay.token,"version":env!("CARGO_PKG_VERSION")}
     });
-    sink.send(Message::Text(register.to_string().into())).await?;
+    sink.send(Message::Text(register.to_string().into()))
+        .await?;
 
     // 会话表:gatewaySession → 回环写入端
     let sessions: Arc<Mutex<HashMap<String, Loopback>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -109,7 +104,9 @@ async fn pump(
         let local_token = relay.local_token.clone();
         async move {
             while let Some(Ok(Message::Text(text))) = source.next().await {
-                let Ok(env) = serde_json::from_str::<Value>(&text) else { continue };
+                let Ok(env) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
                 let op = env.get("op").and_then(Value::as_str).unwrap_or_default();
                 if op == "gateway.session.open" {
                     let Some(gs) = env
@@ -121,7 +118,8 @@ async fn pump(
                     };
                     let has = sessions.lock().await.contains_key(&gs);
                     if !has {
-                        match Loopback::connect(local_port, &local_token, &gs, up_tx.clone()).await {
+                        match Loopback::connect(local_port, &local_token, &gs, up_tx.clone()).await
+                        {
                             Ok(lb) => {
                                 sessions.lock().await.insert(gs.clone(), lb);
                             }
@@ -166,8 +164,12 @@ async fn pump(
         while let Some(msg) = up_rx.recv().await {
             let out = match msg {
                 Message::Text(t) => {
-                    let Ok(mut env) = serde_json::from_str::<Value>(&t) else { continue };
-                    let Some(obj) = env.as_object_mut() else { continue };
+                    let Ok(mut env) = serde_json::from_str::<Value>(&t) else {
+                        continue;
+                    };
+                    let Some(obj) = env.as_object_mut() else {
+                        continue;
+                    };
                     // 会话归属:gatewaySession 由 Loopback 写泵按所属回环填好
                     obj.insert("gatewaySession".into(), json!(""));
                     let _ = obj; // gatewaySession 实际值见 Loopback(下行同类逻辑)
@@ -196,7 +198,6 @@ struct Loopback {
     /// 读泵句柄:会话关闭/重连时 abort,避免任务泄漏。
     read_task: Arc<tokio::task::JoinHandle<()>>,
 }
-
 
 impl Loopback {
     async fn connect(
@@ -242,7 +243,9 @@ impl Loopback {
             while let Some(Ok(msg)) = source.next().await {
                 let tagged = match msg {
                     Message::Text(t) => {
-                        let Ok(mut env) = serde_json::from_str::<Value>(&t) else { continue };
+                        let Ok(mut env) = serde_json::from_str::<Value>(&t) else {
+                            continue;
+                        };
                         if let Some(obj) = env.as_object_mut() {
                             obj.insert("gatewaySession".into(), json!(session_id));
                         }
@@ -271,4 +274,3 @@ impl Loopback {
             .map_err(|e| e.to_string())
     }
 }
-

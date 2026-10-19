@@ -14,7 +14,7 @@
 
 pub mod identity;
 
-use mixum_protocol::ops::{ErrCode, Cap};
+use mixum_protocol::ops::{Cap, ErrCode};
 use mixum_protocol::token::{Claims, Signer};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -55,7 +55,6 @@ struct ClientConn {
 pub struct PairCode {
     pub user_sub: String,
     pub expires_at: i64,
-    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +83,14 @@ pub struct Gateway {
     bootstrap_jti: std::sync::Mutex<Option<String>>,
     seq: AtomicU64,
     started_at: i64,
+}
+
+/// 配对限速桶键:优先取 IP,去掉 ephemeral port;非 SocketAddr 输入原样保留(单测)。
+fn pair_rate_key(source: &str) -> String {
+    source
+        .parse::<std::net::SocketAddr>()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| source.to_owned())
 }
 
 fn err_envelope(env: Option<&Value>, code: ErrCode, message: &str) -> String {
@@ -144,11 +151,7 @@ impl Gateway {
     }
 
     async fn persist(&self) {
-        let path = self
-            .state_path
-            .lock()
-            .expect("state path lock")
-            .clone();
+        let path = self.state_path.lock().expect("state path lock").clone();
         let Some(path) = path else {
             return;
         };
@@ -187,11 +190,7 @@ impl Gateway {
     /// 启动时轮换 bootstrap:旧 jti 进撤销表,签发新的短期管理令牌。
     pub async fn bootstrap_token(&self) -> Result<String, String> {
         let now = mixum_protocol::envelope::now_ms();
-        let previous = self
-            .bootstrap_jti
-            .lock()
-            .expect("bootstrap lock")
-            .take();
+        let previous = self.bootstrap_jti.lock().expect("bootstrap lock").take();
         if let Some(old) = previous {
             self.revoked.write().await.insert(old);
         }
@@ -222,7 +221,12 @@ impl Gateway {
         Ok(claims)
     }
 
-    pub async fn node_connected(&self, name: &str, version: &str, out: OutTx) -> Result<(), String> {
+    pub async fn node_connected(
+        &self,
+        name: &str,
+        version: &str,
+        out: OutTx,
+    ) -> Result<(), String> {
         let mut nodes = self.nodes.write().await;
         if nodes.contains_key(name) {
             return Err(format!("节点重名在线:{name}"));
@@ -310,7 +314,13 @@ impl Gateway {
     pub async fn on_client_text(&self, session: &str, text: &str) -> Vec<Outbound> {
         let env: Value = match serde_json::from_str(text) {
             Ok(v) => v,
-            Err(_) => return vec![Outbound::Text(err_envelope(None, ErrCode::BadRequest, "消息不是合法 JSON"))],
+            Err(_) => {
+                return vec![Outbound::Text(err_envelope(
+                    None,
+                    ErrCode::BadRequest,
+                    "消息不是合法 JSON",
+                ))]
+            }
         };
         let op = env.get("op").and_then(Value::as_str).unwrap_or_default();
         match op {
@@ -341,7 +351,11 @@ impl Gateway {
     }
 
     async fn route_client(&self, session: &str, env: Value) -> Vec<Outbound> {
-        let op = env.get("op").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let op = env
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         let mut node_name = env
             .get("node")
             .and_then(Value::as_str)
@@ -384,7 +398,12 @@ impl Gateway {
                     "op":"gateway.session.open",
                     "payload":{"gatewaySession":session,"node":node_name}
                 });
-                if node.out.send(Outbound::Text(open.to_string())).await.is_err() {
+                if node
+                    .out
+                    .send(Outbound::Text(open.to_string()))
+                    .await
+                    .is_err()
+                {
                     return vec![Outbound::Text(err_envelope(
                         Some(&env),
                         ErrCode::Internal,
@@ -395,7 +414,12 @@ impl Gateway {
             // 会话标记:gateway↔节点私有通道约定(见模块注释)。
             let mut tagged = env.clone();
             tagged["gatewaySession"] = json!(session);
-            if node.out.send(Outbound::Text(tagged.to_string())).await.is_err() {
+            if node
+                .out
+                .send(Outbound::Text(tagged.to_string()))
+                .await
+                .is_err()
+            {
                 return vec![Outbound::Text(err_envelope(
                     Some(&env),
                     ErrCode::Internal,
@@ -442,8 +466,20 @@ impl Gateway {
         let session = String::from_utf8_lossy(&bytes[4..4 + len]).to_string();
         let clients = self.clients.lock().await;
         if let Some(client) = clients.get(&session) {
-            let _ = client.out.send(Outbound::Binary(bytes[4 + len..].to_vec())).await;
+            let _ = client
+                .out
+                .send(Outbound::Binary(bytes[4 + len..].to_vec()))
+                .await;
         }
+    }
+
+    async fn record_pair_failure(&self, source: &str, now: i64) {
+        self.pair_failures
+            .lock()
+            .await
+            .entry(source.to_owned())
+            .or_default()
+            .push(now);
     }
 
     /// 设备配对第一步:已信任会话生成 6 位配对码(5 分钟有效,单次)。
@@ -462,15 +498,22 @@ impl Gateway {
         }
         // 6 位数字码:操作系统 CSPRNG,不复用 seq/时间/指针作为熵。
         use rand::Rng;
-        let code = format!("{:06}", rand::rngs::OsRng.gen_range(0..1_000_000u32));
-        self.pairs.lock().await.insert(
-            code.clone(),
-            PairCode {
-                user_sub,
-                expires_at: mixum_protocol::envelope::now_ms() + 300_000,
-                attempts: 0,
-            },
-        );
+        let code = {
+            let mut pairs = self.pairs.lock().await;
+            loop {
+                let candidate = format!("{:06}", rand::rngs::OsRng.gen_range(0..1_000_000u32));
+                if !pairs.contains_key(&candidate) {
+                    pairs.insert(
+                        candidate.clone(),
+                        PairCode {
+                            user_sub: user_sub.clone(),
+                            expires_at: mixum_protocol::envelope::now_ms() + 300_000,
+                        },
+                    );
+                    break candidate;
+                }
+            }
+        };
         Outbound::Text(
             json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.pair.create.ok","replyTo":id,"payload":{"code":code,"expiresIn":300}})
                 .to_string(),
@@ -485,38 +528,34 @@ impl Gateway {
         device_name: &str,
     ) -> Result<(String, String, String), String> {
         let now = mixum_protocol::envelope::now_ms();
+        // 来源统一成 IP:bin 传的是 IP:port,不能把 ephemeral port 当限速桶。
+        let source = pair_rate_key(source);
         // 按来源限速:窗口内最多 10 次失败。
         {
             let mut failures = self.pair_failures.lock().await;
-            let recent = failures.entry(source.to_owned()).or_default();
+            if failures.len() > 1024 {
+                failures.retain(|_, recent| {
+                    recent.retain(|ts| now - *ts < 60_000);
+                    !recent.is_empty()
+                });
+            }
+            let recent = failures.entry(source.clone()).or_default();
             recent.retain(|ts| now - *ts < 60_000);
             if recent.len() >= 10 {
                 return Err("配对尝试过于频繁,请稍后再试".into());
             }
         }
-        let pair = {
-            let mut pairs = self.pairs.lock().await;
-            let attempts = pairs.get(code).map(|p| p.attempts).unwrap_or(0);
-            if attempts >= 5 {
-                pairs.remove(code);
-            }
-            pairs
-                .remove(code)
-                .filter(|p| p.expires_at > now)
-                .map(|p| (p.user_sub, p.attempts))
-        };
-        let Some((user_sub, _)) = pair else {
-            self.pair_failures
-                .lock()
-                .await
-                .entry(source.to_owned())
-                .or_default()
-                .push(now);
-            return Err("配对码无效或已过期".into());
-        };
         if device_name.is_empty() || device_name.len() > 64 {
+            self.record_pair_failure(&source, now).await;
             return Err("deviceName 非法".into());
         }
+        // 只有正确的码才消费;错误的码不触碰 pairs。
+        let pair = self.pairs.lock().await.remove(code);
+        let Some(pair) = pair.filter(|p| p.expires_at > now) else {
+            self.record_pair_failure(&source, now).await;
+            return Err("配对码无效或已过期".into());
+        };
+        let user_sub = pair.user_sub;
         let device_id = format!("dev-{}", mixum_protocol::envelope::new_id());
         let sub = format!("device:{device_id}");
         let claims = Claims {
@@ -560,7 +599,11 @@ impl Gateway {
             .map(|c| c.sub.clone())
             .unwrap_or_default();
         if !user_sub.starts_with("user:") && user_sub != "gateway-admin" {
-            return Outbound::Text(err_envelope(Some(env), ErrCode::Forbidden, "仅用户会话可查设备"));
+            return Outbound::Text(err_envelope(
+                Some(env),
+                ErrCode::Forbidden,
+                "仅用户会话可查设备",
+            ));
         }
         let (caller_sub, caller_caps) = self.caller(session).await;
         let admin = Self::is_admin(&caller_sub, &caller_caps);
@@ -588,7 +631,11 @@ impl Gateway {
             .map(|c| c.sub.clone())
             .unwrap_or_default();
         if !user_sub.starts_with("user:") && user_sub != "gateway-admin" {
-            return Outbound::Text(err_envelope(Some(env), ErrCode::Forbidden, "仅用户会话可吊销设备"));
+            return Outbound::Text(err_envelope(
+                Some(env),
+                ErrCode::Forbidden,
+                "仅用户会话可吊销设备",
+            ));
         }
         let jti = env
             .pointer("/payload/jti")
@@ -643,9 +690,7 @@ impl Gateway {
 
     async fn issue_token(&self, session: &str, env: &Value) -> Outbound {
         let id = env.get("id").cloned().unwrap_or_default();
-        let fail = |code, msg: &str| {
-            Outbound::Text(err_envelope(Some(env), code, msg))
-        };
+        let fail = |code, msg: &str| Outbound::Text(err_envelope(Some(env), code, msg));
         // 权限:只有 admin 能力(gateway-admin 或 Cap::Admin)可签发。
         let (sub, caps) = self.caller(session).await;
         if !Self::is_admin(&sub, &caps) {
@@ -712,7 +757,47 @@ mod tests {
         let session = gw.client_connected("user:alice", ctx).await;
         let req = json!({"v":1,"id":"t1","op":"gateway.token.issue","payload":{"kind":"node","name":"victim"}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
-        assert!(matches!(&out[0], Outbound::Text(t) if t.contains("forbidden")), "{out:?}");
+        assert!(
+            matches!(&out[0], Outbound::Text(t) if t.contains("forbidden")),
+            "{out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_rate_limit_ignores_source_port() {
+        let gw = Gateway::new(Signer::generate());
+        for port in 4000..4010 {
+            assert!(gw
+                .pair_claim(&format!("203.0.113.9:{port}"), "000000", "dev")
+                .await
+                .is_err());
+        }
+        let err = gw
+            .pair_claim("203.0.113.9:4999", "000000", "dev")
+            .await
+            .unwrap_err();
+        assert!(err.contains("频繁"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn invalid_device_name_does_not_consume_pair_code() {
+        let gw = Gateway::new(Signer::generate());
+        let (ctx, _rx) = mpsc_pair();
+        let alice = gw.client_connected("user:alice", ctx).await;
+        let out = gw
+            .on_client_text(
+                &alice,
+                &json!({"v":1,"id":"p1","op":"gateway.pair.create","payload":{}}).to_string(),
+            )
+            .await;
+        let text = match &out[0] {
+            Outbound::Text(t) => t.clone(),
+            other => panic!("{other:?}"),
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let code = value["payload"]["code"].as_str().unwrap().to_owned();
+        assert!(gw.pair_claim("203.0.113.2", &code, "").await.is_err());
+        assert!(gw.pair_claim("203.0.113.2", &code, "phone").await.is_ok());
     }
 
     #[tokio::test]
@@ -721,7 +806,10 @@ mod tests {
         for _ in 0..10 {
             assert!(gw.pair_claim("203.0.113.9", "000000", "dev").await.is_err());
         }
-        let err = gw.pair_claim("203.0.113.9", "000000", "dev").await.unwrap_err();
+        let err = gw
+            .pair_claim("203.0.113.9", "000000", "dev")
+            .await
+            .unwrap_err();
         assert!(err.contains("频繁"), "{err}");
     }
 
@@ -743,12 +831,23 @@ mod tests {
 
         let (ctx2, _rx2) = mpsc_pair();
         let bob = gw.client_connected("user:bob", ctx2).await;
-        let list = gw.on_client_text(&bob, &json!({"v":1,"id":"p2","op":"gateway.device.list"}).to_string()).await;
-        let text = match &list[0] { Outbound::Text(t) => t.clone(), o => panic!("{o:?}") };
+        let list = gw
+            .on_client_text(
+                &bob,
+                &json!({"v":1,"id":"p2","op":"gateway.device.list"}).to_string(),
+            )
+            .await;
+        let text = match &list[0] {
+            Outbound::Text(t) => t.clone(),
+            o => panic!("{o:?}"),
+        };
         let value: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["payload"]["devices"].as_array().unwrap().len(), 0, "不应看到别人的设备");
+        assert_eq!(
+            value["payload"]["devices"].as_array().unwrap().len(),
+            0,
+            "不应看到别人的设备"
+        );
     }
-
 
     fn mpsc_pair() -> (OutTx, mpsc::Receiver<Outbound>) {
         mpsc::channel(16)
@@ -759,7 +858,10 @@ mod tests {
         let gw = Gateway::new(Signer::generate());
         let (ntx, mut nrx) = mpsc_pair();
         gw.node_connected("a", "0.1.0", ntx).await.unwrap();
-        assert!(gw.node_connected("a", "0.1.0", mpsc_pair().0).await.is_err());
+        assert!(gw
+            .node_connected("a", "0.1.0", mpsc_pair().0)
+            .await
+            .is_err());
 
         let (ctx, mut crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
@@ -805,7 +907,9 @@ mod tests {
         let req = json!({"v":1,"id":"r2","op":"sys.ping","payload":{}});
         gw.on_client_text(&session, &req.to_string()).await;
         match nrx.recv().await.unwrap() {
-            Outbound::Text(t) => assert!(t.contains("\"node\":\"only\"") || t.contains("gatewaySession")),
+            Outbound::Text(t) => {
+                assert!(t.contains("\"node\":\"only\"") || t.contains("gatewaySession"))
+            }
             other => panic!("期望文本,实际 {other:?}"),
         }
     }
@@ -813,8 +917,12 @@ mod tests {
     #[tokio::test]
     async fn multi_node_without_node_field_is_rejected() {
         let gw = Gateway::new(Signer::generate());
-        gw.node_connected("a", "0.1.0", mpsc_pair().0).await.unwrap();
-        gw.node_connected("b", "0.1.0", mpsc_pair().0).await.unwrap();
+        gw.node_connected("a", "0.1.0", mpsc_pair().0)
+            .await
+            .unwrap();
+        gw.node_connected("b", "0.1.0", mpsc_pair().0)
+            .await
+            .unwrap();
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
         let req = json!({"v":1,"id":"r3","op":"sys.ping","payload":{}});
@@ -901,7 +1009,10 @@ mod tests {
         // 节点令牌注册成功;同名额拒绝
         let (ntx, _nrx) = mpsc_pair();
         gw.node_connected("n1", "0.1.0", ntx).await.unwrap();
-        assert!(gw.node_connected("n1", "0.1.0", mpsc_pair().0).await.is_err());
+        assert!(gw
+            .node_connected("n1", "0.1.0", mpsc_pair().0)
+            .await
+            .is_err());
         drop(crx);
     }
 }
