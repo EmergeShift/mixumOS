@@ -36,6 +36,9 @@ unsigned char *h264_encode(struct h264_encoder *enc, const unsigned char *bgra,
 #define REC_CONTROL      0x01
 #define REC_VIDEO        0x02
 #define REC_VIDEO_H264   0x03
+// PNG 帧/补丁（订阅者协商 codec=png）。负载仍是标准 27 字节帧头 +
+// （补丁时）20 字节 patch 头 + PNG 数据；agentd 原样转发，宿主按 flags 合成。
+#define REC_VIDEO_PNG    0x04
 
 // 视频帧头（与 Go internal/wire 对齐，小端）：
 // [0]=0x01 [1:5] windowID [5:9] w [9:13] h [13:17] size [17:19] flags
@@ -43,6 +46,15 @@ unsigned char *h264_encode(struct h264_encoder *enc, const unsigned char *bgra,
 #define FRAME_HDR 27
 #define FRAME_FLAG_KEYFRAME  0x0001
 #define FRAME_FLAG_HASCURSOR 0x0002
+// bit2=这是 damage 补丁（payload 前 20 字节为 patch 头）。
+#define FRAME_FLAG_PATCH     0x0004
+
+// Damage 补丁头（小端）：
+// [0:4] x [4:8] y [8:12] w [12:16] h [16:20] format
+// format=0 表示仅光标更新（无图像数据）；format=2 表示 PNG。
+#define PATCH_HDR 20
+#define PATCH_FORMAT_NONE 0
+#define PATCH_FORMAT_PNG  2
 
 struct mixcomp_server;
 
@@ -66,6 +78,18 @@ struct mixcomp_window {
 	struct h264_encoder *h264;
 	int h264_w, h264_h;        // 编码器对应的源尺寸(重建判据)
 	bool h264_idr_pending;
+
+	// PNG + damage 流送（stream.start 的 codec="png" 时启用）。
+	bool png_mode;
+	int jpeg_quality;          // 每窗口 JPEG 质量（stream.start 可覆盖）
+	uint8_t *prev;             // 上一帧完整 RGBA，用于差分
+	size_t prev_cap;
+	int prev_w, prev_h;
+	uint32_t prev_fmt;
+	bool have_prev;
+	int last_cursor_x, last_cursor_y;
+	uint16_t last_cursor_w, last_cursor_h;
+	bool last_have_cursor;
 
 	struct wl_event_source *timer; // 帧节拍
 	struct wl_listener map;

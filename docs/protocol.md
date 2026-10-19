@@ -162,7 +162,7 @@ sizeBytes, chunks, kernel?, arch? }`。`id` 为 ULID;树语义见 snapshots.md �
 | op | 请求 | 应答 |
 |----|------|------|
 | display.list | — | `{ windows: [Window] }` |
-| display.attach | `{ window, fps?, codec?: "jpeg"\|"h264" }` | `{ window, codec, width, height, fps }`(codec = 实际编码,此后二进制 video 帧) |
+| display.attach | `{ window, fps?, codec?: "jpeg"\|"h264"\|"png", quality?: 1-100 }` | `{ window, codec, width, height, fps }`(codec = 实际编码,此后二进制 video 帧) |
 | display.detach | `{ window }` | `{ window }` |
 | display.input | `{ window, type, … }` | `{ ok: true }` |
 | display.takeover | `{ window, action: claim\|release, force? }` | `{ mode }` |
@@ -236,6 +236,14 @@ JPEG 路径字节级不变;`codec=h264` 时负载为 H.264 Annex-B,帧头格式
 WebCodecs 解码。mixumd↔mixcomp 私有通道以记录类型区分
 (0x02=JPEG/0x03=H.264),对公有协议不可见;编码器缺失由 mixcomp 经
 控制消息回告,broker 统一切换并随 window 事件广播。
+
+**无损 damage 流(2026-10-19 起,实验)**:`display.attach` 可协商
+`codec:"png"`。首帧/尺寸变化发全量 PNG;之后只发脏区包围盒,payload 在
+27 字节 video 头后追加 20 字节 patch 头(`x,y,w,h,format`,小端):
+`format=2` 为 PNG 补丁,`format=0` 仅更新光标;无变化不发帧。帧头 `flags`
+bit2 标记补丁。宿主按补丁合成,不能清屏或改变画布尺寸。`quality` 仅对
+jpeg 生效。GPU/dmabuf 零拷贝不在本实现内,等 Apple Container/VM 的
+virtio-gpu/venus 通路成熟后再接。
 
 **私有通道前向兼容(2026-10-19 起)**:mixumd↔mixcomp 记录类型按增量演进,
 接收端必须忽略未知记录类型(计数 + 告警)而不是断开连接;帧长/负载校验

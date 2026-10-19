@@ -90,6 +90,7 @@ static void destroy_cb(struct wl_listener *listener, void *data) {
 	wl_list_remove(&w->set_title.link);
 	wl_list_remove(&w->set_app_id.link);
 	wl_list_remove(&w->link);
+	free(w->prev);
 	free(w);
 }
 
@@ -184,6 +185,7 @@ void window_create(struct mixcomp_server *s, struct wlr_xdg_surface *xdg) {
 	w->width = 1280;
 	w->height = 800;
 	w->fps = 30;
+	w->jpeg_quality = s->jpeg_quality;
 	if (xdg->toplevel->app_id != NULL) {
 		snprintf(w->app_id, sizeof(w->app_id), "%s", xdg->toplevel->app_id);
 	}
