@@ -53,8 +53,11 @@ async fn spawn_node(tag: &str) -> (tempfile::TempDir, SharedEngine, String, u16)
 
     let registry = Arc::new(Registry::new());
     registry.register(ShellDriver).unwrap();
-    let tasks =
-        Engine::with_snapshots(registry, Arc::new(LocalSandbox::new()), Some(snapshots.clone()));
+    let tasks = Engine::with_snapshots(
+        registry,
+        Arc::new(LocalSandbox::new()),
+        Some(snapshots.clone()),
+    );
     let broker = Broker::new(dir.path().join("display.sock"));
 
     let mut server = Server::new(
@@ -140,12 +143,66 @@ async fn push_moves_node_between_nodes_and_dedups() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn push_lands_zero_chunk_node_on_target() {
+    // 回归:0 块节点(空工作区快照)的推送缺失列表为空,推送端曾跳过
+    // commit 导致节点永不到达目标树;修复后 commit 恒发 + 接收端幂等。
+    let (_dir_a, engine_a, _token_a, _port_a) = spawn_node("node-a4").await;
+    let (_dir_b, engine_b, token_b, port_b) = spawn_node("node-b4").await;
+
+    // 空工作区快照:清单为空、chunks 为 0。
+    let node_id = {
+        let mut engine = engine_a.lock().unwrap();
+        engine
+            .snapshot(mixum_snapshot::KIND_DISK, "空基线", false)
+            .unwrap()
+            .id
+    };
+
+    let stats = sync::push_node(
+        &engine_a,
+        &node_id,
+        &format!("ws://127.0.0.1:{port_b}"),
+        &token_b,
+        "node-a4",
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.chunks_sent, 0, "0 块节点不应传输任何块");
+
+    // 回归断言:节点必须落在目标树上(父=A 的 genesis,不在 B → 远端根)。
+    {
+        let engine = engine_b.lock().unwrap();
+        let node = engine.tree.get(&node_id).unwrap();
+        assert!(node.label.contains("远端根"), "label:{}", node.label);
+        let manifest = node.disk.as_ref().unwrap();
+        assert!(manifest.files.is_empty(), "空清单应原样落树");
+    }
+
+    // 幂等重推:同 id 已在树中,仍应成功。
+    sync::push_node(
+        &engine_a,
+        &node_id,
+        &format!("ws://127.0.0.1:{port_b}"),
+        &token_b,
+        "node-a4",
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn push_reports_missing_node() {
     let (_dir_a, engine_a, _token_a, _port_a) = spawn_node("node-a2").await;
     let (_dir_b, _engine_b, token_b, _port_b) = spawn_node("node-b2").await;
-    let err = sync::push_node(&engine_a, "snap_nope", "ws://127.0.0.1:1", &token_b, "node-a")
-        .await
-        .unwrap_err();
+    let err = sync::push_node(
+        &engine_a,
+        "snap_nope",
+        "ws://127.0.0.1:1",
+        &token_b,
+        "node-a",
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, sync::SyncError::NotFound(_)));
 }
 
