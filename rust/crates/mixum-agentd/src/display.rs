@@ -477,7 +477,7 @@ impl Broker {
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         );
-        for key in ["x", "y", "button", "action", "key", "keysym", "mods"] {
+        for key in ["x", "y", "button", "action", "key", "keysym", "mods", "text"] {
             if let Some(value) = event.get(key) {
                 control.insert(key.into(), value.clone());
             }
