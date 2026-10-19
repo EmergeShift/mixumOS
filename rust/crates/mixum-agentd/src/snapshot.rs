@@ -70,7 +70,6 @@ struct State {
     nodes: HashMap<String, SnapNode>,
     head: String,
     branch: String,
-    seq: u64,
 }
 
 impl Default for MemorySnapshotEngine {
@@ -90,9 +89,9 @@ impl MemorySnapshotEngine {
         }
     }
 
-    fn id(state: &mut State) -> String {
-        state.seq += 1;
-        format!("snap_{}_{}", mixum_protocol::envelope::new_id(), state.seq)
+    /// MAP snapshot-node ids are ULIDs (snapshot-node.schema.json).
+    fn id() -> String {
+        mixum_protocol::envelope::new_id()
     }
 }
 
@@ -129,7 +128,7 @@ impl SnapshotEngine for MemorySnapshotEngine {
             .map(str::to_owned)
             .unwrap_or_else(|| state.branch.clone());
         let node = SnapNode {
-            id: Self::id(&mut state),
+            id: Self::id(),
             parent,
             branch: branch.clone(),
             label: label.filter(|s| !s.is_empty()).map(str::to_owned),
@@ -215,9 +214,6 @@ impl SnapshotEngine for MemorySnapshotEngine {
 
     async fn delete(&self, node: &str) -> Result<bool, SnapshotError> {
         let mut state = self.inner.lock().await;
-        if state.head == node {
-            return Err(SnapshotError::Conflict("HEAD 不能删除".into()));
-        }
         if state
             .nodes
             .values()
@@ -225,7 +221,13 @@ impl SnapshotEngine for MemorySnapshotEngine {
         {
             return Err(SnapshotError::Conflict("仅叶子节点可删除".into()));
         }
-        Ok(state.nodes.remove(node).is_some())
+        let parent = state.nodes.get(node).and_then(|n| n.parent.clone());
+        let removed = state.nodes.remove(node).is_some();
+        if removed && state.head == node {
+            // 分支头移交父节点,与真实 Tree::delete 语义一致。
+            state.head = parent.unwrap_or_default();
+        }
+        Ok(removed)
     }
 
     async fn gc(&self) -> Result<u32, SnapshotError> {
@@ -290,13 +292,15 @@ impl RealSnapshotEngine {
     fn map_error(error: mixum_snapshot::EngineError) -> SnapshotError {
         use mixum_snapshot::{EngineError, TreeError};
         match error {
-            EngineError::Tree(TreeError::NotFound(id)) | EngineError::Tree(TreeError::ParentNotFound(id)) => {
-                SnapshotError::NotFound(id)
-            }
-            EngineError::Tree(TreeError::HasChildren(_)) | EngineError::Tree(TreeError::BranchExists(_)) => {
+            EngineError::Tree(TreeError::NotFound(id))
+            | EngineError::Tree(TreeError::ParentNotFound(id)) => SnapshotError::NotFound(id),
+            EngineError::Tree(TreeError::HasChildren(_))
+            | EngineError::Tree(TreeError::BranchExists(_)) => {
                 SnapshotError::Conflict(error.to_string())
             }
-            EngineError::Kind(_) | EngineError::MemoryOnly | EngineError::KernelMismatch { .. }
+            EngineError::Kind(_)
+            | EngineError::MemoryOnly
+            | EngineError::KernelMismatch { .. }
             | EngineError::ArchMismatch { .. } => SnapshotError::Invalid(error.to_string()),
             other => SnapshotError::Internal(other.to_string()),
         }
@@ -376,10 +380,7 @@ impl SnapshotEngine for RealSnapshotEngine {
 
     async fn head(&self) -> Result<Option<String>, SnapshotError> {
         let engine = self.engine.lock().expect("快照引擎锁");
-        let branch = engine
-            .tree
-            .current_branch()
-            .map_err(Self::map_tree_error)?;
+        let branch = engine.tree.current_branch().map_err(Self::map_tree_error)?;
         Ok(engine
             .tree
             .head_id(&branch)
@@ -395,14 +396,14 @@ impl SnapshotEngine for RealSnapshotEngine {
 
     async fn gc(&self) -> Result<u32, SnapshotError> {
         let engine = self.engine.lock().expect("快照引擎锁");
-        engine.gc().map(|removed| removed as u32).map_err(Self::map_error)
+        engine
+            .gc()
+            .map(|removed| removed as u32)
+            .map_err(Self::map_error)
     }
 
     fn backend_name(&self) -> &str {
-        self.engine
-            .lock()
-            .expect("快照引擎锁")
-            .backend_name()
+        self.engine.lock().expect("快照引擎锁").backend_name()
     }
 
     fn criu_available(&self) -> bool {
@@ -473,7 +474,10 @@ mod tests {
             let tree = engine.tree().await.unwrap();
             assert_eq!(tree.nodes.len(), 2);
             assert_eq!(tree.head, second.id);
-            let restored = engine.restore(&genesis, "fork", Some("trial")).await.unwrap();
+            let restored = engine
+                .restore(&genesis, "fork", Some("trial"))
+                .await
+                .unwrap();
             assert_eq!(restored.restored_to, genesis);
             assert_eq!(restored.new_branch.as_deref(), Some("trial"));
             assert_eq!(engine.tree().await.unwrap().branch, "trial");

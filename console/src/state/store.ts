@@ -64,9 +64,16 @@ function lsGet(k: string): string {
   }
 }
 
+const TASK_STATES: TaskState[] = ['queued', 'running', 'suspended', 'completed', 'failed', 'canceled']
+
 function taskStateOf(data: unknown): TaskState | null {
-  return typeof data === 'string' && ['queued', 'running', 'suspended', 'completed', 'failed', 'canceled'].includes(data)
-    ? (data as TaskState)
+  // MAP: data 是对象 {state};过渡期兼容旧节点的裸字符串。
+  let value: unknown = typeof data === 'string' ? data : undefined
+  if (value === undefined && data && typeof data === 'object') {
+    value = (data as { state?: unknown }).state
+  }
+  return typeof value === 'string' && TASK_STATES.includes(value as TaskState)
+    ? (value as TaskState)
     : null
 }
 

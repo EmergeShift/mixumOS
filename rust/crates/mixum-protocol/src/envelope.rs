@@ -25,11 +25,7 @@ pub struct Envelope {
     pub op: String,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub seq: i64,
-    #[serde(
-        default,
-        rename = "replyTo",
-        skip_serializing_if = "String::is_empty"
-    )]
+    #[serde(default, rename = "replyTo", skip_serializing_if = "String::is_empty")]
     pub reply_to: String,
     #[serde(default)]
     pub ts: i64,
@@ -41,35 +37,31 @@ fn is_zero(v: &i64) -> bool {
     *v == 0
 }
 
-/// uuidv7 形式 id(48 位毫秒时间戳 + 随机),与 Go 参考实现同格式。
+/// Canonical ULID:48 位毫秒时间戳 + 80 位随机数,26 字符 Crockford base32。
+/// MAP envelope.md §Identifiers 要求所有 envelope/任务/快照/记忆 id 使用 ULID;
+/// ULID 按时间可排序,列表与日志天然带因果顺序。
 pub fn new_id() -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let mut b = [0u8; 16];
-    b[0] = (ts >> 40) as u8;
-    b[1] = (ts >> 32) as u8;
-    b[2] = (ts >> 24) as u8;
-    b[3] = (ts >> 16) as u8;
-    b[4] = (ts >> 8) as u8;
-    b[5] = ts as u8;
+    b[..6].copy_from_slice(&ts.to_be_bytes()[2..]);
     rand::thread_rng().fill_bytes(&mut b[6..]);
-    b[6] = (b[6] & 0x0f) | 0x70; // version 7
-    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
-    format_hex(&b)
+    ulid_from_bytes(&b)
 }
 
-fn format_hex(b: &[u8; 16]) -> String {
-    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// 16 字节(前 6 字节时间戳)编码为 26 字符 ULID。
+pub fn ulid_from_bytes(bytes: &[u8; 16]) -> String {
+    let mut value = u128::from_be_bytes(*bytes);
+    let mut out = [0u8; 26];
+    for slot in out.iter_mut().rev() {
+        *slot = CROCKFORD[(value & 0x1f) as usize];
+        value >>= 5;
+    }
+    String::from_utf8(out.to_vec()).expect("Crockford alphabet 是 ASCII")
 }
 
 impl Envelope {
@@ -103,6 +95,12 @@ impl Envelope {
 
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("envelope 序列化不会失败")
+    }
+
+    /// 给推送方向的 envelope 打上会话内单调序号(session.resume 依据)。
+    pub fn with_seq(mut self, seq: i64) -> Self {
+        self.seq = seq;
+        self
     }
 
     /// 以 ok 形式回复,负载为 resp。
@@ -139,6 +137,24 @@ mod tests {
     }
 
     #[test]
+    fn id_is_canonical_ulid() {
+        let id = new_id();
+        assert_eq!(id.len(), 26, "ULID 必须是 26 字符: {id}");
+        assert!(
+            id.chars().all(|c| CROCKFORD.contains(&(c as u8))),
+            "ULID 字符集必须是 Crockford base32: {id}"
+        );
+        // 时间戳前缀使 ULID 可按字典序排序:同一毫秒内随机位仍可能乱序,
+        // 故只验证已知字节向量的编码,不做跨毫秒断言。
+        let bytes = [
+            0x01, 0x72, 0x8f, 0x3a, 0x4b, 0x5c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert_eq!(ulid_from_bytes(&bytes).len(), 26);
+        assert!(ulid_from_bytes(&bytes).starts_with('0'));
+    }
+
+    #[test]
     fn round_trip() {
         let e = Envelope::new(
             "task.submit",
@@ -148,10 +164,7 @@ mod tests {
         let got = Envelope::decode(raw.as_bytes()).expect("往返应成功");
         assert_eq!(got.op, "task.submit");
         assert_eq!(got.id, e.id);
-        assert_eq!(
-            got.payload.unwrap()["instruction"],
-            "打开 b 站搜 mixumOS"
-        );
+        assert_eq!(got.payload.unwrap()["instruction"], "打开 b 站搜 mixumOS");
     }
 
     #[test]

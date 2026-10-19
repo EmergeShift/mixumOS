@@ -242,10 +242,13 @@ function EventStream({ onJumpWindows }: { onJumpWindows: () => void }) {
             <span className="ev-ts">{fmtTime(e.ts)}</span>
             <span className="ev-type">{e.step ? `${e.type}/${e.step}` : e.type}</span>
             <span className="ev-data">
-              {e.type === 'log' && typeof e.data === 'string' && e.data}
-              {e.type === 'state' && String(e.data)}
+              {e.type === 'log' &&
+                (typeof e.data === 'string' ? e.data : (e.data as { line?: string } | null)?.line)}
+              {e.type === 'state' &&
+                (typeof e.data === 'string' ? e.data : (e.data as { state?: string } | null)?.state)}
               {e.type === 'progress' && e.data != null && JSON.stringify(e.data)}
-              {e.type === 'error' && String(e.data)}
+              {e.type === 'error' &&
+                (typeof e.data === 'string' ? e.data : (e.data as { message?: string } | null)?.message)}
               {e.type === 'window' && (
                 <>
                   {JSON.stringify(e.data)}{' '}
