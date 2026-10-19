@@ -79,7 +79,8 @@
 - [x] gateway M3(2026-10-19,gateway-m3-e2e):`NodeRegistry` trait +
       k8s Lease 共享注册表(心跳续约)、副本间 WS mesh 双向跨副本路由、
       节点掉线跨副本清理;部署清单 cloud/k8s/60-gateway.yaml;
-- [ ] 内存快照跨内核迁移的可行性验证(CRIU 同内核约束的工程对策)。
+- [x] 内存快照跨内核迁移的可行性验证(2026-10-19:同内核可用、跨内核不可行;
+      工程对策见 docs/criu-feasibility.md)。
 
 ## 持续事项
 
