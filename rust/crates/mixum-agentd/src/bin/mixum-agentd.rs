@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut gateway_url = String::new();
     let mut gateway_name = String::new();
     let mut gateway_token = String::new();
+    let mut gateway_fingerprint = String::new();
     while let Some(arg) = args.next() {
         if let Some(value) = arg.strip_prefix("--config=") {
             config_path = value.to_owned();
@@ -42,6 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } else if arg == "--gateway-name" {
             if let Some(value) = args.next() {
                 gateway_name = value;
+            }
+        } else if let Some(value) = arg.strip_prefix("--gateway-fingerprint=") {
+            gateway_fingerprint = value.to_owned();
+        } else if arg == "--gateway-fingerprint" {
+            if let Some(value) = args.next() {
+                gateway_fingerprint = value;
             }
         } else if let Some(value) = arg.strip_prefix("--gateway-token=") {
             gateway_token = value.to_owned();
@@ -237,6 +244,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             token: gateway_token,
             local_token,
             server: Arc::clone(&server),
+            fingerprint: (!gateway_fingerprint.is_empty()).then_some(gateway_fingerprint),
+            pin_path: Some(
+                std::path::Path::new(&config.data_dir).join("gateway-fingerprint"),
+            ),
         });
         eprintln!("gateway relay: {gateway_url}(出站注册)");
     }

@@ -28,7 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let hosts = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     let identity = mixum_gateway::identity::load_or_create_identity(&data_dir, &hosts)?;
     let gw = Gateway::new(identity.signer);
-    let bootstrap = gw.bootstrap_token()?;
+    gw.load_state(std::path::PathBuf::from(&data_dir).join("gateway-state.json"))
+        .await;
+    let bootstrap = gw.bootstrap_token().await?;
     eprintln!("mixum-gateway listening on {listen}");
     eprintln!("fingerprint: {}", identity.fingerprint);
     eprintln!("bootstrap token: {bootstrap}");
