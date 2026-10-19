@@ -28,11 +28,7 @@ pub struct Envelope {
     #[serde(default, rename = "replyTo", skip_serializing_if = "String::is_empty")]
     pub reply_to: String,
     /// 可选:gateway 路由目标节点名(直连 mixumd 时不存在,忽略即可)。
-    #[serde(
-        default,
-        rename = "node",
-        skip_serializing_if = "String::is_empty"
-    )]
+    #[serde(default, rename = "node", skip_serializing_if = "String::is_empty")]
     pub node: String,
     #[serde(default)]
     pub ts: i64,

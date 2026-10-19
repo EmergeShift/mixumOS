@@ -317,10 +317,7 @@ mod tests {
         assert!(v.verify(&map_token).is_ok());
 
         // 旧镜像签发的 mixum1. 令牌在过渡期继续可用。
-        let legacy = format!(
-            "mixum1.{}",
-            map_token.strip_prefix("map1.").unwrap()
-        );
+        let legacy = format!("mixum1.{}", map_token.strip_prefix("map1.").unwrap());
         let verified = v.verify(&legacy).expect("旧前缀应继续被接受");
         assert!(has_cap(&verified, Cap::MemWrite));
     }

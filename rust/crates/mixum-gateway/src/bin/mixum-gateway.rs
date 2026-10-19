@@ -179,7 +179,9 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                 .unwrap_or("0")
                 .to_owned();
             if name.is_empty() {
-                let _ = out.send(Outbound::Text(err_text(Some(&env), "name 必填"))).await;
+                let _ = out
+                    .send(Outbound::Text(err_text(Some(&env), "name 必填")))
+                    .await;
                 return Side::Pending;
             }
             match gw.verify(token).await {
@@ -271,7 +273,11 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                     "heartbeat": 30,
                 })),
             );
-            hello.reply_to = env.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            hello.reply_to = env
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
             let _ = out.send(Outbound::Text(hello.to_json())).await;
             Side::Client(session)
         }
