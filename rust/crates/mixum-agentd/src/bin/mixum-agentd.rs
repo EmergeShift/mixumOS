@@ -1,16 +1,16 @@
 //! mixum-agentd 默认装配：配置、令牌签名器、任务引擎、快照引擎、broker 与 WSS。
 //!
 //! 快照后端由 `real-snapshot` 特性决定:开启时接 mixum-snapshot crate
-//! (dataDir/snapshots 下 CAS + 树,装配同 reference/cmd/mixumd),
+//! (dataDir/snapshots 下 CAS + 树,装配同已移除的 Go 参考实现 mixumd),
 //! 否则使用内存桩(协议可测,文件回退不可测)。
 
 use mixum_agentd::auth::{load_or_create_identity, Authorizer};
 use mixum_agentd::display::Broker;
 use mixum_agentd::server::{Config, Server};
+use mixum_agentd::snapshot::SnapshotEngine;
 use mixum_agentd::task::{
     Engine, ExternalDriver, LocalSandbox, NamedExternalDriver, Registry, ShellDriver,
 };
-use mixum_agentd::snapshot::SnapshotEngine;
 use mixum_protocol::ops::Cap;
 use mixum_protocol::token::Claims;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
     }
-    // 空文件与缺失同义:使用默认配置(对齐 reference/cmd/mixumd 的 /dev/null 用法)。
+    // 空文件与缺失同义:使用默认配置(沿用 Go 参考实现 mixumd 的 /dev/null 用法)。
     let mut config = match tokio::fs::read(&config_path).await {
         Ok(data) if !data.is_empty() => serde_json::from_slice::<Config>(&data)?,
         _ => Config::default(),
@@ -91,10 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }));
         let adapter = mixum_agentd::snapshot::RealSnapshotEngine::from_engine(engine);
         let backend = Arc::new(mixum_agentd::sync::SyncBackend::new(adapter.shared()));
-        (
-            Arc::new(adapter) as Arc<dyn SnapshotEngine>,
-            Some(backend),
-        )
+        (Arc::new(adapter) as Arc<dyn SnapshotEngine>, Some(backend))
     };
     #[cfg(not(feature = "real-snapshot"))]
     let snapshots: Arc<dyn SnapshotEngine> =
@@ -110,7 +107,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tokio::spawn(async move { b.set_tasks_active(active).await });
     }));
     #[cfg_attr(not(feature = "real-snapshot"), allow(unused_mut))]
-    let mut server = Server::new(config.clone(), authorizer, engine.clone(), broker, snapshots);
+    let mut server = Server::new(
+        config.clone(),
+        authorizer,
+        engine.clone(),
+        broker,
+        snapshots,
+    );
     #[cfg(feature = "real-snapshot")]
     {
         let assembled = Arc::get_mut(&mut server).expect("server 刚构造,无共享引用");
@@ -170,10 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .unwrap_or_default()
                         .to_string();
                     eprintln!("run-once 状态: {state}");
-                    if matches!(
-                        state.as_str(),
-                        "completed" | "failed" | "canceled"
-                    ) {
+                    if matches!(state.as_str(), "completed" | "failed" | "canceled") {
                         return match state.as_str() {
                             "completed" => Ok(()),
                             s => Err(format!("任务终态: {s}").into()),

@@ -43,10 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let tree = engine.tree().await?;
         let mut nodes: Vec<_> = tree.nodes;
         nodes.sort_by_key(|n| std::cmp::Reverse(n.created_at));
-        nodes
-            .first()
-            .map(|n| n.id.clone())
-            .ok_or("本地树为空")?
+        nodes.first().map(|n| n.id.clone()).ok_or("本地树为空")?
     } else {
         node
     };

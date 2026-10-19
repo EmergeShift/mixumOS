@@ -8,11 +8,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use std::sync::atomic::Ordering;
 use tokio::sync::{broadcast, Mutex};
 
 pub type DriverError = Box<dyn Error + Send + Sync>;
@@ -25,8 +25,7 @@ pub const COMPLETED: &str = "completed";
 pub const FAILED: &str = "failed";
 pub const CANCELED: &str = "canceled";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskSpec {
     pub instruction: String,
     #[serde(default)]
@@ -353,7 +352,10 @@ impl Sandbox for LocalSandbox {
         let pgids = self.pgids.clone();
         tokio::spawn(async move {
             let _ = child.wait().await;
-            pgids.lock().expect("sandbox 进程组锁").retain(|current| *current != pid as i32);
+            pgids
+                .lock()
+                .expect("sandbox 进程组锁")
+                .retain(|current| *current != pid as i32);
         });
         Ok(pid)
     }
@@ -503,6 +505,9 @@ impl AgentDriver for ExternalDriver {
         let mut lines = BufReader::new(stdout).lines();
         let mut stderr_lines = BufReader::new(stderr).lines();
         let mut failed: Option<String> = None;
+        // stderr EOF 后必须停止轮询它:next_line() 会永久立即返回 None,
+        // 而 stdout 仍开着的话 select 循环会空转打满 CPU。
+        let mut stderr_open = true;
         loop {
             tokio::select! {
                 line = lines.next_line() => match line? {
@@ -523,7 +528,16 @@ impl AgentDriver for ExternalDriver {
                     },
                     None => break,
                 },
-                line = stderr_lines.next_line() => if let Some(line) = line? { emit.log(line).await; },
+                line = async {
+                    if stderr_open {
+                        stderr_lines.next_line().await
+                    } else {
+                        futures_util::future::pending::<std::io::Result<Option<String>>>().await
+                    }
+                } => match line? {
+                    Some(line) => emit.log(line).await,
+                    None => stderr_open = false,
+                },
             }
         }
         let status = child.wait().await?;
@@ -637,7 +651,11 @@ impl Engine {
         }
     }
 
-    async fn run_inner(self: Arc<Self>, task: Arc<Task>, driver: Arc<dyn AgentDriver>) -> Result<(), String> {
+    async fn run_inner(
+        self: Arc<Self>,
+        task: Arc<Task>,
+        driver: Arc<dyn AgentDriver>,
+    ) -> Result<(), String> {
         let mut cancel = task.cancel_receiver();
         self.emit_state(&task, QUEUED).await;
         if let Some(policy) = &task.snapshot_policy {
@@ -764,7 +782,6 @@ fn set_process_group(_command: &mut Command) {}
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::Ordering;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -866,11 +883,5 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(task.state().await, CANCELED);
-    }
-
-    #[allow(dead_code)]
-    fn _atomic_is_used() {
-        let a = std::sync::atomic::AtomicUsize::new(0);
-        a.fetch_add(1, Ordering::Relaxed);
     }
 }

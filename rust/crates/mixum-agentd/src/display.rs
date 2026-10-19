@@ -55,6 +55,9 @@ struct FrameQueue {
     items: Mutex<VecDeque<Vec<u8>>>,
     notify: Notify,
     capacity: usize,
+    /// 关闭信号:订阅者被移除/窗口关闭时置位,recv 排干缓冲帧后返回 None,
+    /// 令帧转发任务自然退出(否则每次 attach 泄漏一个永久等待的任务)。
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl FrameQueue {
@@ -63,6 +66,7 @@ impl FrameQueue {
             items: Mutex::new(VecDeque::with_capacity(capacity)),
             notify: Notify::new(),
             capacity,
+            closed: std::sync::atomic::AtomicBool::new(false),
         });
         (
             FrameSender {
@@ -70,6 +74,11 @@ impl FrameQueue {
             },
             FrameReceiver { queue },
         )
+    }
+    fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.notify.notify_one();
     }
 }
 
@@ -83,6 +92,9 @@ impl FrameSender {
         drop(items);
         self.queue.notify.notify_one();
     }
+    fn close(&self) {
+        self.queue.close();
+    }
 }
 
 impl FrameReceiver {
@@ -90,6 +102,9 @@ impl FrameReceiver {
         loop {
             if let Some(frame) = self.queue.items.lock().await.pop_front() {
                 return Some(frame);
+            }
+            if self.queue.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return None;
             }
             self.queue.notify.notified().await;
         }
@@ -112,11 +127,18 @@ struct WindowState {
 #[derive(Clone)]
 pub struct Broker {
     windows: Arc<Mutex<HashMap<u32, WindowState>>>,
-    comp: Arc<Mutex<Option<mpsc::Sender<CompMessage>>>>,
+    comp: Arc<Mutex<Option<CompConn>>>,
+    comp_seq: Arc<std::sync::atomic::AtomicU64>,
     window_events: broadcast::Sender<Window>,
     socket_path: PathBuf,
     /// 任务引擎是否活跃:活跃时新窗口归 agent 模式(用户接管需 claim)。
     tasks_active: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct CompConn {
+    /// 连接代数:旧连接退出时不得清掉新连接的槽位。
+    id: u64,
+    tx: mpsc::Sender<CompMessage>,
 }
 
 #[derive(Debug)]
@@ -130,6 +152,7 @@ impl Broker {
         Self {
             windows: Arc::new(Mutex::new(HashMap::new())),
             comp: Arc::new(Mutex::new(None)),
+            comp_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             window_events,
             socket_path: path.into(),
             tasks_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -179,8 +202,7 @@ impl Broker {
             let mut all = self.windows.lock().await;
             for st in all.values_mut() {
                 let target = if active {
-                    (st.window.mode.is_empty() || st.window.mode == MODE_FREE)
-                        .then_some(MODE_AGENT)
+                    (st.window.mode.is_empty() || st.window.mode == MODE_FREE).then_some(MODE_AGENT)
                 } else {
                     (st.window.mode == MODE_AGENT).then_some(MODE_FREE)
                 };
@@ -197,9 +219,7 @@ impl Broker {
 
     pub async fn open_or_update(&self, window: Window) {
         let mut all = self.windows.lock().await;
-        let tasks_active = self
-            .tasks_active
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let tasks_active = self.tasks_active.load(std::sync::atomic::Ordering::SeqCst);
         let entry = all.entry(window.id).or_insert_with(|| {
             // 任务运行中打开的窗口归 agent:用户可见,接管需 display.takeover。
             let mut w = window.clone();
@@ -227,7 +247,11 @@ impl Broker {
         let _ = self.window_events.send(changed);
     }
     pub async fn close(&self, id: u32) {
-        self.windows.lock().await.remove(&id);
+        if let Some(state) = self.windows.lock().await.remove(&id) {
+            for sub in state.subscribers.values() {
+                sub.sender.close();
+            }
+        }
         let _ = self.window_events.send(Window {
             id,
             app_id: String::new(),
@@ -292,11 +316,25 @@ impl Broker {
         ))
     }
     pub async fn detach(&self, id: u32, subscriber_id: &str) {
-        if let Some(state) = self.windows.lock().await.get_mut(&id) {
-            state.subscribers.remove(subscriber_id);
+        let last_same_codec = {
+            let mut all = self.windows.lock().await;
+            let Some(state) = all.get_mut(&id) else {
+                return;
+            };
+            let Some(removed) = state.subscribers.remove(subscriber_id) else {
+                return;
+            };
+            removed.sender.close();
+            !state
+                .subscribers
+                .values()
+                .any(|s| s.codec == removed.codec)
+        };
+        // 同编码还有别的订阅者时不能停流,否则共享流被误停。
+        if last_same_codec {
+            self.send_json(serde_json::json!({"type":"stream.stop","id":id}))
+                .await;
         }
-        self.send_json(serde_json::json!({"type":"stream.stop","id":id}))
-            .await;
     }
     pub async fn broadcast_frame(&self, id: u32, frame: Vec<u8>, codec: &str) {
         let subscribers = self
@@ -369,14 +407,17 @@ impl Broker {
         Ok(())
     }
     async fn send_json(&self, value: serde_json::Value) {
-        if let Some(tx) = self.comp.lock().await.as_ref() {
-            let _ = tx.send(CompMessage::Json(value)).await;
+        if let Some(conn) = self.comp.lock().await.as_ref() {
+            let _ = conn.tx.send(CompMessage::Json(value)).await;
         }
     }
     async fn serve_comp(&self, stream: UnixStream) -> Result<(), DisplayError> {
         let (mut read, mut write) = stream.into_split();
+        let id = self
+            .comp_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, mut rx) = mpsc::channel(64);
-        *self.comp.lock().await = Some(tx);
+        *self.comp.lock().await = Some(CompConn { id, tx });
         let write_task = tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 let (kind, payload) = match message {
@@ -391,6 +432,19 @@ impl Broker {
                 }
             }
         });
+        let result = self.serve_comp_read(&mut read).await;
+        write_task.abort();
+        // 仅当槽位仍是本连接时清除:新连接可能已接管。
+        let mut comp = self.comp.lock().await;
+        if comp.as_ref().is_some_and(|c| c.id == id) {
+            *comp = None;
+        }
+        result
+    }
+    async fn serve_comp_read(
+        &self,
+        read: &mut tokio::net::unix::OwnedReadHalf,
+    ) -> Result<(), DisplayError> {
         loop {
             let mut header = [0u8; 5];
             read.read_exact(&mut header).await?;
@@ -425,14 +479,13 @@ impl Broker {
                 _ => break,
             }
         }
-        write_task.abort();
-        *self.comp.lock().await = None;
         Ok(())
     }
     async fn handle_comp(&self, data: &[u8]) {
         if let Ok(message) = serde_json::from_slice::<CompMessageWire>(data) {
             match message.kind.as_str() {
                 "window.open" | "window.update" => {
+                    // mode 留空:由 open_or_update 决定归属(任务活跃时新窗口归 agent)。
                     self.open_or_update(Window {
                         id: message.id,
                         app_id: message.app_id,
@@ -440,7 +493,7 @@ impl Broker {
                         width: message.width,
                         height: message.height,
                         focused: message.focused,
-                        mode: MODE_FREE.into(),
+                        mode: String::new(),
                         codec: None,
                     })
                     .await;
@@ -566,5 +619,104 @@ mod tests {
         // 回告后广播 jpeg,h264 订阅者也能收到(解码器据此切换)
         broker.broadcast_frame(7, vec![9], CODEC_JPEG).await;
         assert_eq!(h264_sub.3.frames.try_recv().as_deref(), Some(&[9u8][..]));
+    }
+
+    #[tokio::test]
+    async fn frame_queue_close_delivers_buffered_then_none() {
+        let (tx, mut rx) = FrameQueue::pair(4);
+        tx.push(vec![1, 2]).await;
+        tx.push(vec![3]).await;
+        tx.close();
+        // 关闭前排队的帧仍按序送达
+        assert_eq!(rx.recv().await.as_deref(), Some(&[1u8, 2][..]));
+        assert_eq!(rx.recv().await.as_deref(), Some(&[3u8][..]));
+        // 排干后 recv 终结,帧转发任务据此退出
+        assert_eq!(rx.recv().await, None);
+        assert_eq!(rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn window_open_during_active_task_is_agent_owned() {
+        let broker = Broker::new("/tmp/mixum-agentd-test4.sock");
+        broker.set_tasks_active(true).await;
+        let open = serde_json::to_vec(&serde_json::json!({
+            "type":"window.open","id":9,"app_id":"a","title":"A",
+            "width":640,"height":480,"focused":false
+        }))
+        .unwrap();
+        broker.handle_comp(&open).await;
+        assert_eq!(broker.list().await[0].mode, MODE_AGENT);
+        // agent 持有期间,控制台注入必须先接管
+        assert!(matches!(
+            broker.inject(9, serde_json::json!({"type":"key"})).await,
+            Err(DisplayError::AgentOwnsInput)
+        ));
+        broker.set_tasks_active(false).await;
+        assert_eq!(broker.list().await[0].mode, MODE_FREE);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detach_keeps_stream_until_last_same_codec_subscriber_leaves() {
+        use std::time::Duration;
+        let path = format!("/tmp/mixum-agentd-detach-{}.sock", std::process::id());
+        let broker = Broker::new(path.clone());
+        broker.start().await.unwrap();
+        let mut client = tokio::net::UnixStream::connect(&path).await.unwrap();
+        for _ in 0..50 {
+            if broker.online().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(broker.online().await);
+        broker
+            .open_or_update(Window {
+                id: 7,
+                app_id: "a".into(),
+                title: "A".into(),
+                width: 640,
+                height: 480,
+                focused: true,
+                mode: MODE_FREE.into(),
+                codec: None,
+            })
+            .await;
+        broker.attach(7, "s1", 30, CODEC_JPEG).await.unwrap();
+        broker.attach(7, "s2", 30, CODEC_JPEG).await.unwrap();
+        broker.attach(7, "s3", 30, CODEC_H264).await.unwrap();
+        // 三次 attach 的 stream.start
+        for _ in 0..3 {
+            let (kind, payload) = read_record(&mut client).await;
+            assert_eq!(kind, 0x01);
+            assert_eq!(payload["type"], "stream.start");
+        }
+        // 还有同编码订阅者:不得停流
+        broker.detach(7, "s1").await;
+        assert!(tokio::time::timeout(Duration::from_millis(150), read_record(&mut client))
+            .await
+            .is_err());
+        // 最后一个 jpeg 订阅者退出:停流
+        broker.detach(7, "s2").await;
+        let (kind, payload) = read_record(&mut client).await;
+        assert_eq!(kind, 0x01);
+        assert_eq!(payload["type"], "stream.stop");
+        // 最后一个 h264 订阅者退出:同样停流
+        broker.detach(7, "s3").await;
+        let (kind, payload) = read_record(&mut client).await;
+        assert_eq!(kind, 0x01);
+        assert_eq!(payload["type"], "stream.stop");
+    }
+
+    #[cfg(unix)]
+    async fn read_record(
+        client: &mut tokio::net::UnixStream,
+    ) -> (u8, serde_json::Value) {
+        let mut header = [0u8; 5];
+        client.read_exact(&mut header).await.unwrap();
+        let len = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; len];
+        client.read_exact(&mut payload).await.unwrap();
+        (header[4], serde_json::from_slice(&payload).unwrap())
     }
 }
