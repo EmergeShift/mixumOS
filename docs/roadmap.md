@@ -72,12 +72,7 @@
 
 ## 阶段 5:云端与多设备
 
-- [x] k8s operator(kube-rs)(2026-10-19 kind 集群 e2e 验证):MixumTask CRD
-      (instruction/agent/arch/runnerImage/snapshotPvc/ttl)、任务 Pod 编排
-      (显式直起 mixumd——dist 镜像无 ENTRYPOINT;MIXUM_RUN_ONCE 一次性
-      语义)、状态回写 pending→running→completed/failed、arch 注入
-      nodeSelector、快照 PVC 挂载 /var/lib/mixum、TTL 回收+终态不重建;
-      tests/integration/operator-e2e.mjs(kind 镜像装载/清单/CRD 竞态等待);
+- [ ] k8s operator(kube-rs):MixumTask CRD、节点池亲和(arm64/x86_64)、快照卷挂载;
 - [x] gateway M1/M2(2026-10-18,gateway-e2e 全链):节点出站注册、
       envelope 路由(文本+二进制)、用户/节点令牌签发、设备配对/吊销、
       TLS、console 节点选择器;

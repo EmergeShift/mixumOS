@@ -28,7 +28,7 @@ const containers = ["mixum-m3-a", "mixum-m3-b"];
 const gateways = [];
 
 function sh(cmd, args) {
-  return execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env, KUBECONFIG } });
+  return execFileSync(cmd, args, { encoding: "utf8", env: { ...process.env } });
 }
 function cleanup() {
   for (const name of containers) {
@@ -48,6 +48,7 @@ process.on("SIGINT", () => { cleanup(); process.exit(130); });
 mkdirSync(`${ROOT}/build`, { recursive: true });
 const kubeconfig = sh("kubectl", ["--context", "kind-mixum-e2e", "config", "view", "--minify", "--flatten"]);
 writeFileSync(KUBECONFIG, kubeconfig);
+process.env.KUBECONFIG = KUBECONFIG;
 sh("kubectl", ["--context", "kind-mixum-e2e", "delete", "lease", "-n", NS,
   "-l", "mixumos.io/registry=gateway", "--ignore-not-found"]);
 rmSync(`${ROOT}/build/gw-m3-data`, { recursive: true, force: true });
