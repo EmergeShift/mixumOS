@@ -212,6 +212,7 @@ impl Server {
             claims: None,
             limiter: RateLimiter::new(50.0, 100.0),
             id: mixum_protocol::envelope::new_id(),
+            forwarders: Vec::new(),
             #[cfg(feature = "real-snapshot")]
             sync_stage: None,
         };
@@ -243,6 +244,10 @@ impl Server {
             }
         }
         writer.abort();
+        // 帧转发任务持有会话出站通道,断连后必须终止,否则永久泄漏。
+        for forwarder in session.forwarders.drain(..) {
+            forwarder.abort();
+        }
         Ok(())
     }
 }
@@ -253,6 +258,8 @@ pub struct Session {
     claims: Option<mixum_protocol::token::Claims>,
     limiter: RateLimiter,
     id: String,
+    /// display.attach 的帧转发任务:会话结束时统一 abort(队列关闭是常规路径)。
+    forwarders: Vec<tokio::task::JoinHandle<()>>,
     /// 远端导入暂存:一次 import 对账到 commit 之间有效(协议 §6)。
     #[cfg(feature = "real-snapshot")]
     sync_stage: Option<crate::sync::ImportStage>,
@@ -776,11 +783,12 @@ impl Session {
             Ok((width, height, fps, mut sub)) => {
                 let codec = sub.codec.clone();
                 let tx = self.tx.clone();
-                tokio::spawn(async move {
+                let forwarder = tokio::spawn(async move {
                     while let Some(frame) = sub.frames.recv().await {
                         let _ = tx.send(Message::Binary(frame.into())).await;
                     }
                 });
+                self.forwarders.push(forwarder);
                 self.reply(
                     env,
                     json!({"window":id,"codec":codec,"width":width,"height":height,"fps":fps}),

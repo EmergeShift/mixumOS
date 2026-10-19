@@ -55,6 +55,9 @@ struct FrameQueue {
     items: Mutex<VecDeque<Vec<u8>>>,
     notify: Notify,
     capacity: usize,
+    /// 关闭信号:订阅者被移除/窗口关闭时置位,recv 排干缓冲帧后返回 None,
+    /// 令帧转发任务自然退出(否则每次 attach 泄漏一个永久等待的任务)。
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl FrameQueue {
@@ -63,6 +66,7 @@ impl FrameQueue {
             items: Mutex::new(VecDeque::with_capacity(capacity)),
             notify: Notify::new(),
             capacity,
+            closed: std::sync::atomic::AtomicBool::new(false),
         });
         (
             FrameSender {
@@ -70,6 +74,11 @@ impl FrameQueue {
             },
             FrameReceiver { queue },
         )
+    }
+    fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.notify.notify_one();
     }
 }
 
@@ -83,6 +92,9 @@ impl FrameSender {
         drop(items);
         self.queue.notify.notify_one();
     }
+    fn close(&self) {
+        self.queue.close();
+    }
 }
 
 impl FrameReceiver {
@@ -90,6 +102,9 @@ impl FrameReceiver {
         loop {
             if let Some(frame) = self.queue.items.lock().await.pop_front() {
                 return Some(frame);
+            }
+            if self.queue.closed.load(std::sync::atomic::Ordering::Acquire) {
+                return None;
             }
             self.queue.notify.notified().await;
         }
@@ -232,7 +247,11 @@ impl Broker {
         let _ = self.window_events.send(changed);
     }
     pub async fn close(&self, id: u32) {
-        self.windows.lock().await.remove(&id);
+        if let Some(state) = self.windows.lock().await.remove(&id) {
+            for sub in state.subscribers.values() {
+                sub.sender.close();
+            }
+        }
         let _ = self.window_events.send(Window {
             id,
             app_id: String::new(),
@@ -305,6 +324,7 @@ impl Broker {
             let Some(removed) = state.subscribers.remove(subscriber_id) else {
                 return;
             };
+            removed.sender.close();
             !state
                 .subscribers
                 .values()
@@ -599,6 +619,20 @@ mod tests {
         // 回告后广播 jpeg,h264 订阅者也能收到(解码器据此切换)
         broker.broadcast_frame(7, vec![9], CODEC_JPEG).await;
         assert_eq!(h264_sub.3.frames.try_recv().as_deref(), Some(&[9u8][..]));
+    }
+
+    #[tokio::test]
+    async fn frame_queue_close_delivers_buffered_then_none() {
+        let (tx, mut rx) = FrameQueue::pair(4);
+        tx.push(vec![1, 2]).await;
+        tx.push(vec![3]).await;
+        tx.close();
+        // 关闭前排队的帧仍按序送达
+        assert_eq!(rx.recv().await.as_deref(), Some(&[1u8, 2][..]));
+        assert_eq!(rx.recv().await.as_deref(), Some(&[3u8][..]));
+        // 排干后 recv 终结,帧转发任务据此退出
+        assert_eq!(rx.recv().await, None);
+        assert_eq!(rx.recv().await, None);
     }
 
     #[tokio::test]
