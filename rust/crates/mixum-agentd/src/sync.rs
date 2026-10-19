@@ -678,7 +678,7 @@ mod tests {
         frame.extend_from_slice(data);
         backend.store_chunk(&mut stage, &frame);
         let id = backend.commit(stage).unwrap();
-        assert!(id.starts_with("snap_"));
+        assert_eq!(id.len(), 26, "远端生成的节点 id 必须是 ULID");
         let engine = backend.engine.lock().unwrap();
         let node = engine.tree.get(&id).unwrap();
         assert_eq!(node.parent, "");

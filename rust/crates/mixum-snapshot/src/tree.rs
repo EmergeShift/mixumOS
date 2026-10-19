@@ -113,7 +113,7 @@ impl Tree {
 
     pub fn add(&self, mut node: TreeNode) -> Result<TreeNode, TreeError> {
         if node.id.is_empty() {
-            node.id = new_id();
+            node.id = mixum_protocol::envelope::new_id();
         }
         if node.created_at == 0 {
             node.created_at = now_ms();
@@ -265,13 +265,3 @@ fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
-fn new_id() -> String {
-    let mut bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    format!(
-        "snap_{}",
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    )
-}
-
-use rand::RngCore;

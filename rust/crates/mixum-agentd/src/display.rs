@@ -21,6 +21,8 @@ pub const CODEC_H264: &str = "h264";
 /// 0x01 + 27 字节头 + 编码数据,公有 WS 帧格式不区分)。
 const COMP_REC_VIDEO: u8 = 0x02;
 const COMP_REC_VIDEO_H264: u8 = 0x03;
+/// 单帧上限,超过视为控制通道 framing 损坏。
+const MAX_COMP_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DisplayError {
@@ -30,8 +32,20 @@ pub enum DisplayError {
     AgentOwnsInput,
     #[error("接管冲突：{0}")]
     Conflict(String),
+    /// 控制通道 framing/校验失败:显式错误路径(区别于「未知类型忽略」)。
+    #[error("mixcomp 控制通道协议错误：{0}")]
+    Protocol(String),
     #[error("控制通道：{0}")]
     Io(#[from] std::io::Error),
+}
+
+/// mixcomp 控制通道的健康计数(EmergeShift#8:未知记录类型可观测)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CompStats {
+    /// 未知记录类型被忽略的次数(前向兼容)。
+    pub unknown_records: u64,
+    /// 校验错误次数(framing/负载非法)。
+    pub protocol_errors: u64,
 }
 
 pub struct FrameSubscription {
@@ -117,6 +131,9 @@ pub struct Broker {
     socket_path: PathBuf,
     /// 任务引擎是否活跃:活跃时新窗口归 agent 模式(用户接管需 claim)。
     tasks_active: Arc<std::sync::atomic::AtomicBool>,
+    /// 未知记录类型 / 校验错误的观测计数。
+    unknown_records: Arc<std::sync::atomic::AtomicU64>,
+    protocol_errors: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -133,6 +150,8 @@ impl Broker {
             window_events,
             socket_path: path.into(),
             tasks_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unknown_records: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            protocol_errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
     pub fn socket_path(&self) -> &Path {
@@ -263,7 +282,10 @@ impl Broker {
         };
         let (tx, rx) = FrameQueue::pair(8);
         let subscriber_id = subscriber_id.into();
-        {
+        // PR#6 遗留②:插入订阅者与读取窗口尺寸必须在同一个写锁区间内完成,
+        // 否则 close() 可能落在两次查表之间,导致 stream.start 已发出却回
+        // NotFound。这里不再做第二次查表(insert+lookup 单飞)。
+        let (width, height) = {
             let mut all = self.windows.lock().await;
             let state = all.get_mut(&id).ok_or(DisplayError::NotFound(id))?;
             state.subscribers.insert(
@@ -273,16 +295,15 @@ impl Broker {
                     codec: codec.clone(),
                 },
             );
-        }
+            (state.window.width, state.window.height)
+        };
         self.send_json(
             serde_json::json!({"type":"stream.start","id":id,"fps":fps.clamp(1,60),"codec":codec}),
         )
         .await;
-        let all = self.windows.lock().await;
-        let state = all.get(&id).ok_or(DisplayError::NotFound(id))?;
         Ok((
-            state.window.width,
-            state.window.height,
+            width,
+            height,
             fps.clamp(1, 60),
             FrameSubscription {
                 id: subscriber_id,
@@ -297,6 +318,24 @@ impl Broker {
         }
         self.send_json(serde_json::json!({"type":"stream.stop","id":id}))
             .await;
+    }
+    /// 连接断开时清掉该会话名下的全部窗口订阅(`{sessionId}-{window}`)。
+    pub async fn detach_prefix(&self, prefix: &str) {
+        let mut all = self.windows.lock().await;
+        for state in all.values_mut() {
+            state.subscribers.retain(|id, _| !id.starts_with(prefix));
+        }
+    }
+    /// mixcomp 控制通道健康计数(未知记录类型/校验错误)。
+    pub fn comp_stats(&self) -> CompStats {
+        CompStats {
+            unknown_records: self
+                .unknown_records
+                .load(std::sync::atomic::Ordering::Relaxed),
+            protocol_errors: self
+                .protocol_errors
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
     }
     pub async fn broadcast_frame(&self, id: u32, frame: Vec<u8>, codec: &str) {
         let subscribers = self
@@ -391,47 +430,79 @@ impl Broker {
                 }
             }
         });
-        loop {
+        // 读循环的任何退出路径都必须走统一的收尾(comp 置空),否则
+        // 下一次 attach/online() 会看到陈旧的控制通道。
+        let outcome = loop {
             let mut header = [0u8; 5];
-            read.read_exact(&mut header).await?;
+            match read.read_exact(&mut header).await {
+                Ok(_) => {}
+                // mixcomp 正常退出:EOF 不是错误。
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
+                Err(error) => break Err(error.into()),
+            }
             let len = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
-            if len == 0 || len > 16 * 1024 * 1024 {
-                break;
+            if len == 0 || len > MAX_COMP_FRAME {
+                // framing 已损坏,无法重新同步:显式错误路径(计数 + 断开)。
+                self.protocol_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                break Err(DisplayError::Protocol(format!(
+                    "非法帧长度 {len}(记录类型 0x{kind:02x})",
+                    kind = header[4]
+                )));
             }
             let mut payload = vec![0u8; len];
-            read.read_exact(&mut payload).await?;
+            if let Err(error) = read.read_exact(&mut payload).await {
+                break Err(error.into());
+            }
             match header[4] {
                 0x01 => self.handle_comp(&payload).await,
                 COMP_REC_VIDEO => {
-                    if payload.first() == Some(&frames::chan::VIDEO)
-                        && payload.len() >= frames::VIDEO_HEADER_SIZE
-                    {
-                        if let Ok(frame) = frames::unmarshal_video(&payload) {
-                            self.broadcast_frame(frame.window_id, payload, CODEC_JPEG)
-                                .await;
-                        }
-                    }
+                    self.broadcast_video_record(&payload, CODEC_JPEG).await;
                 }
                 COMP_REC_VIDEO_H264 => {
-                    if payload.first() == Some(&frames::chan::VIDEO)
-                        && payload.len() >= frames::VIDEO_HEADER_SIZE
-                    {
-                        if let Ok(frame) = frames::unmarshal_video(&payload) {
-                            self.broadcast_frame(frame.window_id, payload, CODEC_H264)
-                                .await;
-                        }
+                    self.broadcast_video_record(&payload, CODEC_H264).await;
+                }
+                unknown => {
+                    // EmergeShift#8:私有通道按增量演进,未知记录类型忽略并计数,
+                    // 不再断连(新 mixcomp + 旧 mixumd 不再死链)。
+                    let count = self
+                        .unknown_records
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    if count == 1 || count % 100 == 0 {
+                        eprintln!(
+                            "mixcomp 未知记录类型 0x{unknown:02x},已忽略(累计 {count});如有异常请检查 mixcomp/mixum-agentd 版本"
+                        );
                     }
                 }
-                _ => break,
             }
-        }
+        };
         write_task.abort();
         *self.comp.lock().await = None;
-        Ok(())
+        outcome
+    }
+    /// 校验并广播一条视频记录(记录类型 0x02/0x03)。
+    async fn broadcast_video_record(&self, payload: &[u8], codec: &str) {
+        if payload.first() != Some(&frames::chan::VIDEO)
+            || payload.len() < frames::VIDEO_HEADER_SIZE
+        {
+            self.protocol_errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("mixcomp 视频记录校验失败(通道字节/长度),已丢弃");
+            return;
+        }
+        match frames::unmarshal_video(payload) {
+            Ok(frame) => self.broadcast_frame(frame.window_id, payload.to_vec(), codec).await,
+            Err(error) => {
+                self.protocol_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("mixcomp 视频帧头校验失败,已丢弃: {error}");
+            }
+        }
     }
     async fn handle_comp(&self, data: &[u8]) {
-        if let Ok(message) = serde_json::from_slice::<CompMessageWire>(data) {
-            match message.kind.as_str() {
+        match serde_json::from_slice::<CompMessageWire>(data) {
+            Ok(message) => match message.kind.as_str() {
                 "window.open" | "window.update" => {
                     self.open_or_update(Window {
                         id: message.id,
@@ -463,6 +534,11 @@ impl Broker {
                     }
                 }
                 _ => {}
+            },
+            Err(error) => {
+                self.protocol_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                eprintln!("mixcomp 控制记录 JSON 校验失败,已丢弃: {error}");
             }
         }
     }
@@ -566,5 +642,101 @@ mod tests {
         // 回告后广播 jpeg,h264 订阅者也能收到(解码器据此切换)
         broker.broadcast_frame(7, vec![9], CODEC_JPEG).await;
         assert_eq!(h264_sub.3.frames.try_recv().as_deref(), Some(&[9u8][..]));
+    }
+
+    async fn write_comp_frame(stream: &mut UnixStream, kind: u8, payload: &[u8]) {
+        stream
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&[kind]).await.unwrap();
+        stream.write_all(payload).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    /// EmergeShift#8:未知记录类型忽略 + 计数,连接存活且后续消息仍被处理。
+    #[tokio::test]
+    async fn unknown_comp_record_is_ignored_and_counted() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-unknown.sock");
+        let (server_side, mut client) = UnixStream::pair().unwrap();
+        let serving = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.serve_comp(server_side).await })
+        };
+        write_comp_frame(&mut client, 0x7e, b"future-record").await;
+        write_comp_frame(
+            &mut client,
+            0x01,
+            br#"{"type":"window.open","id":9,"appId":"a","title":"A","width":10,"height":20,"focused":true}"#,
+        )
+        .await;
+
+        let mut opened = false;
+        for _ in 0..100 {
+            if !broker.list().await.is_empty() {
+                opened = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(opened, "未知记录类型之后连接应继续处理正常消息");
+        let stats = broker.comp_stats();
+        assert_eq!(stats.unknown_records, 1);
+        assert_eq!(stats.protocol_errors, 0);
+
+        drop(client);
+        let _ = serving.await;
+    }
+
+    /// 校验错误走显式错误路径:framing 非法 → 计数 + 断开。
+    #[tokio::test]
+    async fn invalid_comp_frame_length_is_protocol_error_and_disconnects() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-protocol-err.sock");
+        let (server_side, mut client) = UnixStream::pair().unwrap();
+        let serving = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.serve_comp(server_side).await })
+        };
+        write_comp_frame(&mut client, 0x01, b"").await;
+        let result = serving.await.expect("serve_comp 任务不应 panic");
+        assert!(result.is_err(), "非法帧长度应结束控制通道");
+        assert_eq!(broker.comp_stats().protocol_errors, 1);
+        assert!(!broker.online().await);
+    }
+
+    /// PR#6 遗留②:attach 不再有「插入订阅者 → 二次查表」窗口。
+    #[tokio::test]
+    async fn attach_is_atomic_and_reports_not_found_without_stream_start() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-attach.sock");
+        let (tx, mut rx) = mpsc::channel(8);
+        *broker.comp.lock().await = Some(tx);
+        assert!(matches!(
+            broker.attach(42, "s", 30, CODEC_JPEG).await,
+            Err(DisplayError::NotFound(42))
+        ));
+        assert!(rx.try_recv().is_err(), "窗口不存在时不得发 stream.start");
+
+        broker
+            .open_or_update(Window {
+                id: 7,
+                app_id: "a".into(),
+                title: "A".into(),
+                width: 640,
+                height: 480,
+                focused: true,
+                mode: MODE_FREE.into(),
+                codec: None,
+            })
+            .await;
+        let (width, height, _, subscription) =
+            broker.attach(7, "s", 30, CODEC_JPEG).await.unwrap();
+        assert_eq!((width, height), (640, 480));
+        // close 紧跟在 attach 之后:attach 的返回值已经完整,不再二次查表。
+        broker.close(7).await;
+        assert!(matches!(
+            broker.attach(7, "s2", 30, CODEC_JPEG).await,
+            Err(DisplayError::NotFound(7))
+        ));
+        drop(subscription);
     }
 }
