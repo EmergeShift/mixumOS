@@ -9,6 +9,8 @@ set -euo pipefail
 
 ARCH="${1:?用法: container-image.sh <aarch64|x86_64>}"
 REPO="/out/repo-$ARCH"
+# ALARM 引导源:TUNA 偶发空响应/超时,默认 USTC,可用 MIXUM_ALARM_MIRROR 覆盖。
+ALARM_MIRROR="${MIXUM_ALARM_MIRROR:-https://mirrors.ustc.edu.cn/archlinuxarm}"
 TARGET=/target
 VERSION="${VERSION:?需要 VERSION 环境变量(mixum-base 的 pkgver)}"
 
@@ -46,13 +48,13 @@ LocalFileSigLevel = Optional
 ParallelDownloads = 5
 
 [core]
-Server = http://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/\$arch/\$repo
+Server = ${ALARM_MIRROR}/\$arch/\$repo
 
 [extra]
-Server = http://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/\$arch/\$repo
+Server = ${ALARM_MIRROR}/\$arch/\$repo
 
 [alarm]
-Server = http://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/\$arch/\$repo
+Server = ${ALARM_MIRROR}/\$arch/\$repo
 
 [mixum]
 SigLevel = Never
