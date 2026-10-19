@@ -98,6 +98,30 @@ async fn pump(
     // 会话表:gatewaySession → 回环写入端
     let sessions: Arc<Mutex<HashMap<String, Loopback>>> = Arc::new(Mutex::new(HashMap::new()));
 
+    // 心跳:20s 一次,M3 k8s 注册表按 Lease renewTime 判活。
+    {
+        let heartbeat_tx = up_tx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(20));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let heartbeat = json!({
+                    "v":1,"id":mixum_protocol::envelope::new_id(),
+                    "op":"gateway.heartbeat","payload":{}
+                });
+                if heartbeat_tx
+                    .send(Message::Text(heartbeat.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
     // 下行泵:gateway → 回环(会话开关/业务信封)
     let down = {
         let sessions = Arc::clone(&sessions);

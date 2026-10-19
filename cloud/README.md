@@ -13,6 +13,7 @@ cloud/k8s/          直接可 apply 的清单
   30-operator.yaml     mixum-operator Deployment(Rust,kube-rs)
   40-server.yaml       常驻 mixumos 容器(长会话/设备对接形态)
   50-service.yaml      WSS Service + Ingress(TLS 透传,协议见 docs/protocol.md)
+  60-gateway.yaml      多副本 gateway Deployment/RBAC/headless mesh Service(M3)
 cloud/operator/     Rust operator 源码(kube-rs)
 ```
 

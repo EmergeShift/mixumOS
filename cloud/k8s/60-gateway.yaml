@@ -1,0 +1,144 @@
+# gateway 多副本(M3):共享 Lease 注册表 + mesh 跨副本路由。
+#
+# 前置 Secret(同一 ed25519 种子,令牌才能跨副本互验;identity 还会加载
+# TLS 证书/私钥,因此三件都必须存在,即使 --listen 用 ws):
+#   kubectl -n mixumos create secret generic mixum-gateway-identity \
+#     --from-file=identity.key=/path/to/identity.key \
+#     --from-file=tls-cert.pem=/path/to/tls-cert.pem \
+#     --from-file=tls-key.pem=/path/to/tls-key.pem
+#   kubectl -n mixumos create secret generic mixum-gateway-mesh \
+#     --from-literal=token="$(openssl rand -hex 32)"
+#
+# 说明:本清单在集群内用明文 WS(客户端经 Ingress 终结 TLS);mesh 只监听
+# ClusterIP,依赖网络边界 + 共享 token。对外暴露请给 Service 配 Ingress,
+# 或把 --listen 改成 wss://;此时证书 SAN 需覆盖客户端使用的 Service DNS。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mixum-gateway
+  namespace: mixumos
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mixum-gateway-leases
+  namespace: mixumos
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mixum-gateway-leases
+  namespace: mixumos
+subjects:
+  - kind: ServiceAccount
+    name: mixum-gateway
+    namespace: mixumos
+roleRef:
+  kind: Role
+  name: mixum-gateway-leases
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mixum-gateway
+  namespace: mixumos
+spec:
+  selector:
+    app: mixum-gateway
+  ports:
+    - name: wss
+      port: 7701
+      targetPort: 7701
+---
+# headless:副本之间按 <pod>.<svc> 解析 mesh 地址
+apiVersion: v1
+kind: Service
+metadata:
+  name: mixum-gateway-mesh
+  namespace: mixumos
+spec:
+  clusterIP: None
+  selector:
+    app: mixum-gateway
+  ports:
+    - name: mesh
+      port: 7702
+      targetPort: 7702
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mixum-gateway
+  namespace: mixumos
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mixum-gateway
+  template:
+    metadata:
+      labels:
+        app: mixum-gateway
+    spec:
+      serviceAccountName: mixum-gateway
+      containers:
+        - name: gateway
+          # 镜像:需先把 rust/target/release/mixum-gateway 打进镜像并推送
+          # (e2e 用 tests/integration/gateway-e2e.mjs 的 alpine 挂载方式)。
+          image: ghcr.io/mixumos/mixumos-gateway:0.1.0
+          args:
+            - --listen
+            - ws://0.0.0.0:7701
+            - --data-dir
+            - /var/lib/mixum-gateway
+            - --instance-id
+            - $(POD_NAME)
+            - --registry
+            - k8s
+            - --kube-namespace
+            - mixumos
+            - --mesh-listen
+            - 0.0.0.0:7702
+            - --mesh-token
+            - $(MESH_TOKEN)
+            - --advertise
+            - ws://$(POD_NAME).mixum-gateway-mesh.mixumos.svc:7702
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MESH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mixum-gateway-mesh
+                  key: token
+          ports:
+            - name: wss
+              containerPort: 7701
+            - name: mesh
+              containerPort: 7702
+          readinessProbe:
+            tcpSocket:
+              port: 7701
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: identity
+              mountPath: /var/lib/mixum-gateway
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: identity
+          secret:
+            secretName: mixum-gateway-identity

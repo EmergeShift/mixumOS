@@ -159,11 +159,24 @@ gateway 的节点注册表就是 operator 的对账目标:
   缺省首次 TOFU 落盘 dataDir/gateway-fingerprint)
   + console 节点选择器与配对/设备管理 UI(Settings 内);e2e 扩展
   配对/设备 hello/吊销失效三断言;
-- **M3**(阶段 5 合流):NodeRegistry 换 k8s 后端、多 gateway 副本。
+- **M3a(✅ 2026-10-19 落地)**:注册表抽成 `NodeRegistry`
+  (`register/remove/get/online/renew`)+ `MemoryRegistry` 默认实现。注册表
+  只存元数据,出站 socket 留在 `Gateway::local`;`Gateway::with_options`
+  注入后端、实例名与 mesh 地址。M1/M2 行为不变,gateway-e2e 15 项回归通过。
+- **M3a'(✅ 2026-10-19 落地)**:k8s Lease 后端——每节点一条
+  `coordination.k8s.io/v1` Lease(`holderIdentity`=副本实例,注解存
+  node/owner/ownerAddr/version/since);同名未过期拒绝,过期租约可接管;
+  relay 每 20s `gateway.heartbeat` 续约(60s 租约)。部署清单见
+  `cloud/k8s/60-gateway.yaml`(2 副本 + RBAC + headless mesh Service,
+  副本共享 identity Secret 作为签发根)。
+- **M3b(✅ 2026-10-19 落地)**:副本间私有 WS mesh——`mesh.hello` 共享 token
+  鉴权,`mesh.text/binary/close` 按 `ms-<发起实例>-<序号>` 会话转发;节点只连
+  owner,客户端可连任意副本。`tests/integration/gateway-m3-e2e.mjs` 验证:
+  共享 Lease 注册表、B→A 与 A→B 双向任务/事件流、节点掉线跨副本清理。
 
-测试计划:新增 tests/integration/gateway-e2e.mjs——两容器栈 +
-gateway 进程,断言路由隔离(节点 A 的任务不出现在节点 B 的事件流)、
-断线语义(节点掉线 → 未决请求报错、恢复后重订阅)、帧按节点隔离。
+测试计划:`gateway-e2e.mjs` 单副本 M1/M2 全链(注册/令牌/路由/隔离/帧/
+配对/吊销);`gateway-m3-e2e.mjs` 双副本 + kind Lease(共享注册表、双向
+跨副本路由、掉线清理)。两者均已落地并通过。
 
 ## 10. 开放问题
 
