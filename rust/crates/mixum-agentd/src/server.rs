@@ -584,6 +584,7 @@ impl Session {
             ops::op::DISPLAY_WINDOWS => self.display_windows(&env).await,
             ops::op::DISPLAY_TAKEOVER => self.display_takeover(&env).await,
             ops::op::DISPLAY_INPUT => self.display_input(&env).await,
+            ops::op::DISPLAY_CLIPBOARD => self.display_clipboard(&env).await,
             _ => {
                 self.send_raw(
                     env.error_reply(ErrCode::Unsupported, &format!("未知操作: {}", env.op))
@@ -1434,6 +1435,30 @@ impl Session {
             }
             Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
         }
+    }
+    async fn display_clipboard(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::DisplayView).await {
+            return;
+        }
+        // B compositor 的 socket 由 /run/mixum + mixum-art-0 固定；wl-clipboard
+        // 作为独立客户端由 compositor 正常 brokering，避免在 compositor 里
+        // 解析 Smithay selection source。
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::process::Command::new("wl-paste")
+                .arg("--no-newline")
+                .env("XDG_RUNTIME_DIR", "/run/mixum")
+                .env("WAYLAND_DISPLAY", "mixum-art-0")
+                .output(),
+        )
+        .await;
+        let text = match output {
+            Ok(Ok(output)) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).to_string()
+            }
+            _ => String::new(),
+        };
+        self.reply(env, json!({"text": text})).await;
     }
     async fn require(&mut self, env: &Envelope, cap: Cap) -> bool {
         match self.claims.as_ref() {
