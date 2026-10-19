@@ -247,6 +247,11 @@ bit2 标记补丁。宿主按补丁合成,不能清屏或改变画布尺寸。`q
 jpeg 生效。GPU/dmabuf 零拷贝不在本实现内,等 Apple Container/VM 的
 virtio-gpu/venus 通路成熟后再接。
 
+**多 comp 源(2026-10-19 起)**:mixumd 的 display broker 维护多个 comp
+连接；每个窗口记录 owner，`stream.start/stop`、`display.input` 和视频帧
+按 owner 路由，帧只接受 owner 的连接。mixcomp(A) 与 B compositor 可同时
+运行，窗口 id 需各自避让(B 从 1000 起)。
+
 **私有通道前向兼容(2026-10-19 起)**:mixumd↔mixcomp 记录类型按增量演进,
 接收端必须忽略未知记录类型(计数 + 告警)而不是断开连接;帧长/负载校验
 失败是独立的显式错误路径,可以终止控制通道。broker 暴露
