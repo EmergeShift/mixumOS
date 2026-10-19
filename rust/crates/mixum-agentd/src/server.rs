@@ -232,9 +232,7 @@ impl SessionStore {
             records.remove(id);
             return None;
         }
-        let Some(record) = records.get_mut(id) else {
-            return None;
-        };
+        let record = records.get_mut(id)?;
         record.conn = conn.to_owned();
         record.tx = Some(tx.clone());
         record.last_seen = Instant::now();

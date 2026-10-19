@@ -10,7 +10,11 @@ export XDG_RUNTIME_DIR=/run/mixum
 chmod 700 "$XDG_RUNTIME_DIR"
 
 # 1. mixumd（后台，证书自签、令牌落盘）
-mixumd --config /dev/null &
+GW_ARGS=""
+[ -n "$MIXUM_GATEWAY_URL" ] && GW_ARGS="$GW_ARGS --gateway $MIXUM_GATEWAY_URL"
+[ -n "$MIXUM_GATEWAY_NAME" ] && GW_ARGS="$GW_ARGS --gateway-name $MIXUM_GATEWAY_NAME"
+[ -n "$MIXUM_GATEWAY_TOKEN" ] && GW_ARGS="$GW_ARGS --gateway-token $MIXUM_GATEWAY_TOKEN"
+mixumd --config /dev/null $GW_ARGS &
 MIXUMD_PID=$!
 
 # 等令牌生成
