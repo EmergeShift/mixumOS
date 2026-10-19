@@ -544,7 +544,7 @@ impl Broker {
                         .unknown_records
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
-                    if count == 1 || count % 100 == 0 {
+                    if count == 1 || count.is_multiple_of(100) {
                         eprintln!(
                             "mixcomp 未知记录类型 0x{unknown:02x},已忽略(累计 {count});如有异常请检查 mixcomp/mixum-agentd 版本"
                         );
