@@ -9,7 +9,9 @@
 set -euo pipefail
 
 ARCHS="${ARCHS:-aarch64}"
-PROXY="${MIXUM_PROXY:-http://192.168.5.2:7897}"
+# 代理仅显式提供时启用(MIXUM_PROXY);缺省直连——CN 镜像(TUNA/USTC)直连最优。
+# 旧默认 http://192.168.5.2:7897 是特定开发机地址,换机即全量 502(2026-10-18)
+PROXY="${MIXUM_PROXY:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # git-bash:Windows 形式路径(git -C 与 docker -v 都要);Linux 无 cygpath 原样保留
 ROOT="$(cygpath -m "$ROOT" 2>/dev/null || echo "$ROOT")"
@@ -22,9 +24,11 @@ COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
 
 # 容器内 makepkg 的 git 源:worktree 的 .git 是指向主仓库的 gitfile,
 # 容器里断链;在宿主侧做一份独立裸仓库,随 /out 挂载进容器
-echo "==> 准备裸仓库源(dist/out/src-bare.git)"
-rm -rf "$OUT/src-bare.git"
-git clone --bare --quiet "$ROOT" "$OUT/src-bare.git"
+echo "==> 准备源码 bundle(dist/out/src.bundle)"
+rm -rf "$OUT/src-bare.git" "$OUT/src.bundle"
+# 单文件 bundle 而非裸仓库目录:逐文件 cp 跨 bind mount 曾静默丢对象
+# (1507 缺 598,容器端 makepkg「unable to read tree」;bundle 原子且自包含)
+git bundle create --quiet "$OUT/src.bundle" --all
 
 echo "==> 导出 rust/ 与交叉协议向量(容器内 cargo 构建 mixum-agentd)"
 rm -rf "$OUT/build/rust"
@@ -35,9 +39,20 @@ cp -a "$ROOT/tests/cross-protocol" "$OUT/build/cross-protocol"
 for ARCH in $ARCHS; do
 	echo "==> $ARCH:准备构建容器"
 	ensure_build_container "$ARCH" "$PROXY"
+	# 输入经 docker cp(走 daemon,字节精确):macOS 目录共享(VirtioFS)对
+	# 秒级新文件是最终一致视图——容器曾读到缺对象的源与旧脚本
+	# (1507 对象只到 909,bundle 也中招),见 apple-container.md §8
+	docker exec "mixum-build-$ARCH" rm -rf /build/incoming
+	docker exec "mixum-build-$ARCH" mkdir -p /build/incoming
+	docker cp "$OUT/src.bundle" "mixum-build-$ARCH:/build/incoming/src.bundle"
+	docker cp "$OUT/build/rust" "mixum-build-$ARCH:/build/incoming/rust"
+	docker cp "$OUT/build/cross-protocol" "mixum-build-$ARCH:/build/incoming/cross-protocol"
+	docker cp "$ROOT/dist/pkgs" "mixum-build-$ARCH:/build/incoming/pkgs"
+	docker cp "$ROOT/dist/repo/container-build.sh" \
+		"mixum-build-$ARCH:/build/incoming/container-build.sh"
 	echo "==> $ARCH:两段式构建(自建 wlroots0.18 → 四包)+ repo-add"
 	docker exec -e _commit="$COMMIT" "mixum-build-$ARCH" \
-		bash /build/mixumos/dist/repo/container-build.sh "$ARCH"
+		bash /build/incoming/container-build.sh "$ARCH"
 done
 
 {
