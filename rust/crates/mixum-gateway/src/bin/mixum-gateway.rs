@@ -174,13 +174,13 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
                 .unwrap_or("0")
                 .to_owned();
             if name.is_empty() {
-                let _ = out.send(Outbound::Text(err_text(None, "name 必填"))).await;
+                let _ = out.send(Outbound::Text(err_text(Some(&env), "name 必填"))).await;
                 return Side::Pending;
             }
             match gw.verify(token).await {
                 Ok(claims) if claims.sub.starts_with("node:") => {
                     if let Err(e) = gw.node_connected(&name, &version, out.clone()).await {
-                        let _ = out.send(Outbound::Text(err_text(None, &e))).await;
+                        let _ = out.send(Outbound::Text(err_text(Some(&env), &e))).await;
                         return Side::Pending;
                     }
                     eprintln!("节点已注册: {name} ({version})");
@@ -194,7 +194,7 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
                 }
                 _ => {
                     let _ = out
-                        .send(Outbound::Text(err_text(None, "节点令牌无效")))
+                        .send(Outbound::Text(err_text(Some(&env), "节点令牌无效")))
                         .await;
                     Side::Pending
                 }
@@ -217,12 +217,13 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
                     "payload":{"token":token,"deviceId":device_id,"deviceName":device_name}
                 })
                 .to_string(),
-                Err(e) => err_text(None, &format!("配对失败: {e}")),
+                Err(e) => err_text(Some(&env), &format!("配对失败: {e}")),
             };
             let _ = out.send(Outbound::Text(reply)).await;
             Side::Pending
         }
-        "hello" => {
+        // MAP v1 用 session.hello;过渡期继续接受 M1 的 hello。
+        "hello" | "session.hello" => {
             let claims = match gw.verify(token).await {
                 // 设备令牌(device:*)与用户令牌(user:*)都是客户端;节点
                 // 令牌不得作客户端。
@@ -235,7 +236,7 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
                 }
                 _ => {
                     let _ = out
-                        .send(Outbound::Text(err_text(None, "用户令牌无效")))
+                        .send(Outbound::Text(err_text(Some(&env), "用户令牌无效")))
                         .await;
                     return Side::Pending;
                 }
@@ -243,7 +244,7 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx) -> Side {
             let session = gw.client_connected(&claims.sub, out.clone()).await;
             eprintln!("客户端接入: {} ({})", claims.sub, session);
             let mut hello = Envelope::new(
-                "hello.ok",
+                &format!("{op}.ok"),
                 Some(json!({
                     "sessionId": session,
                     "server": "mixum-gateway/0.1",
