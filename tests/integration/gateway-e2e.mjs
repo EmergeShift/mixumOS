@@ -119,13 +119,14 @@ if (!ta.op?.endsWith(".ok") || !tb.op?.endsWith(".ok")) {
 }
 console.log(`5. 双节点任务提交 ✓ (a:${ta.payload.id} b:${tb.payload.id})`);
 
-// 等 a 的任务完成事件流进来
+// 等 a 的任务完成事件流进来(MAP 后 state 事件 data 是 {state},兼容旧裸字符串)
 let sawA = false, sawARun = false;
+const stateOf = (e) => (typeof e.data === "string" ? e.data : e.data?.state);
 for (let i = 0; i < 60 && !sawA; i++) {
   await new Promise((r) => setTimeout(r, 200));
   for (const e of events) {
-    if (e.taskId === ta.payload.id && e.type === "state" && e.data === "completed") sawA = true;
-    if (e.taskId === ta.payload.id && e.type === "state" && e.data === "running") sawARun = true;
+    if (e.taskId === ta.payload.id && e.type === "state" && stateOf(e) === "completed") sawA = true;
+    if (e.taskId === ta.payload.id && e.type === "state" && stateOf(e) === "running") sawARun = true;
   }
 }
 console.log(`6. a 事件流 ✓ (running: ${sawARun}, completed: ${sawA})`);
