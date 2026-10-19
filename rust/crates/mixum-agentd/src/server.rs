@@ -163,7 +163,11 @@ impl SessionStore {
 
     fn prune(&self, records: &mut HashMap<String, SessionRecord>) {
         let now = Instant::now();
-        records.retain(|_, record| now.duration_since(record.last_seen) < self.ttl);
+        // 已连接的会话不按 TTL 回收;断开的会话从断开时刻起算,
+        // 服务器推送本身不刷新 last_seen(否则长任务会让会话永不过期)。
+        records.retain(|_, record| {
+            record.tx.is_some() || now.duration_since(record.last_seen) < self.ttl
+        });
         if records.len() >= 1024 {
             if let Some(oldest) = records
                 .iter()
@@ -198,9 +202,9 @@ impl SessionStore {
     /// 会话是否存在且未过期(并刷新活跃时间)。
     pub async fn touch(&self, id: &str) -> Option<Claims> {
         let mut records = self.records.lock().await;
-        let expired = records
-            .get(id)
-            .is_some_and(|record| record.last_seen.elapsed() > self.ttl);
+        let expired = records.get(id).is_some_and(|record| {
+            record.tx.is_none() && record.last_seen.elapsed() > self.ttl
+        });
         if expired {
             records.remove(id);
             return None;
@@ -222,10 +226,9 @@ impl SessionStore {
         tx: mpsc::Sender<Message>,
     ) -> Option<Claims> {
         let mut records = self.records.lock().await;
-        if records
-            .get(id)
-            .is_some_and(|record| record.last_seen.elapsed() > self.ttl)
-        {
+        if records.get(id).is_some_and(|record| {
+            record.tx.is_none() && record.last_seen.elapsed() > self.ttl
+        }) {
             records.remove(id);
             return None;
         }
@@ -280,7 +283,6 @@ impl SessionStore {
             record.ring.pop_front();
         }
         record.ring.push_back(envelope.clone());
-        record.last_seen = Instant::now();
         if let Some(tx) = &record.tx {
             let _ = tx.send(Message::Text(envelope.to_json().into())).await;
         }
@@ -316,6 +318,8 @@ impl SessionStore {
         match records.get_mut(id) {
             Some(record) if record.conn == conn => {
                 record.tx = None;
+                // 断开时刻起算 resume TTL;之后的服务端推送不续期。
+                record.last_seen = Instant::now();
                 true
             }
             _ => false,
@@ -1539,4 +1543,52 @@ pub fn generate_tls_config(
             .with_no_client_auth()
             .with_single_cert(vec![cert], key)?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mixum_protocol::token::Claims;
+
+    fn claims() -> Claims {
+        Claims {
+            sub: "session-ttl-test".into(),
+            caps: vec![Cap::TaskObserve],
+            iat: 0,
+            exp: 0,
+            jti: String::new(),
+            task_id: String::new(),
+            windows: vec![],
+        }
+    }
+
+    /// 断开的会话按 TTL 过期;仍连接的会话不因 TTL 被回收。
+    #[tokio::test]
+    async fn session_ttl_applies_only_after_disconnect() {
+        let store = SessionStore::new(4);
+        let (tx, _rx) = mpsc::channel(4);
+        let connected = store.create("conn-1", claims(), tx).await;
+        let (tx2, _rx2) = mpsc::channel(4);
+        let disconnected = store.create("conn-2", claims(), tx2).await;
+        assert!(store.close(&disconnected, "conn-2").await);
+
+        {
+            let mut records = store.records.lock().await;
+            let old = Instant::now() - SESSION_TTL - Duration::from_secs(1);
+            records.get_mut(&connected).expect("connected session").last_seen = old;
+            records
+                .get_mut(&disconnected)
+                .expect("disconnected session")
+                .last_seen = old;
+        }
+
+        assert!(
+            store.touch(&connected).await.is_some(),
+            "仍连接的会话不应被 TTL 回收"
+        );
+        assert!(
+            store.touch(&disconnected).await.is_none(),
+            "断开的会话应按 TTL 过期"
+        );
+    }
 }
