@@ -85,3 +85,13 @@
 - display.attach 插入订阅者与二次查表的低概率竞态(PR#6 遗留);
 - 文档:每个阶段的实现与设计偏差回写设计文档;
 - mixcomp 上游跟踪:wlroots 0.19 变更评估。
+
+## 2026-10-19:agentd 采纳 MAP v1
+
+- `session.hello`(保留 `hello` 别名)、`map.v1`/`mixum.v1` 双子协议;
+- task.event data 统一为对象(`state`/`log`/`step`/`progress`/`error`/`input`);
+- 新实现:`task.reply` 人机输入通道、`session.resume`(≥256 事件重放环)、
+  `mem.*` 与 `builtin` provider、`map1.` 令牌前缀(旧前缀仍接受);
+- 标识符改 ULID(envelope/task/snapshot/memory);
+- 验收:`scripts/map-sdk-e2e.sh`(TS SDK 零适配全环 + legacy 方言);
+  规范见 `Mixum-Agent-Protocol/site/src/content/docs/spec/`。

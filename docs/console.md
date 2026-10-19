@@ -25,8 +25,11 @@
 - **envelope**:文本帧 JSON,`v/id/op/seq/ts/payload`,请求-应答用
   `id`/`replyTo` 关联;`op.err` 负载 `{code, message}` 映射为
   `ProtocolError` 供界面程序化处理;
-- **握手**:子协议 `mixum.v1`(浏览器端必须声明,服务端只认这个);
-  `hello.ok` 的 `heartbeat` 驱动 `sys.ping` 心跳,连续两次失败即断开重连;
+- **握手**:子协议 `map.v1`(服务端同时接受旧 `mixum.v1`);op 为
+  `session.hello`(旧 `hello` 别名仍可用),`hello.ok` 的 `heartbeat`
+  驱动 `sys.ping` 心跳,连续两次失败即断开重连;
+- **事件形状**:`task.event.data` 恒为对象(`state`/`log`/`step`/`progress`/
+  `error`/`input`);控制台对旧节点的裸字符串做兼容读取;
 - **二进制帧**:首字节通道标签,`0x01` video 按 27 字节小端帧头解析
   (协议 §5),`cursorX/Y/flags` 直接交给画布叠加;
 - **重连**:指数退避(1s 起,10s 封顶);重连成功后自动补订阅

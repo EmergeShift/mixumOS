@@ -70,7 +70,6 @@ struct State {
     nodes: HashMap<String, SnapNode>,
     head: String,
     branch: String,
-    seq: u64,
 }
 
 impl Default for MemorySnapshotEngine {
@@ -90,9 +89,9 @@ impl MemorySnapshotEngine {
         }
     }
 
-    fn id(state: &mut State) -> String {
-        state.seq += 1;
-        format!("snap_{}_{}", mixum_protocol::envelope::new_id(), state.seq)
+    /// MAP snapshot-node ids are ULIDs (snapshot-node.schema.json).
+    fn id() -> String {
+        mixum_protocol::envelope::new_id()
     }
 }
 
@@ -129,7 +128,7 @@ impl SnapshotEngine for MemorySnapshotEngine {
             .map(str::to_owned)
             .unwrap_or_else(|| state.branch.clone());
         let node = SnapNode {
-            id: Self::id(&mut state),
+            id: Self::id(),
             parent,
             branch: branch.clone(),
             label: label.filter(|s| !s.is_empty()).map(str::to_owned),

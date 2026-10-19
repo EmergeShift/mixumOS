@@ -9,8 +9,11 @@
   服务器强制 TLS 1.3;明文 WebSocket 仅存在于测试代码。
 - 证书:自签(ECDSA P-256,10 年)。客户端首次连接记录证书
   SHA-256 指纹(TOFU),此后强校验;指纹不匹配即拒绝(疑似中间人)。
-- 认证:握手时携带能力令牌(§3),未握手只允许 `hello`。
-- 子协议:客户端应请求 `mixum.v1`。
+- 认证:握手时携带能力令牌(§3)。未握手只允许 `session.hello`(别名 `hello`)、
+  `session.resume` 与 `sys.ping`;`sys.info` 在握手前只回 `profiles`/`server`,
+  其余操作一律 `unauthorized`。
+- 子协议:客户端应请求 `map.v1`;过渡期服务端同时接受 `mixum.v1`(两者同时
+  出现时回 `map.v1`),应答头回显选中的子协议。
 - 消息大小:控制消息上限 32 MiB,二进制记录上限 16 MiB。
 - 限速:每连接令牌桶,50 条/秒,突发 100;超限回 `session.err/rate_limited`。
 
@@ -28,8 +31,9 @@
 
 ## 3. 能力令牌
 
-格式:`mixum1.<base64url(payload)>.<baseurl64(sig)>`,ed25519 签名,
+格式:`map1.<base64url(payload)>.<baseurl64(sig)>`,ed25519 签名,
 密钥即服务端身份密钥(首次启动生成,落 `dataDir/identity.key`)。
+旧前缀 `mixum1.` 在过渡期继续被验证端接受,但签发端只发 `map1.`。
 
 ```json
 {
@@ -37,7 +41,7 @@
   "caps": ["task.run", "display.view"],
   "iat": 1696400000, "exp": 1696403600,
   "jti": "01A…",                    // 预留给吊销列表;v1 不做单次使用
-  "taskId": "task_…",               // 可选:限定可操作任务
+  "taskId": "01J…",                 // 可选:限定可操作任务(ULID)
   "windows": [7, 9]                 // 可选:限定可观看/接管窗口;缺省全量
 }
 ```
@@ -47,11 +51,14 @@
 | 能力 | 含义 |
 |------|------|
 | task.run | 提交/取消任务 |
-| task.observe | 订阅任务事件、查询任务/快照树/系统信息 |
+| task.observe | 订阅任务事件、查询任务/快照树/系统信息、答复人机输入 |
 | snap.manage | 快照创建/恢复/fork/删除/GC |
 | snap.sync | 作为推送对端收块/落树 |
 | display.view | 列窗口、附流 |
 | display.input | 注入输入、接管 |
+| mem.read | 记忆 providers/search/get/list/export |
+| mem.write | 记忆 put/delete/import |
+| vm.manage | 保留(节点尚未实现 vm.* 时回 `unsupported`) |
 | admin | 全部能力 |
 
 规则:`admin` 覆盖一切;令牌绑定了 `taskId` 时禁止提交新任务;
@@ -63,9 +70,9 @@
 ```json
 {
   "v": 1,                      // 协议主版本
-  "id": "01A…",                // uuidv7
+  "id": "01A…",                // ULID(26 字符 Crockford base32)
   "op": "task.submit",
-  "seq": 42,                   // 连接内单调(可选)
+  "seq": 42,                   // 推送方向每会话单调;回复可省略
   "replyTo": "01A…",           // 回复时指向请求 id
   "ts": 1696400000123,         // unix 毫秒
   "payload": { … }
@@ -79,14 +86,25 @@
 ```
 
 错误码(稳定,客户端程序化处理):`bad_request` `unauthorized` `forbidden`
-`not_found` `conflict` `replay_detected` `busy` `internal` `unsupported`
-`rate_limited` `snapshot_invalid`。
+`not_found` `conflict` `already_exists` `replay_detected` `busy` `internal`
+`unsupported` `rate_limited` `timeout` `unavailable` `snapshot_invalid`。
 
-### 4.1 握手
+### 4.1 握手与会话恢复
 
-`hello` 请求:`{ "token": "mixum1.…", "client": "mixumctl/0.1", "device": "iphone-15" }`
-`hello.ok`:`{ "sessionId", "server": "mixum-agentd/0.2.0", "arch", "kernel",
-"caps": [...], "versions": [1], "heartbeat": 30 }`
+`session.hello` 请求(旧名 `hello` 为过渡别名,应答随之回 `hello.ok`):
+`{ "token": "map1.…", "client": "mixumctl/0.1", "device": "iphone-15",
+"profiles": ["core","display","memory"] }`
+
+`session.hello.ok`:`{ "sessionId", "server": "mixum-agentd/0.1.0", "arch",
+"kernel", "caps": [...], "profiles": ["core","display","memory"],
+"versions": [1], "heartbeat": 30 }`
+
+`session.resume`:`{ "sessionId", "lastSeq" }` →
+`{ "resumed": true, "replayed": N, sessionId, server, arch, kernel, caps,
+profiles, versions, heartbeat }`。服务端每会话保留 ≥256 条推送 envelope
+的环形缓冲,重放 `seq > lastSeq` 的消息后才发新推送;订阅状态与 claims
+随会话恢复,客户端无需重新 hello/`task.events`。未知或过期会话回
+`not_found`,客户端应退回完整握手。
 
 ### 4.2 任务
 
@@ -96,13 +114,33 @@
 | task.list | — | `{ tasks: [Task] }` |
 | task.get | `{ id }` | Task |
 | task.cancel | `{ id }` | `{ id }` |
-| task.events | — | `{ subscribed }`(此后服务端推送 task.event) |
+| task.events | — | `{ subscribed: true }`(此后服务端推送 task.event) |
+| task.reply | `{ taskId, replyId, value }` | `{ delivered: true }`(回答 agent 的 input.request) |
 
 Task:`{ id, instruction, agent, runner, state, preSnapNode?, params?, error?, createdAt, startedAt?, endedAt? }`
+`id` 为 ULID;`params` 是任意 JSON 对象。
 状态机:`queued → running → suspended → completed | failed | canceled`。
 
-task.event 负载:`{ taskId, type: state|log|step|progress|error|window, step?, data?, ts }`。
-`type=window` 携带任务打开的窗口信息,客户端可借此自动附流。
+`task.submit` 的应答在 pre-task 快照完成后才发出(MAP 语义);
+快照策略 `{ pre: always|never, kind: disk|memory|hybrid, onFailure: rollback|keep }`,
+过渡期仍接受旧布尔 `pre`。
+
+task.event 负载:`{ taskId, type, step?, data, ts }`,`data` 恒为对象:
+
+| type | data |
+|------|------|
+| state | `{ state }` |
+| log | `{ line }` |
+| step | `{ name }` |
+| progress | `{ pct, step? }` |
+| error | `{ code?, message }` |
+| window | Window 对象(客户端可据此自动附流) |
+| input | `{ replyId, prompt, choices?, sensitive? }` |
+
+人机输入闭环:agent 经桥发 `input.request` → 客户端收到 `task.event/input`
+→ `task.reply { taskId, replyId, value }` → runner 向 agent 写
+`input.response`。同一 `replyId` 只能答复一次(第二次 `conflict`),
+超过 `timeoutMs`(默认 120 s)未答时回 `input.response { value:"", error:"timeout" }`。
 
 ### 4.3 快照
 
@@ -117,7 +155,7 @@ task.event 负载:`{ taskId, type: state|log|step|progress|error|window, step?, 
 | snap.push | `{ node, remote, token? }` | `{ node, chunksSent, bytesSent, dedupRatio }` |
 
 SnapNode:`{ id, parent?, branch, label?, kind, auto?, createdAt, origin?,
-sizeBytes, chunks, kernel?, arch? }`。树语义见 snapshots.md §4。
+sizeBytes, chunks, kernel?, arch? }`。`id` 为 ULID;树语义见 snapshots.md §4。
 
 ### 4.4 显示
 
@@ -150,7 +188,27 @@ codec? }`。codec = 窗口流的实际编码,由 mixcomp 能力回告(如请求 
 ### 4.5 系统
 
 `sys.ping` → `{ pong: <请求 id> }`;`sys.info` → `{ server, arch, kernel, os,
-hostname, caps, snapshotBackend, criuAvailable, compositor, windows }`。
+hostname, caps, profiles, snapshotBackend, criuAvailable, compositor, windows,
+memoryProviders }`。`profiles` 当前为 `core`/`display`/`memory`。
+
+### 4.6 记忆(MAP-Memory)
+
+节点本地记忆库位于 `dataDir/memory`,只实现 `builtin` provider;
+记录 schema 与 MAP `memory-record.schema.json` 一致(`opaque` 与未知字段
+原样保留,保证导入无损)。
+
+| op | 请求 | 应答 | 能力 |
+|----|------|------|------|
+| mem.providers | — | `{ providers: [{ id, kind, status, capabilities }] }` | mem.read |
+| mem.search | `{ query, kinds?, providers?, scope?, limit? }` | `{ hits: [{ record, score }] }` | mem.read |
+| mem.get | `{ id }` | Record | mem.read |
+| mem.list | `{ provider?, kind?, cursor?, limit? }` | `{ records, nextCursor? }` | mem.read |
+| mem.export | `{ provider?, format: "map-json" }` | `{ records }` | mem.read |
+| mem.put | `{ record }` | Record(服务端补 id/createdAt/updatedAt) | mem.write |
+| mem.delete | `{ id }` | `{ deleted: true }` | mem.write |
+| mem.import | `{ provider, format: "map-json", records }` | `{ imported, skipped }` | mem.write |
+
+搜索 v1 为子串匹配,`score` 归一化到 0–1;排序实现自定义(规范允许)。
 
 ## 5. video 帧格式(小端)
 
@@ -178,6 +236,11 @@ JPEG 路径字节级不变;`codec=h264` 时负载为 H.264 Annex-B,帧头格式
 WebCodecs 解码。mixumd↔mixcomp 私有通道以记录类型区分
 (0x02=JPEG/0x03=H.264),对公有协议不可见;编码器缺失由 mixcomp 经
 控制消息回告,broker 统一切换并随 window 事件广播。
+
+**私有通道前向兼容(2026-10-19 起)**:mixumd↔mixcomp 记录类型按增量演进,
+接收端必须忽略未知记录类型(计数 + 告警)而不是断开连接;帧长/负载校验
+失败是独立的显式错误路径,可以终止控制通道。broker 暴露
+`unknown_records` / `protocol_errors` 两个计数便于观测(EmergeShift#8)。
 
 ## 6. 快照块传输(跨节点)
 

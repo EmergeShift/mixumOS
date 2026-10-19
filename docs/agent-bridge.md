@@ -58,8 +58,11 @@ runner 以子进程拉起,stdin/stdout 行分隔 JSON:
 ### runner → agent
 
 ```json
-{"type":"hello","instruction":"打开 b 站搜 mixumOS","params":{}}
-{"type":"exec.done","code":0,"error":""}
+{"type":"hello","instruction":"打开 b 站搜 mixumOS","params":{},"env":{"arch":"aarch64","kernel":"6.18.35","workspace":"/workspace"}}
+{"type":"exec.done","id":"e1","code":0}
+{"type":"input.response","id":"q1","value":"yes"}
+{"type":"suspend"}
+{"type":"resume"}
 ```
 
 ### agent → runner
@@ -67,17 +70,25 @@ runner 以子进程拉起,stdin/stdout 行分隔 JSON:
 ```json
 {"type":"log","line":"正在打开浏览器"}
 {"type":"progress","pct":30,"step":"browse"}
-{"type":"exec","argv":["bash","-lc","echo hi"]}
+{"type":"exec","id":"e1","argv":["bash","-lc","echo hi"],"timeoutMs":60000}
+{"type":"input.request","id":"q1","prompt":"继续吗?","choices":["yes","no"],"timeoutMs":120000}
 {"type":"done"}
 {"type":"fail","error":"页面超时"}
 ```
 
 - `exec`:agent 请求执行命令,runner 在沙箱执行后回 `exec.done`;
   这是外部 agent 操作容器的唯一合法通道(必须过沙箱,理由同上);
+  `timeoutMs` 缺省 60 s,超时杀进程组并回 `code: null, error: "timeout"`;
+- `input.request`:人机输入通道。runner 以 `task.event {type:"input"}`
+  广播给观察者,客户端 `task.reply` 后 runner 回
+  `input.response {id,value}`;同一 id 只答一次,超时回
+  `input.response {id,value:"",error:"timeout"}`;
 - stdout 里非 JSON 行按日志处理,不会压垮协议;
-- agent 进程退出码 0 且未发 `fail` 即任务成功;
+- agent 进程退出码 0 且未发 `fail` 即任务成功(`fail` 优先于退出码);
 - 生命周期:runner 取消任务 = 关 stdin + SIGTERM 进程组;
-- 环境变量:`MIXUM_INSTRUCTION` `MIXUM_TASK_ID` `MIXUM_AGENT_BRIDGE=1`。
+- 环境变量(规范名):`MAP_INSTRUCTION` `MAP_TASK_ID` `MAP_AGENT_NAME`
+  `MAP_BRIDGE=1`;过渡期同时设置旧名 `MIXUM_INSTRUCTION`
+  `MIXUM_TASK_ID` `MIXUM_AGENT_BRIDGE=1`,适配器可继续读取。
 
 ## 显示与接管的协作
 

@@ -13,6 +13,9 @@ pub struct HelloRequest {
     pub device: String,
     #[serde(default)]
     pub versions: Vec<String>,
+    /// 客户端声明的 profile 提示;仅作参考,服务端按自身实现回告。
+    #[serde(default)]
+    pub profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,18 +26,56 @@ pub struct HelloResponse {
     pub arch: String,
     pub kernel: String,
     pub caps: Vec<Cap>,
+    #[serde(default)]
+    pub profiles: Vec<String>,
     pub versions: Vec<u32>,
     pub heartbeat: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// 任务前置快照策略(MAP tasks.md §Ops)。
+/// MAP 的 `pre` 是 `"always" | "never"`;过渡期同时接受旧客户端的 bool。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotPolicy {
+    #[serde(default, deserialize_with = "deserialize_pre")]
     pub pre: bool,
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
     pub on_failure: String,
+}
+
+impl Default for SnapshotPolicy {
+    fn default() -> Self {
+        // policy 一旦出现,MAP 缺省 pre=always、kind=disk、onFailure=keep。
+        Self {
+            pre: true,
+            kind: "disk".into(),
+            on_failure: "keep".into(),
+        }
+    }
+}
+
+fn deserialize_pre<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Pre {
+        Bool(bool),
+        MapMode(String),
+    }
+    match Pre::deserialize(deserializer)? {
+        Pre::Bool(value) => Ok(value),
+        Pre::MapMode(mode) => match mode.as_str() {
+            "always" => Ok(true),
+            "never" => Ok(false),
+            other => Err(serde::de::Error::custom(format!(
+                "snapshotPolicy.pre 应为 always|never(旧值 bool 亦可),收到 {other}"
+            ))),
+        },
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -45,8 +86,9 @@ pub struct TaskSubmitRequest {
     pub agent: String,
     #[serde(default)]
     pub runner: String,
+    /// MAP: 任意 JSON 对象(agent 私有参数)。
     #[serde(default)]
-    pub params: std::collections::HashMap<String, String>,
+    pub params: serde_json::Map<String, Value>,
     #[serde(default)]
     pub idempotency_key: String,
     #[serde(default)]
@@ -63,8 +105,8 @@ pub struct TaskView {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_snap_node: Option<String>,
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub params: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub params: serde_json::Map<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub created_at: i64,
