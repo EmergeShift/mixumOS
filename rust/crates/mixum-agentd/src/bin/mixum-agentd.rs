@@ -169,7 +169,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let state = ev
                         .data
                         .as_ref()
-                        .and_then(|d| d.as_str())
+                        // MAP state 事件 data 是对象: { "state": "running" }
+                        .and_then(|data| data.get("state"))
+                        .and_then(|state| state.as_str())
                         .unwrap_or_default()
                         .to_string();
                     eprintln!("run-once 状态: {state}");

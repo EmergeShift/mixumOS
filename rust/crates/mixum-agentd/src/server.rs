@@ -2,22 +2,35 @@
 
 use crate::auth::Authorizer;
 use crate::display::{Broker, DisplayError};
+use crate::memory::{MemoryStore, FORMAT_MAP_JSON, PROVIDER_BUILTIN};
 use crate::snapshot::SnapshotEngine;
-use crate::task::{Engine, TaskSpec};
+use crate::task::{Engine, InputReplyError, TaskSpec};
 use crate::wire::{DisplayListResponse, HelloRequest, HelloResponse, TaskSubmitRequest};
 use futures_util::{SinkExt, StreamExt};
-use mixum_protocol::envelope::Envelope;
+use mixum_protocol::envelope::{new_id, Envelope};
 use mixum_protocol::ops::{self, Cap, ErrCode};
+use mixum_protocol::token::Claims;
 use serde_json::{json, Value};
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::{rustls, TlsAcceptor};
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message, WebSocketStream};
 
-/// WS 子协议协商:服务端必须应答 mixum.v1(否则守协议的客户端会拒绝连接)。
+/// session.hello.ok / sys.info / session.resume.ok 的实现标识。
+pub const SERVER_NAME: &str = concat!("mixum-agentd/", env!("CARGO_PKG_VERSION"));
+/// 本节点实现的 MAP profile(core/display/memory;vm/mobility 尚未实现)。
+pub const PROFILES: &[&str] = &["core", "display", "memory"];
+/// session.resume 的每会话环形缓冲容量(MAP session.md 要求 ≥256)。
+pub const SESSION_RING_CAPACITY: usize = 512;
+/// 会话空闲多久后不再允许 resume。
+const SESSION_TTL: Duration = Duration::from_secs(3600);
+
+/// WS 子协议协商:MAP 规范名 `map.v1`;过渡期同时接受旧的 `mixum.v1`。
+/// 两者同时出现时优先 `map.v1`,并在应答头里回显选中的那个。
 // allow:回调签名被 accept_hdr_async 钉死为 tungstenite 的 ErrorResponse
 // (自身就超过 result_large_err 阈值),错误类型不可更换;错误走冷路径,
 // 装箱收益仅在这一个边界上存在,故整体 allow 并在返回类型里装箱。
@@ -31,23 +44,25 @@ where
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
     // 回调错误类型为 tungstenite 约定的 Response<Option<String>>;
-    // 未请求 mixum.v1 的客户端不报错、仅不回子协议头。
-    let cb = |req: &Request,
-              resp: Response|
-     -> Result<
-        Response,
-        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
-    > {
-        let requested = req
+    // 未请求任何已知子协议的客户端不报错、仅不回子协议头。
+    let cb = |req: &Request, resp: Response| -> Result<Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse> {
+        let offered: Vec<String> = req
             .headers()
             .get("sec-websocket-protocol")
             .and_then(|v| v.to_str().ok())
-            .map(|p| p.split(',').any(|s| s.trim() == "mixum.v1"))
-            .unwrap_or(false);
+            .map(|header| header.split(',').map(|s| s.trim().to_owned()).collect())
+            .unwrap_or_default();
+        let selected = if offered.iter().any(|p| p == "map.v1") {
+            Some("map.v1")
+        } else if offered.iter().any(|p| p == "mixum.v1") {
+            Some("mixum.v1")
+        } else {
+            None
+        };
         let (mut parts, body) = resp.into_parts();
-        if requested {
-            if let Ok(v) = "mixum.v1".parse() {
-                parts.headers.insert("Sec-WebSocket-Protocol", v);
+        if let Some(protocol) = selected {
+            if let Ok(value) = protocol.parse() {
+                parts.headers.insert("Sec-WebSocket-Protocol", value);
             }
         }
         Ok(Response::from_parts(parts, body))
@@ -116,12 +131,212 @@ impl Default for Config {
     }
 }
 
+struct SessionRecord {
+    /// 推送方向 envelope 的会话内单调序号(session.resume 的 lastSeq)。
+    seq: i64,
+    ring: VecDeque<Envelope>,
+    tx: Option<mpsc::Sender<Message>>,
+    claims: Option<Claims>,
+    task_events: bool,
+    display_windows: bool,
+    /// 当前绑定该会话的连接 id:旧连接关闭时不得清掉新连接的 tx。
+    conn: String,
+    last_seen: Instant,
+}
+
+/// 跨连接会话状态:重放环、订阅标志与握手 claims 都在这里,
+/// 因而 `session.resume` 无需重新 hello / 重新订阅即可继续收推送。
+pub struct SessionStore {
+    records: Mutex<HashMap<String, SessionRecord>>,
+    capacity: usize,
+    ttl: Duration,
+}
+
+impl SessionStore {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            records: Mutex::new(HashMap::new()),
+            capacity,
+            ttl: SESSION_TTL,
+        }
+    }
+
+    fn prune(&self, records: &mut HashMap<String, SessionRecord>) {
+        let now = Instant::now();
+        // 已连接的会话不按 TTL 回收;断开的会话从断开时刻起算,
+        // 服务器推送本身不刷新 last_seen(否则长任务会让会话永不过期)。
+        records.retain(|_, record| {
+            record.tx.is_some() || now.duration_since(record.last_seen) < self.ttl
+        });
+        if records.len() >= 1024 {
+            if let Some(oldest) = records
+                .iter()
+                .min_by_key(|(_, record)| record.last_seen)
+                .map(|(id, _)| id.clone())
+            {
+                records.remove(&oldest);
+            }
+        }
+    }
+
+    pub async fn create(&self, conn: &str, claims: Claims, tx: mpsc::Sender<Message>) -> String {
+        let id = new_id();
+        let mut records = self.records.lock().await;
+        self.prune(&mut records);
+        records.insert(
+            id.clone(),
+            SessionRecord {
+                seq: 0,
+                ring: VecDeque::with_capacity(self.capacity),
+                tx: Some(tx),
+                claims: Some(claims),
+                task_events: false,
+                display_windows: false,
+                conn: conn.to_owned(),
+                last_seen: Instant::now(),
+            },
+        );
+        id
+    }
+
+    /// 会话是否存在且未过期(并刷新活跃时间)。
+    pub async fn touch(&self, id: &str) -> Option<Claims> {
+        let mut records = self.records.lock().await;
+        let expired = records.get(id).is_some_and(|record| {
+            record.tx.is_none() && record.last_seen.elapsed() > self.ttl
+        });
+        if expired {
+            records.remove(id);
+            return None;
+        }
+        let record = records.get_mut(id)?;
+        record.last_seen = Instant::now();
+        record.claims.clone()
+    }
+
+    /// 绑定新连接并重放 `seq > last_seq` 的推送 envelope。
+    /// 依次发送 `session.resume.ok` 与重放帧;全程持有会话锁,
+    /// 因此新推送不会插到重放之前(顺序保证见 session.md §Resume)。
+    pub async fn resume(
+        &self,
+        id: &str,
+        conn: &str,
+        last_seq: i64,
+        request: &Envelope,
+        tx: mpsc::Sender<Message>,
+    ) -> Option<Claims> {
+        let mut records = self.records.lock().await;
+        if records.get(id).is_some_and(|record| {
+            record.tx.is_none() && record.last_seen.elapsed() > self.ttl
+        }) {
+            records.remove(id);
+            return None;
+        }
+        let Some(record) = records.get_mut(id) else {
+            return None;
+        };
+        record.conn = conn.to_owned();
+        record.tx = Some(tx.clone());
+        record.last_seen = Instant::now();
+        let claims = record.claims.clone();
+        let replay: Vec<Envelope> = record
+            .ring
+            .iter()
+            .filter(|envelope| envelope.seq > last_seq)
+            .cloned()
+            .collect();
+        let replayed = replay.len();
+        let response = json!({
+            "resumed": true,
+            "replayed": replayed,
+            // MAP 只规定 resumed/replayed;以下为附加字段,便于客户端恢复协商状态。
+            "sessionId": id,
+            "server": SERVER_NAME,
+            "arch": std::env::consts::ARCH,
+            "kernel": kernel_name(),
+            "caps": claims.as_ref().map(|claims| &claims.caps),
+            "profiles": PROFILES,
+            "versions": [1],
+            "heartbeat": 30,
+        });
+        let _ = tx
+            .send(Message::Text(request.reply(Some(response)).to_json().into()))
+            .await;
+        for envelope in replay {
+            let _ = tx
+                .send(Message::Text(envelope.to_json().into()))
+                .await;
+        }
+        claims
+    }
+
+    /// 推送一条控制消息:分配 seq、入环、发给当前连接。
+    /// 返回 false 表示会话已不存在(订阅泵可据此退出)。
+    pub async fn push(&self, id: &str, mut envelope: Envelope) -> bool {
+        let mut records = self.records.lock().await;
+        let Some(record) = records.get_mut(id) else {
+            return false;
+        };
+        record.seq += 1;
+        envelope.seq = record.seq;
+        if record.ring.len() >= self.capacity {
+            record.ring.pop_front();
+        }
+        record.ring.push_back(envelope.clone());
+        if let Some(tx) = &record.tx {
+            let _ = tx.send(Message::Text(envelope.to_json().into())).await;
+        }
+        true
+    }
+
+    /// 标记 task.events 已订阅;返回 true 表示本次是首次(需要启动订阅泵)。
+    pub async fn subscribe_task_events(&self, id: &str) -> bool {
+        let mut records = self.records.lock().await;
+        match records.get_mut(id) {
+            Some(record) if !record.task_events => {
+                record.task_events = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub async fn subscribe_display_windows(&self, id: &str) -> bool {
+        let mut records = self.records.lock().await;
+        match records.get_mut(id) {
+            Some(record) if !record.display_windows => {
+                record.display_windows = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 连接断开:仅当它仍是当前连接时解绑(保留环供 resume)。
+    pub async fn close(&self, id: &str, conn: &str) -> bool {
+        let mut records = self.records.lock().await;
+        match records.get_mut(id) {
+            Some(record) if record.conn == conn => {
+                record.tx = None;
+                // 断开时刻起算 resume TTL;之后的服务端推送不续期。
+                record.last_seen = Instant::now();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 pub struct Server {
     pub config: Config,
     authorizer: Authorizer,
     tasks: Arc<Engine>,
     broker: Broker,
     snapshots: Arc<dyn SnapshotEngine>,
+    /// MAP-Memory 节点本地存储(dataDir/memory)。
+    memory: Arc<MemoryStore>,
+    /// 跨连接会话(session.resume 重放环)。
+    sessions: Arc<SessionStore>,
     /// 真实快照引擎就绪时提供跨节点同步;内存桩下为 None。
     #[cfg(feature = "real-snapshot")]
     pub sync: Option<Arc<crate::sync::SyncBackend>>,
@@ -135,12 +350,17 @@ impl Server {
         broker: Broker,
         snapshots: Arc<dyn SnapshotEngine>,
     ) -> Arc<Self> {
+        let memory = Arc::new(MemoryStore::open(
+            std::path::Path::new(&config.data_dir).join("memory"),
+        ));
         Arc::new(Self {
             config,
             authorizer,
             tasks,
             broker,
             snapshots,
+            memory,
+            sessions: Arc::new(SessionStore::new(SESSION_RING_CAPACITY)),
             #[cfg(feature = "real-snapshot")]
             sync: None,
         })
@@ -211,7 +431,9 @@ impl Server {
             tx: out_tx,
             claims: None,
             limiter: RateLimiter::new(50.0, 100.0),
-            id: mixum_protocol::envelope::new_id(),
+            id: String::new(),
+            conn_id: new_id(),
+            bound: false,
             forwarders: Vec::new(),
             #[cfg(feature = "real-snapshot")]
             sync_stage: None,
@@ -243,6 +465,20 @@ impl Server {
                 _ => {}
             }
         }
+        if session.bound
+            && session
+                .server
+                .sessions
+                .close(&session.id, &session.conn_id)
+                .await
+        {
+            // 当前连接断开:清掉它挂在该会话名下的窗口订阅(帧不重放)。
+            session
+                .server
+                .broker
+                .detach_prefix(&format!("{}-", session.id))
+                .await;
+        }
         writer.abort();
         // 帧转发任务持有会话出站通道,断连后必须终止,否则永久泄漏。
         for forwarder in session.forwarders.drain(..) {
@@ -255,9 +491,13 @@ impl Server {
 pub struct Session {
     server: Arc<Server>,
     tx: mpsc::Sender<Message>,
-    claims: Option<mixum_protocol::token::Claims>,
+    claims: Option<Claims>,
     limiter: RateLimiter,
+    /// MAP 会话 id(session.hello 分配,session.resume 复用)。
     id: String,
+    /// 本连接的内部 id;用于避免旧连接清理新连接的会话状态。
+    conn_id: String,
+    bound: bool,
     /// display.attach 的帧转发任务:会话结束时统一 abort(队列关闭是常规路径)。
     forwarders: Vec<tokio::task::JoinHandle<()>>,
     /// 远端导入暂存:一次 import 对账到 commit 之间有效(协议 §6)。
@@ -290,16 +530,31 @@ impl Session {
                 return;
             }
         };
-        if self.claims.is_none() && env.op != ops::op::HELLO {
-            self.send_raw(
-                env.error_reply(ErrCode::Unauthorized, "请先 hello")
-                    .to_json(),
-            )
-            .await;
-            return;
+        if self.claims.is_none() {
+            // 握手前允许:hello/session.resume 与 sys.ping;sys.info 仅回
+            // profiles/server 供客户端渲染连接错误;其余一律 unauthorized。
+            match env.op.as_str() {
+                ops::op::SESSION_HELLO
+                | ops::op::HELLO
+                | ops::op::SESSION_RESUME
+                | ops::op::SYS_PING => {}
+                ops::op::SYS_INFO => {
+                    self.sys_info(&env).await;
+                    return;
+                }
+                _ => {
+                    self.send_raw(
+                        env.error_reply(ErrCode::Unauthorized, "请先 session.hello")
+                            .to_json(),
+                    )
+                    .await;
+                    return;
+                }
+            }
         }
         match env.op.as_str() {
-            ops::op::HELLO => self.hello(&env).await,
+            ops::op::SESSION_HELLO | ops::op::HELLO => self.hello(&env).await,
+            ops::op::SESSION_RESUME => self.resume_session(&env).await,
             ops::op::SYS_PING => self.reply(&env, json!({"pong": env.id})).await,
             ops::op::SYS_INFO => self.sys_info(&env).await,
             ops::op::TASK_SUBMIT => self.task_submit(&env).await,
@@ -307,6 +562,15 @@ impl Session {
             ops::op::TASK_GET => self.task_get(&env).await,
             ops::op::TASK_CANCEL => self.task_cancel(&env).await,
             ops::op::TASK_EVENTS => self.task_events(&env).await,
+            ops::op::TASK_REPLY => self.task_reply(&env).await,
+            ops::op::MEM_PROVIDERS => self.mem_providers(&env).await,
+            ops::op::MEM_SEARCH => self.mem_search(&env).await,
+            ops::op::MEM_GET => self.mem_get(&env).await,
+            ops::op::MEM_PUT => self.mem_put(&env).await,
+            ops::op::MEM_DELETE => self.mem_delete(&env).await,
+            ops::op::MEM_LIST => self.mem_list(&env).await,
+            ops::op::MEM_IMPORT => self.mem_import(&env).await,
+            ops::op::MEM_EXPORT => self.mem_export(&env).await,
             ops::op::SNAP_CREATE => self.snap_create(&env).await,
             ops::op::SNAP_TREE => self.snap_tree(&env).await,
             ops::op::SNAP_RESTORE => self.snap_restore(&env).await,
@@ -373,13 +637,20 @@ impl Session {
         };
         match self.server.authorizer.verify(&request.token) {
             Ok(claims) => {
+                self.id = self
+                    .server
+                    .sessions
+                    .create(&self.conn_id, claims.clone(), self.tx.clone())
+                    .await;
+                self.bound = true;
                 self.claims = Some(claims.clone());
                 let response = HelloResponse {
                     session_id: self.id.clone(),
-                    server: "mixumd/0.1.0".into(),
+                    server: SERVER_NAME.into(),
                     arch: std::env::consts::ARCH.into(),
                     kernel: kernel_name(),
                     caps: claims.caps,
+                    profiles: PROFILES.iter().map(|p| (*p).to_owned()).collect(),
                     versions: vec![1],
                     heartbeat: 30,
                 };
@@ -395,12 +666,61 @@ impl Session {
             }
         }
     }
+    async fn resume_session(&mut self, env: &Envelope) {
+        let payload = payload_value(env);
+        let session_id = payload
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let last_seq = payload.get("lastSeq").and_then(Value::as_i64).unwrap_or(0);
+        if session_id.is_empty() {
+            self.err(env, ErrCode::BadRequest, "sessionId 不能为空")
+                .await;
+            return;
+        }
+        if self.server.sessions.touch(&session_id).await.is_none() {
+            self.err(
+                env,
+                ErrCode::NotFound,
+                "会话不存在或已过期,请重新 session.hello",
+            )
+            .await;
+            return;
+        }
+        match self
+            .server
+            .sessions
+            .resume(&session_id, &self.conn_id, last_seq, env, self.tx.clone())
+            .await
+        {
+            Some(claims) => {
+                self.claims = Some(claims);
+                self.id = session_id;
+                self.bound = true;
+            }
+            None => {
+                self.err(
+                    env,
+                    ErrCode::NotFound,
+                    "会话不存在或已过期,请重新 session.hello",
+                )
+                .await
+            }
+        }
+    }
     async fn sys_info(&mut self, env: &Envelope) {
+        if self.claims.is_none() {
+            // 握手前只回 profiles/server(session.md §System ops)。
+            self.reply(env, json!({"server": SERVER_NAME, "profiles": PROFILES}))
+                .await;
+            return;
+        }
         if !self.require(env, Cap::TaskObserve).await {
             return;
         }
         let windows = self.server.broker.list().await.len();
-        self.reply(env, json!({"server":"mixumd/0.1.0","arch":std::env::consts::ARCH,"kernel":kernel_name(),"os":"Arch Linux","hostname":self.server.config.hostname,"caps":self.claims.as_ref().map(|c| &c.caps),"snapshotBackend":self.server.snapshots.backend_name(),"criuAvailable":self.server.snapshots.criu_available(),"compositor":self.server.broker.online().await,"windows":windows})).await;
+        self.reply(env, json!({"server":SERVER_NAME,"arch":std::env::consts::ARCH,"kernel":kernel_name(),"os":"Arch Linux","hostname":self.server.config.hostname,"caps":self.claims.as_ref().map(|c| &c.caps),"profiles":PROFILES,"snapshotBackend":self.server.snapshots.backend_name(),"criuAvailable":self.server.snapshots.criu_available(),"compositor":self.server.broker.online().await,"windows":windows,"memoryProviders":["builtin"]})).await;
     }
     async fn task_submit(&mut self, env: &Envelope) {
         if !self.require(env, Cap::TaskRun).await {
@@ -513,27 +833,239 @@ impl Session {
         if !self.require(env, Cap::TaskObserve).await {
             return;
         }
+        // 订阅属于会话而非连接:resume 后无需重新订阅。
+        let first_subscription = self.server.sessions.subscribe_task_events(&self.id).await;
+        self.reply(env, json!({"subscribed": true})).await;
+        if !first_subscription {
+            return;
+        }
         let mut events = self.server.tasks.subscribe();
-        self.reply(env, json!({"subscribed":self.id})).await;
-        let tx = self.tx.clone();
+        let sessions = self.server.sessions.clone();
+        let session_id = self.id.clone();
         let task_scope = self
             .claims
             .as_ref()
             .map(|claims| claims.task_id.clone())
             .unwrap_or_default();
         tokio::spawn(async move {
-            while let Ok(event) = events.recv().await {
-                if !task_scope.is_empty() && event.task_id != task_scope {
-                    continue;
-                }
-                if let Ok(message) = serde_json::to_string(&Envelope::new(
-                    ops::op::TASK_EVENT,
-                    Some(serde_json::to_value(event).unwrap()),
-                )) {
-                    let _ = tx.send(Message::Text(message.into())).await;
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        if !task_scope.is_empty() && event.task_id != task_scope {
+                            continue;
+                        }
+                        let envelope = Envelope::new(
+                            ops::op::TASK_EVENT,
+                            Some(serde_json::to_value(event).unwrap_or(Value::Null)),
+                        );
+                        // 会话被回收后订阅泵退出。
+                        if !sessions.push(&session_id, envelope).await {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("任务事件积压,丢弃 {skipped} 条");
+                    }
+                    Err(_) => break,
                 }
             }
         });
+    }
+    async fn task_reply(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::TaskObserve).await {
+            return;
+        }
+        let payload = payload_value(env);
+        let task_id = payload
+            .get("taskId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let reply_id = payload
+            .get("replyId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let value = payload
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if task_id.is_empty() || reply_id.is_empty() {
+            self.err(env, ErrCode::BadRequest, "taskId/replyId 不能为空")
+                .await;
+            return;
+        }
+        let Some(value) = value else {
+            self.err(env, ErrCode::BadRequest, "value 必须是字符串")
+                .await;
+            return;
+        };
+        if self
+            .claims
+            .as_ref()
+            .is_some_and(|claims| !claims.task_id.is_empty() && claims.task_id != task_id)
+        {
+            self.err(env, ErrCode::Forbidden, "令牌绑定了其他任务")
+                .await;
+            return;
+        }
+        if self.server.tasks.get(&task_id).await.is_none() {
+            self.err(env, ErrCode::NotFound, "任务不存在").await;
+            return;
+        }
+        match self
+            .server
+            .tasks
+            .reply_input(&task_id, &reply_id, value)
+            .await
+        {
+            Ok(()) => self.reply(env, json!({"delivered": true})).await,
+            Err(InputReplyError::NotFound) => {
+                self.err(env, ErrCode::NotFound, "输入请求不存在或已过期")
+                    .await
+            }
+            Err(InputReplyError::Conflict) => {
+                self.err(env, ErrCode::Conflict, "该输入请求已答复")
+                    .await
+            }
+        }
+    }
+    // ---------- MAP-Memory(profile: MAP-Memory) ----------
+    async fn mem_providers(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemRead).await {
+            return;
+        }
+        self.reply(env, self.server.memory.providers()).await;
+    }
+    async fn mem_search(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemRead).await {
+            return;
+        }
+        let payload = payload_value(env);
+        let query = payload
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let kinds = string_list(payload.get("kinds"));
+        let providers = string_list(payload.get("providers"));
+        let limit = payload
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize);
+        let hits = self.server.memory.search(
+            query,
+            kinds.as_deref(),
+            providers.as_deref(),
+            payload.get("scope"),
+            limit,
+        );
+        self.reply(env, hits).await;
+    }
+    async fn mem_get(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemRead).await {
+            return;
+        }
+        let id = payload_value(env)
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if id.is_empty() {
+            self.err(env, ErrCode::BadRequest, "id 不能为空").await;
+            return;
+        }
+        match self.server.memory.get(&id) {
+            Ok(record) => self.reply(env, record).await,
+            Err(error) => self.err(env, error.code(), &error.to_string()).await,
+        }
+    }
+    async fn mem_put(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemWrite).await {
+            return;
+        }
+        let Some(record) = payload_value(env).get("record").cloned() else {
+            self.err(env, ErrCode::BadRequest, "缺少 record").await;
+            return;
+        };
+        match self.server.memory.put(record) {
+            Ok(saved) => self.reply(env, saved).await,
+            Err(error) => self.err(env, error.code(), &error.to_string()).await,
+        }
+    }
+    async fn mem_delete(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemWrite).await {
+            return;
+        }
+        let id = payload_value(env)
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if id.is_empty() {
+            self.err(env, ErrCode::BadRequest, "id 不能为空").await;
+            return;
+        }
+        match self.server.memory.delete(&id) {
+            Ok(()) => self.reply(env, json!({"deleted": true})).await,
+            Err(error) => self.err(env, error.code(), &error.to_string()).await,
+        }
+    }
+    async fn mem_list(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemRead).await {
+            return;
+        }
+        let payload = payload_value(env);
+        let provider = payload.get("provider").and_then(Value::as_str);
+        let kind = payload.get("kind").and_then(Value::as_str);
+        let cursor = payload.get("cursor").and_then(Value::as_str);
+        let limit = payload
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize);
+        self.reply(
+            env,
+            self.server.memory.list(provider, kind, cursor, limit),
+        )
+        .await;
+    }
+    async fn mem_import(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemWrite).await {
+            return;
+        }
+        let payload = payload_value(env);
+        let provider = payload
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or(PROVIDER_BUILTIN)
+            .to_owned();
+        let format = payload
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or(FORMAT_MAP_JSON);
+        let records = payload
+            .get("records")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        match self.server.memory.import(&provider, format, records) {
+            Ok(result) => self.reply(env, result).await,
+            Err(error) => self.err(env, error.code(), &error.to_string()).await,
+        }
+    }
+    async fn mem_export(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::MemRead).await {
+            return;
+        }
+        let payload = payload_value(env);
+        let provider = payload.get("provider").and_then(Value::as_str);
+        let format = payload
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or(FORMAT_MAP_JSON);
+        match self.server.memory.export(provider, format) {
+            Ok(result) => self.reply(env, result).await,
+            Err(error) => self.err(env, error.code(), &error.to_string()).await,
+        }
     }
     async fn snap_create(&mut self, env: &Envelope) {
         if !self.require(env, Cap::SnapManage).await {
@@ -817,16 +1349,35 @@ impl Session {
         if !self.require(env, Cap::DisplayView).await {
             return;
         }
-        self.reply(env, json!({"subscribed":self.id})).await;
+        let first_subscription = self
+            .server
+            .sessions
+            .subscribe_display_windows(&self.id)
+            .await;
+        self.reply(env, json!({"subscribed": true})).await;
+        if !first_subscription {
+            return;
+        }
         let mut windows = self.server.broker.subscribe_windows();
-        let tx = self.tx.clone();
+        let sessions = self.server.sessions.clone();
+        let session_id = self.id.clone();
         tokio::spawn(async move {
-            while let Ok(window) = windows.recv().await {
-                let envelope = Envelope::new(
-                    ops::op::DISPLAY_WINDOWS,
-                    Some(serde_json::to_value(window).unwrap_or(Value::Null)),
-                );
-                let _ = tx.send(Message::Text(envelope.to_json().into())).await;
+            loop {
+                match windows.recv().await {
+                    Ok(window) => {
+                        let envelope = Envelope::new(
+                            ops::op::DISPLAY_WINDOWS,
+                            Some(serde_json::to_value(window).unwrap_or(Value::Null)),
+                        );
+                        if !sessions.push(&session_id, envelope).await {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("窗口事件积压,丢弃 {skipped} 条");
+                    }
+                    Err(_) => break,
+                }
             }
         });
     }
@@ -922,6 +1473,15 @@ fn payload<T: serde::de::DeserializeOwned>(env: &Envelope) -> Result<T, String> 
 fn payload_value(env: &Envelope) -> Value {
     env.payload.clone().unwrap_or_else(|| json!({}))
 }
+/// 可选字符串数组字段(mem.search 的 kinds/providers)。
+fn string_list(value: Option<&Value>) -> Option<Vec<String>> {
+    value.and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_owned))
+            .collect()
+    })
+}
 fn error_envelope(request: Option<&Envelope>, code: ErrCode, message: &str) -> String {
     request
         .map(|e| e.error_reply(code, message).to_json())
@@ -983,4 +1543,52 @@ pub fn generate_tls_config(
             .with_no_client_auth()
             .with_single_cert(vec![cert], key)?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mixum_protocol::token::Claims;
+
+    fn claims() -> Claims {
+        Claims {
+            sub: "session-ttl-test".into(),
+            caps: vec![Cap::TaskObserve],
+            iat: 0,
+            exp: 0,
+            jti: String::new(),
+            task_id: String::new(),
+            windows: vec![],
+        }
+    }
+
+    /// 断开的会话按 TTL 过期;仍连接的会话不因 TTL 被回收。
+    #[tokio::test]
+    async fn session_ttl_applies_only_after_disconnect() {
+        let store = SessionStore::new(4);
+        let (tx, _rx) = mpsc::channel(4);
+        let connected = store.create("conn-1", claims(), tx).await;
+        let (tx2, _rx2) = mpsc::channel(4);
+        let disconnected = store.create("conn-2", claims(), tx2).await;
+        assert!(store.close(&disconnected, "conn-2").await);
+
+        {
+            let mut records = store.records.lock().await;
+            let old = Instant::now() - SESSION_TTL - Duration::from_secs(1);
+            records.get_mut(&connected).expect("connected session").last_seen = old;
+            records
+                .get_mut(&disconnected)
+                .expect("disconnected session")
+                .last_seen = old;
+        }
+
+        assert!(
+            store.touch(&connected).await.is_some(),
+            "仍连接的会话不应被 TTL 回收"
+        );
+        assert!(
+            store.touch(&disconnected).await.is_none(),
+            "断开的会话应按 TTL 过期"
+        );
+    }
 }
