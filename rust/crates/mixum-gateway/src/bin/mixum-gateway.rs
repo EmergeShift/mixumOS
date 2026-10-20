@@ -1,10 +1,16 @@
-//! mixum-gateway 二进制:M1/M2 单实例入口。`--listen` scheme 决定明文(ws://)
-//! 或 TLS(wss://,自签证书持久化于 --data-dir,TOFU);启动打印 bootstrap
-//! 管理令牌;节点以 gateway.register 出站注册,客户端 hello 握手后按
-//! envelope.node 路由;未认证连接可经 gateway.pair.claim 换设备令牌。
+//! mixum-gateway 二进制。`--listen` scheme 决定明文(ws://)或 TLS(wss://,
+//! 自签证书持久化于 --data-dir,TOFU);启动打印 bootstrap 管理令牌;节点以
+//! gateway.register 出站注册,客户端 hello 握手后按 envelope.node 路由;
+//! 未认证连接可经 gateway.pair.claim 换设备令牌。
+//!
+//! M3 多副本:`--registry k8s` 让注册表落 Lease;`--mesh-listen` + `--mesh-token`
+//! 打开副本间转发,`--advertise` 是本实例对其他副本公布的 mesh 地址。
 
 use futures_util::{SinkExt, StreamExt};
-use mixum_gateway::{Gateway, OutTx, Outbound};
+use mixum_gateway::mesh::MeshHub;
+use mixum_gateway::registry::MemoryRegistry;
+use mixum_gateway::registry_k8s::K8sRegistry;
+use mixum_gateway::{Gateway, MeshRouter, NodeRegistry, OutTx, Outbound};
 use mixum_protocol::envelope::Envelope;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -16,22 +22,114 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 默认只监听回环;对外部署显式改 --listen wss://0.0.0.0:7701。
     let mut listen = "wss://127.0.0.1:7701".to_owned();
     let mut data_dir = "/var/lib/mixum-gateway".to_owned();
+    let mut identity_dir = String::new();
+    let mut instance_id = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "gateway".to_owned());
+    let mut advertise = String::new();
+    let mut mesh_listen = String::new();
+    let mut mesh_token = std::env::var("MIXUM_MESH_TOKEN").unwrap_or_default();
+    let mut registry_kind = "memory".to_owned();
+    let mut kube_namespace = "mixumos".to_owned();
+
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--listen" {
-            listen = args.next().unwrap_or_else(|| listen.clone());
-        } else if arg == "--data-dir" {
-            data_dir = args.next().unwrap_or_else(|| data_dir.clone());
+        let (key, inline) = match arg.split_once('=') {
+            Some((key, value)) => (key.to_owned(), Some(value.to_owned())),
+            None => (arg.clone(), None),
+        };
+        match key.as_str() {
+            "--listen" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    listen = value;
+                }
+            }
+            "--data-dir" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    data_dir = value;
+                }
+            }
+            "--identity-dir" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    identity_dir = value;
+                }
+            }
+            "--instance-id" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    instance_id = value;
+                }
+            }
+            "--advertise" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    advertise = value;
+                }
+            }
+            "--mesh-listen" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    mesh_listen = value;
+                }
+            }
+            "--mesh-token" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    mesh_token = value;
+                }
+            }
+            "--registry" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    registry_kind = value;
+                }
+            }
+            "--kube-namespace" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    kube_namespace = value;
+                }
+            }
+            _ => {}
         }
     }
 
+    // identity (signing/TLS) may live on a read-only Secret mount; runtime
+    // state (revoked/devices/bootstrap jti) stays on a writable data-dir.
+    if identity_dir.is_empty() {
+        identity_dir = data_dir.clone();
+    }
     let hosts = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
-    let identity = mixum_gateway::identity::load_or_create_identity(&data_dir, &hosts)?;
-    let gw = Gateway::new(identity.signer);
+    let identity = mixum_gateway::identity::load_or_create_identity(&identity_dir, &hosts)?;
+    let registry: Arc<dyn NodeRegistry> = if registry_kind == "k8s" {
+        Arc::new(K8sRegistry::new(kube_namespace.clone()).await?)
+    } else {
+        Arc::new(MemoryRegistry::new())
+    };
+    if registry_kind == "k8s" && !mesh_listen.is_empty() {
+        eprintln!(
+            "WARNING: multi-replica auth state (revoked/devices/pairs) is per-pod; \
+             cross-replica revoke/pair is not supported in M3"
+        );
+    }
+    let hub = if !mesh_token.is_empty() && !mesh_listen.is_empty() {
+        Some(MeshHub::new(instance_id.clone(), mesh_token.clone()))
+    } else {
+        None
+    };
+    if advertise.is_empty() && !mesh_listen.is_empty() {
+        advertise = format!("ws://{mesh_listen}");
+    }
+    let gw = Gateway::with_options(
+        identity.signer,
+        registry,
+        instance_id.clone(),
+        advertise.clone(),
+        hub.clone().map(|hub| hub as Arc<dyn MeshRouter>),
+    );
     gw.load_state(std::path::PathBuf::from(&data_dir).join("gateway-state.json"))
         .await;
+    if let Some(hub) = hub.clone() {
+        gw.start_mesh(hub.clone());
+        spawn_mesh_listener(hub, mesh_listen.clone());
+    }
     let bootstrap = gw.bootstrap_token().await?;
     eprintln!("mixum-gateway listening on {listen}");
+    eprintln!("instance: {instance_id}  registry: {registry_kind}  advertise: {advertise}");
     eprintln!("fingerprint: {}", identity.fingerprint);
     eprintln!("bootstrap token: {bootstrap}");
 
@@ -303,4 +401,34 @@ fn err_text(env: Option<&Value>, message: &str) -> String {
     } else {
         json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"error.err","replyTo":id,"payload":{"code":"unauthorized","message":message}}).to_string()
     }
+}
+
+/// mesh 监听器:接受副本间 WSS(明文 WS + 共享 token,v1)。
+fn spawn_mesh_listener(hub: Arc<MeshHub>, listen: String) {
+    tokio::spawn(async move {
+        let listener = match TcpListener::bind(&listen).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!("mesh listen 失败({listen}): {e}");
+                return;
+            }
+        };
+        eprintln!("mesh listening on {listen}");
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                match tokio_tungstenite::accept_async(stream).await {
+                    Ok(ws) => {
+                        if let Err(e) = hub.serve_connection(ws).await {
+                            eprintln!("mesh 连接结束: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("mesh WS 握手失败: {e}"),
+                }
+            });
+        }
+    });
 }
