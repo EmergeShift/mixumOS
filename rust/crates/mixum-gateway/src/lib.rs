@@ -123,6 +123,12 @@ pub struct Gateway {
     started_at: i64,
 }
 
+/// RFC 0003:节点名 1..=64 字符、不含冒号(envelope.node 与注册名同规则)。
+pub fn valid_node_name(name: &str) -> bool {
+    // RFC 0003 限制的是字符数;按字节数会让中文名提前触发上限。
+    !name.is_empty() && name.chars().count() <= 64 && !name.contains(':')
+}
+
 /// 配对限速桶键:优先取 IP,去掉 ephemeral port;非 SocketAddr 输入原样保留(单测)。
 fn pair_rate_key(source: &str) -> String {
     source
@@ -317,6 +323,9 @@ impl Gateway {
         version: &str,
         out: OutTx,
     ) -> Result<(), String> {
+        if !valid_node_name(name) {
+            return Err(format!("节点名非法(1..=64 字符、无冒号): {name}"));
+        }
         let record = NodeRecord {
             name: name.to_owned(),
             version: version.to_owned(),
@@ -464,6 +473,13 @@ impl Gateway {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        if !node_name.is_empty() && !valid_node_name(&node_name) {
+            return vec![Outbound::Text(err_envelope(
+                Some(&env),
+                ErrCode::BadRequest,
+                "node 非法(1..=64 字符、无冒号)",
+            ))];
+        }
         if node_name.is_empty() {
             let online = self.node_offline().await;
             if online.len() == 1 {
@@ -680,6 +696,16 @@ impl Gateway {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        if !valid_node_name(&node_name) {
+            self.mesh_error(
+                session,
+                &env,
+                ErrCode::BadRequest,
+                "node 非法(1..=64 字符、无冒号)",
+            )
+            .await;
+            return;
+        }
         let Some(record) = self.nodes.get(&node_name).await else {
             self.mesh_error(
                 session,
@@ -987,7 +1013,7 @@ impl Gateway {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        if name.is_empty() || name.contains(':') || name.len() > 64 {
+        if !valid_node_name(&name) {
             return fail(ErrCode::BadRequest, "name 非法(非空、无冒号、≤64 字符)");
         }
         let now = mixum_protocol::envelope::now_ms();
@@ -1318,5 +1344,39 @@ mod tests {
             .await
             .is_err());
         drop(crx);
+    }
+
+    #[test]
+    fn node_name_rules_follow_rfc_0003() {
+        assert!(valid_node_name("a-b_1.2"));
+        assert!(valid_node_name(&"x".repeat(64)));
+        assert!(valid_node_name(&"节".repeat(64)));
+        assert!(!valid_node_name(""));
+        assert!(!valid_node_name("node:a"));
+        assert!(!valid_node_name(&"x".repeat(65)));
+        assert!(!valid_node_name(&"节".repeat(65)));
+    }
+
+    #[tokio::test]
+    async fn invalid_envelope_node_is_bad_request() {
+        let gw = Gateway::new(Signer::generate());
+        let (ctx, _crx) = mpsc_pair();
+        let session = gw.client_connected("user:u1", ctx).await;
+        let req = json!({"v":1,"id":"n1","op":"task.list","node":"bad:name","payload":{}});
+        let out = gw.on_client_text(&session, &req.to_string()).await;
+        assert!(
+            matches!(&out[0], Outbound::Text(t) if t.contains("bad_request") && t.contains("node 非法")),
+            "{out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_connected_rejects_invalid_name() {
+        let gw = Gateway::new(Signer::generate());
+        let err = gw
+            .node_connected("bad:name", "0.1.0", mpsc_pair().0)
+            .await
+            .unwrap_err();
+        assert!(err.contains("非法"), "{err}");
     }
 }
