@@ -46,6 +46,10 @@ pub mod op {
     pub const DISPLAY_TAKEOVER: &str = "display.takeover";
     pub const DISPLAY_CLIPBOARD: &str = "display.clipboard";
 
+    pub const FILE_PUT: &str = "file.put";
+    pub const FILE_PUT_COMMIT: &str = "file.put.commit";
+    pub const FILE_GET: &str = "file.get";
+
     pub const SYS_INFO: &str = "sys.info";
     pub const SYS_PING: &str = "sys.ping";
 }
