@@ -2,7 +2,7 @@
 # (mixum 系统用户、/var/lib/mixum 目录、默认配置)。
 # 镜像组装时以本包为装配锚点(pacstrap base + mixum-base)。
 pkgname=mixum-base
-pkgver=0.1.3
+pkgver=0.1.4
 pkgrel=1
 pkgdesc="mixumOS 元包:mixum 组件集合 + 系统用户/目录/默认配置"
 arch=(aarch64 x86_64)
