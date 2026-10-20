@@ -114,6 +114,9 @@ rm -rf "$BUILD/mixum-agentd/rust" "$BUILD/mixum-agentd/tests"
 cp -a "$IN/rust" "$BUILD/mixum-agentd/rust"
 install -d "$BUILD/mixum-agentd/tests"
 cp -a "$IN/cross-protocol" "$BUILD/mixum-agentd/tests/cross-protocol"
+# mixum-ctl 也从同一 Rust workspace 构建;包目录独立,避免 makepkg 串源。
+rm -rf "$BUILD/mixum-ctl/rust"
+cp -a "$IN/rust" "$BUILD/mixum-ctl/rust"
 id builder >/dev/null 2>&1 || useradd -m builder
 # 卷根属主(builder 每次写入);卷内容上轮已属 builder,不必递归
 install -d -o builder -g builder "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR" 2>/dev/null ||
