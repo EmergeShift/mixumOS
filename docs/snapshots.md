@@ -84,10 +84,10 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 - dump:`criu dump --tree <pid> --images-dir <dir> [--leave-running]`,
   镜像目录再走一次目录打包进 CAS(挂到节点的 memory 清单);
 - restore:`criu restore --images-dir <dir> --shell-job`;
-- 兼容指纹:节点记录 `arch/kernelRelease`,恢复时强校验;
-  跨内核迁移已验证不可行(docs/criu-feasibility.md):CRIU 镜像耦合内核特性集
-  与源进程的 tty/session/mount 环境,不只是版本号;恢复按 arch/kernelRelease
-  精确拒绝,跨内核需求走 disk 快照+重启或 VM 级迁移;
+- 兼容指纹:节点记录 `arch/kernelRelease`,恢复时强校验(保守门禁,与
+  可行性结论解耦);跨内核恢复尚未验证——2026-10-19 实验方法学无效
+  (CRIU 版本混用、目标环境未验证),受控实验协议见 docs/criu-feasibility.md §5;
+  跨内核需求走 disk 快照+重启或 VM 级迁移;
 - v1 限制:纯 memory 快照不允许恢复(必须配合 disk);
   进程持有的外部 fd(unix socket 到 mixumd)由任务引擎在快照前规范化。
 
