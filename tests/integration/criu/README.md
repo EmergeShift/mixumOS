@@ -24,6 +24,13 @@ sudo tests/integration/criu/restore-for-cross-kernel.sh /tmp/criu-imgs-cross
 - ③ 的 CRIU 版本与 meta.txt 不一致 ⇒ 脚本中止(版本是混杂变量,不允许);
 - ③ 失败后按报告 §5 对失败分类(环境/版本/内核)才能下结论。
 
+环境对齐要点(2026-10-20 受控重跑踩实):目标端除内核外必须与源端
+一致——initramfs 需先挂 devtmpfs;Debian 内核包需构建侧 `depmod`;
+被测进程的 stdio/cwd/文件 fd 不能指向源机专用路径(dump 脚本已把
+stdio 收进 /dev/null、cwd 固定 `/`);计数器文件需按源端 dump 后值
+预建同尺寸(restore 脚本已完成)。这些属于「环境」类,不消除就无法把
+失败归因到内核。
+
 ## 同内核基线(可重复,需 root)
 
 ```bash

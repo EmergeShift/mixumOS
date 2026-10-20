@@ -84,6 +84,36 @@ Restore finished successfully. Tasks resumed.
 
 **结论:撤回原报告「跨内核透明迁移不可行」。**
 
+### 4.4 受控重跑(2026-10-20,按 §5 协议)
+
+按 §5 协议完整重跑:源端 WSL 6.18 + CRIU 4.2.1 dump(①);目标 VM 为
+Arch rootfs + **CRIU 4.2.1(与源端完全一致)** + Debian 6.1.0-47-amd64
+内核(与源端不同的唯一内核变量),先跑目标端本地 control(②),PASS 后
+再执行跨内核 restore(③),两轮重复:
+
+- **② target-control:PASS**(两轮)——目标环境本地 dump → kill → restore
+  → 计数继续,环境有效性成立;
+- **③ 跨内核 restore:FAIL**(两轮稳定)。失败点随环境混杂逐个清除而
+  移动,每一层都属**环境类**,不是内核类:
+  1. initramfs `/dev` 未挂 devtmpfs → init stdio 丢失(init 顺序修复);
+  2. Debian 内核包不带 `modules.dep` → 特性探测失败(构建侧 depmod 修复);
+  3. 被测进程 stdio 重定向文件在目标端不存在 → dump 侧改为 `/dev/null`,
+     进程不携带外部文件 fd;
+  4. 计数器文件大小校验(CRIU 要求与源端字节数一致)→ restore 脚本用
+     源端 `counter_after_dump` 值预建同尺寸文件;
+  5. 进程 root 目录 mode 不一致(源 0555 / 目标 0755)→ 目标 root 对齐;
+  6. 进程 cwd 指向源机专用路径(WSL `/mnt/...`)→ dump 侧固定 cwd 为 `/`。
+  最终稳定失败于 cwd/挂载命名空间引用源机路径(`Can't open cwd`):
+  **根因是两端 rootfs/挂载命名空间不同(WSL ext4 vs initramfs)**,属
+  环境类;本次拓扑无法把变量收敛到「内核」一个。
+
+按 §5 判定:**证据不足**——不能据此得出「跨内核不可行」,也不得出
+「可行」。roadmap 保持未勾选。
+
+**下一轮严谨设计**(要真正单变量):两端使用**同一 rootfs 镜像**、仅内核
+不同——例如同一 initramfs 分别以两个不同版本的 vmlinuz 启动两个 VM,
+源端 dump 后把镜像放入同一 rootfs 的第二个 VM 恢复。
+
 ## 5. 受控实验协议(重跑标准)
 
 有效实验只允许「内核」一个变量。协议由脚本强制(见 §8):

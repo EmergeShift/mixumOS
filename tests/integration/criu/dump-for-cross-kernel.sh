@@ -14,14 +14,20 @@ command -v criu >/dev/null || { echo "缺少 criu" >&2; exit 1; }
 command -v cc >/dev/null || { echo "缺少 cc(用于静态被测进程)" >&2; exit 1; }
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
-OUT=${1:-/tmp/criu-imgs-cross}
+OUT=$(realpath -m "${1:-/tmp/criu-imgs-cross}")
 BIN=/tmp/criu-static-counter
 
 cc -static -O2 -o "$BIN" "$ROOT/static_counter.c"
-rm -rf "$OUT" /tmp/criu-pid /tmp/criu-counter /tmp/criu-proc.log
+rm -rf "$OUT" /tmp/criu-pid /tmp/criu-counter
 mkdir -p "$OUT"
 
-"$BIN" </dev/null >/tmp/criu-proc.log 2>&1 &
+# 被测进程的 cwd 会进镜像并参与 restore 校验;固定为 /,避免携带
+# 源机专用路径(例如 WSL 的 /mnt/c/... 在目标端不存在)。
+cd /
+# stdio 收进 /dev/null:被测进程不携带任何外部文件 fd(日志文件在目标端
+# 不存在会让 restore 误判为失败——环境混杂变量);计数文件由目标端
+# restore 脚本预建。
+"$BIN" </dev/null >/dev/null 2>&1 &
 for _ in $(seq 1 50); do [ -s /tmp/criu-pid ] && break; sleep 0.1; done
 PID=$(cat /tmp/criu-pid)
 echo "source kernel: $(uname -r)  pid=$PID"
@@ -35,6 +41,7 @@ echo "COUNTER_AFTER_DUMP=$(cat /tmp/criu-counter 2>/dev/null || echo missing)"
     echo "criu_version=$(criu --version | awk 'NR==1{sub(/^Version: */,""); print}')"
     echo "kernel=$(uname -r)"
     echo "arch=$(uname -m)"
+    echo "counter_after_dump=$(cat /tmp/criu-counter 2>/dev/null || echo missing)"
 } >"$OUT/meta.txt"
 echo "meta: $(tr '\n' ' ' <"$OUT/meta.txt")"
 echo "images: $OUT"
