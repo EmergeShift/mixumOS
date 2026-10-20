@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
-use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
 use kube::Client;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -170,7 +170,18 @@ impl NodeRegistry for K8sRegistry {
             .and_then(|spec| spec.holder_identity.as_deref())
             == Some(owner);
         if same_owner {
-            let _ = api.delete(&lease_name, &DeleteParams::default()).await;
+            // Guard against deleting a lease that was taken over between the
+            // get and the delete. A 409 conflict is the desired outcome here.
+            let preconditions = Preconditions {
+                resource_version: existing.metadata.resource_version.clone(),
+                uid: existing.metadata.uid.clone(),
+            };
+            let _ = api
+                .delete(
+                    &lease_name,
+                    &DeleteParams::default().preconditions(preconditions),
+                )
+                .await;
         }
     }
 
@@ -295,7 +306,9 @@ mod lease_tests {
             assert!(lease.len() <= 63, "{lease} too long");
             assert!(lease.starts_with("mixum-node-"), "{lease}");
             assert!(
-                lease.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                lease
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "{lease} not a DNS label"
             );
             assert!(!lease.contains("--"), "{lease}");

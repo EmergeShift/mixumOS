@@ -22,6 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 默认只监听回环;对外部署显式改 --listen wss://0.0.0.0:7701。
     let mut listen = "wss://127.0.0.1:7701".to_owned();
     let mut data_dir = "/var/lib/mixum-gateway".to_owned();
+    let mut identity_dir = String::new();
     let mut instance_id = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "gateway".to_owned());
@@ -46,6 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "--data-dir" => {
                 if let Some(value) = inline.or_else(|| args.next()) {
                     data_dir = value;
+                }
+            }
+            "--identity-dir" => {
+                if let Some(value) = inline.or_else(|| args.next()) {
+                    identity_dir = value;
                 }
             }
             "--instance-id" => {
@@ -82,13 +88,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // identity (signing/TLS) may live on a read-only Secret mount; runtime
+    // state (revoked/devices/bootstrap jti) stays on a writable data-dir.
+    if identity_dir.is_empty() {
+        identity_dir = data_dir.clone();
+    }
     let hosts = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
-    let identity = mixum_gateway::identity::load_or_create_identity(&data_dir, &hosts)?;
+    let identity = mixum_gateway::identity::load_or_create_identity(&identity_dir, &hosts)?;
     let registry: Arc<dyn NodeRegistry> = if registry_kind == "k8s" {
         Arc::new(K8sRegistry::new(kube_namespace.clone()).await?)
     } else {
         Arc::new(MemoryRegistry::new())
     };
+    if registry_kind == "k8s" && !mesh_listen.is_empty() {
+        eprintln!(
+            "WARNING: multi-replica auth state (revoked/devices/pairs) is per-pod; \
+             cross-replica revoke/pair is not supported in M3"
+        );
+    }
     let hub = if !mesh_token.is_empty() && !mesh_listen.is_empty() {
         Some(MeshHub::new(instance_id.clone(), mesh_token.clone()))
     } else {

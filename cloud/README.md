@@ -15,6 +15,7 @@ cloud/k8s/          直接可 apply 的清单
   50-service.yaml      WSS Service + Ingress(TLS 透传,协议见 docs/protocol.md)
   60-gateway.yaml      多副本 gateway Deployment/RBAC/headless mesh Service(M3)
 cloud/operator/     Rust operator 源码(kube-rs)
+cloud/gateway/      gateway 镜像 Dockerfile + build.sh（M3 部署清单用）
 ```
 
 ## 两种任务形态
