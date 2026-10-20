@@ -4,8 +4,13 @@ mod transport;
 mod view;
 
 use clap::Parser;
-use cmd::{Cli, Command, SnapSubcommand, TaskSubcommand};
-use std::path::PathBuf;
+use cmd::{Cli, Command, FileSubcommand, SnapSubcommand, TaskSubcommand};
+use mixum_protocol::frames::{marshal_file, unmarshal_file};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use transport::{known_hosts_path, Client, ConnectionOptions, Error};
 
 #[tokio::main]
@@ -82,8 +87,140 @@ async fn run() -> Result<(), Error> {
                 println!("已保存 {n} 帧");
             }
         },
+        Command::File(file) => file_command(&client, file.command).await?,
         Command::Serve(args) => view::serve(client, &args.bind).await?,
         Command::Connect(_) | Command::Power(_) => unreachable!(),
+    }
+    Ok(())
+}
+
+async fn file_command(client: &Client, command: FileSubcommand) -> Result<(), Error> {
+    match command {
+        FileSubcommand::Put { path, name, json } => file_put(client, &path, name, json).await,
+        FileSubcommand::Get { path, out, json } => {
+            file_get(client, &path, out.as_deref(), json).await
+        }
+    }
+}
+
+async fn file_put(
+    client: &Client,
+    path: &str,
+    name: Option<String>,
+    json_out: bool,
+) -> Result<(), Error> {
+    let local = Path::new(path);
+    let name = name
+        .or_else(|| local.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .ok_or_else(|| Error::Config("本地路径没有文件名".into()))?;
+    let metadata = tokio::fs::metadata(local).await?;
+    if !metadata.is_file() {
+        return Err(Error::Config("不是普通文件".into()));
+    }
+    let reply = client
+        .call(
+            "file.put",
+            json!({"name": name, "size": metadata.len()}),
+        )
+        .await?;
+    let started = reply.payload.unwrap_or_default();
+    let transfer = started["transfer"]
+        .as_u64()
+        .ok_or_else(|| Error::Protocol("file.put 未返回 transfer".into()))?
+        as u32;
+    let remote = started["path"]
+        .as_str()
+        .ok_or_else(|| Error::Protocol("file.put 未返回 path".into()))?
+        .to_owned();
+    let mut file = tokio::fs::File::open(local).await?;
+    let mut buffer = vec![0u8; 256 * 1024];
+    let mut offset = 0u64;
+    let mut sha = Sha256::new();
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        sha.update(&buffer[..read]);
+        client
+            .send_binary(marshal_file(transfer, offset, &buffer[..read]))
+            .await?;
+        offset += read as u64;
+    }
+    let digest = sha.finalize();
+    let hash = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let committed = client
+        .call(
+            "file.put.commit",
+            json!({"transfer": transfer, "sha256": hash}),
+        )
+        .await?;
+    let payload = committed.payload.unwrap_or_default();
+    if json_out {
+        print_json(Some(payload));
+    } else {
+        println!("{remote}");
+    }
+    Ok(())
+}
+
+async fn file_get(
+    client: &Client,
+    remote: &str,
+    out: Option<&str>,
+    json_out: bool,
+) -> Result<(), Error> {
+    let mut frames = client.subscribe_frames();
+    let reply = client
+        .call("file.get", json!({"path": remote}))
+        .await?;
+    let started = reply.payload.unwrap_or_default();
+    let transfer = started["transfer"]
+        .as_u64()
+        .ok_or_else(|| Error::Protocol("file.get 未返回 transfer".into()))?
+        as u32;
+    let size = started["size"]
+        .as_u64()
+        .ok_or_else(|| Error::Protocol("file.get 未返回 size".into()))?;
+    let remote_name = started["name"].as_str().unwrap_or("file");
+    let local = out
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(remote_name));
+    let mut file = tokio::fs::File::create(&local).await?;
+    let mut received = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while received < size {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::Timeout(format!("file.get {remote}")));
+        }
+        let frame = tokio::time::timeout(remaining, frames.recv())
+            .await
+            .map_err(|_| Error::Timeout(format!("file.get {remote}")))?
+            .map_err(|error| Error::Protocol(format!("文件帧: {error}")))?;
+        let Ok((id, offset, data)) = unmarshal_file(&frame.0) else {
+            continue;
+        };
+        if id != transfer {
+            continue;
+        }
+        if offset != received {
+            return Err(Error::Protocol(format!(
+                "文件块偏移错误: got {offset} want {received}"
+            )));
+        }
+        file.write_all(data).await?;
+        received += data.len() as u64;
+    }
+    file.flush().await?;
+    if json_out {
+        print_json(Some(json!({
+            "path": local.to_string_lossy(),
+            "remote": remote,
+            "size": received,
+        })));
+    } else {
+        println!("{}", local.to_string_lossy());
     }
     Ok(())
 }

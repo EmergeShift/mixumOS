@@ -16,6 +16,21 @@
 
 macOS 的正式集成点是 IOKit 的 `IOPMSleepInterestCallback`（通过 `IORegisterForSystemPower` 注册），该回调不要求 root。`power --watch` 注册 CoreFoundation run loop，并在 `kIOMessageCanSystemSleep`/`kIOMessageSystemWillSleep` 事件中投递迁移任务；回调只做短事务。Linux 使用 systemd `sleep.target` 的 prepare/stop 单元；v1 只记录安装方式，不在客户端进程内监听 systemd。
 
+文件传输给 agent 的推荐用法：
+
+```sh
+# 主机 → 节点；stdout 只打印远端路径，便于 agent 解析
+path=$(mixum-ctl file put ./input.bin --name input.bin)
+mixum-ctl task submit "处理 $path" --agent shell --param cmd="cat $path"
+
+# 节点 → 主机
+mixum-ctl file get "$path" --out ./result.bin
+```
+
+`file.put` 默认落到 `workRoot/transfers/<name>`，返回绝对路径；`--json`
+可拿到结构化结果。Tauri 窗口文件拖入走同一条通道，上传后把远端路径作为
+文本注入目标窗口。
+
 本地视图默认监听 `127.0.0.1:7602`。根页面和窗口列表是单文件 HTML；浏览器通过 `/api/stream/<window>` WebSocket 接收 JPEG 二进制帧，按协议 27 字节帧头绘制画面并叠加光标元数据。`display record` 把指定窗口的 JPEG 逐帧保存为 `frame-0000.jpg` 等序列。
 
 安全边界：只连接 TLS 1.3；自签证书不依赖系统 CA，而是指纹固定；TOFU 文件与配置文件不应放到共享目录；视图服务只绑定回环地址，生产环境不要将 7602 暴露到局域网。

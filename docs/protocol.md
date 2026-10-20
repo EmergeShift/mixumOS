@@ -30,6 +30,7 @@
 | 0x02 | audio | 预留 |
 | 0x03 | chunk | 快照块(§6) |
 | 0x04 | stdio | 任务 stdio 字节流(预留) |
+| 0x05 | file | 文件块:`[0x05][u32 transfer][u64 offset][data]` |
 
 ## 3. 能力令牌
 
@@ -169,6 +170,25 @@ sizeBytes, chunks, kernel?, arch? }`。`id` 为 ULID;树语义见 snapshots.md �
 | display.input | `{ window, type, … }` | `{ ok: true }` |
 | display.takeover | `{ window, action: claim\|release, force? }` | `{ mode }` |
 | display.windows | — | `{ subscribed }`(此后推送窗口增删/改名) |
+
+### 4.5 文件传输
+
+文件操作需要 `admin` 能力；路径限定在节点的 `workRoot`(默认
+`/var/lib/mixum/work`)内。上传落在 `workRoot/transfers/`，供 agent 直接
+读取。
+
+| op | 请求 | 应答 |
+|----|------|------|
+| file.put | `{ name, size }` | `{ transfer, path, name, size }`；随后二进制 file 帧 |
+| file.put.commit | `{ transfer, sha256? }` | `{ path, size, sha256 }`；校验大小/哈希后落盘 |
+| file.get | `{ path }` | `{ transfer, path, name, size }`；随后二进制 file 帧与 `file.get.done` 推送 |
+
+file 帧的 `transfer` 与应答一致，`offset` 必须顺序递增。CLI：
+
+```sh
+mixum-ctl file put ./model.bin --name model.bin   # 打印远端绝对路径
+mixum-ctl file get /var/lib/mixum/work/transfers/out.bin --out ./out.bin
+```
 
 Window:`{ id, appId, title, width, height, focused, mode: agent|user|free,
 codec? }`。codec = 窗口流的实际编码,由 mixcomp 能力回告(如请求 h264
