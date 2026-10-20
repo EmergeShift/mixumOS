@@ -337,6 +337,14 @@ impl Client {
         self.frames.subscribe()
     }
 
+    /// Send a raw binary frame (file upload chunks).
+    pub async fn send_binary(&self, data: Vec<u8>) -> Result<(), Error> {
+        self.tx
+            .send(Message::Binary(data.into()))
+            .await
+            .map_err(|_| Error::WebSocket("发送失败，连接已关闭".into()))
+    }
+
     pub fn token(&self) -> &str {
         &self.token
     }

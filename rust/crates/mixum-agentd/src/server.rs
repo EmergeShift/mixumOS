@@ -13,8 +13,11 @@ use mixum_protocol::token::Claims;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::{rustls, TlsAcceptor};
@@ -435,6 +438,8 @@ impl Server {
             forwarders: Vec::new(),
             #[cfg(feature = "real-snapshot")]
             sync_stage: None,
+            file_uploads: HashMap::new(),
+            file_seq: 0,
         };
         while let Some(message) = source.next().await {
             match message.map_err(Box::new)? {
@@ -486,6 +491,24 @@ impl Server {
     }
 }
 
+struct FileUpload {
+    temp: PathBuf,
+    final_path: PathBuf,
+    size: u64,
+    received: u64,
+    sha256: Sha256,
+    file: Option<tokio::fs::File>,
+    committed: bool,
+}
+
+impl Drop for FileUpload {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
+}
+
 pub struct Session {
     server: Arc<Server>,
     tx: mpsc::Sender<Message>,
@@ -501,6 +524,9 @@ pub struct Session {
     /// 远端导入暂存:一次 import 对账到 commit 之间有效(协议 §6)。
     #[cfg(feature = "real-snapshot")]
     sync_stage: Option<crate::sync::ImportStage>,
+    /// 本连接进行中的文件上传。
+    file_uploads: HashMap<u32, FileUpload>,
+    file_seq: u32,
 }
 
 impl Session {
@@ -585,6 +611,9 @@ impl Session {
             ops::op::DISPLAY_TAKEOVER => self.display_takeover(&env).await,
             ops::op::DISPLAY_INPUT => self.display_input(&env).await,
             ops::op::DISPLAY_CLIPBOARD => self.display_clipboard(&env).await,
+            ops::op::FILE_PUT => self.file_put(&env).await,
+            ops::op::FILE_PUT_COMMIT => self.file_put_commit(&env).await,
+            ops::op::FILE_GET => self.file_get(&env).await,
             _ => {
                 self.send_raw(
                     env.error_reply(ErrCode::Unsupported, &format!("未知操作: {}", env.op))
@@ -611,6 +640,7 @@ impl Session {
         }
         match binary[0] {
             mixum_protocol::frames::chan::CHUNK => self.handle_chunk_frame(binary).await,
+            mixum_protocol::frames::chan::FILE => self.handle_file_chunk(binary).await,
             _ => {
                 self.send_raw(error_envelope(None, ErrCode::BadRequest, "未知二进制通道"))
                     .await
@@ -1480,6 +1510,246 @@ impl Session {
         self.send_raw(env.error_reply(code, message).to_json())
             .await;
     }
+    async fn file_put(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::Admin).await {
+            return;
+        }
+        #[derive(serde::Deserialize)]
+        struct Request {
+            name: String,
+            size: u64,
+            #[serde(default)]
+            sha256: Option<String>,
+        }
+        let request: Request = match payload(env) {
+            Ok(request) => request,
+            Err(error) => {
+                self.err(env, ErrCode::BadRequest, &error).await;
+                return;
+            }
+        };
+        if request.size > 4 * 1024 * 1024 * 1024 {
+            self.err(env, ErrCode::BadRequest, "文件超过 4GiB 上限").await;
+            return;
+        }
+        let Some(name) = Path::new(&request.name).file_name().and_then(|n| n.to_str()) else {
+            self.err(env, ErrCode::BadRequest, "文件名无效").await;
+            return;
+        };
+        let name = name.to_owned();
+        if name.is_empty() {
+            self.err(env, ErrCode::BadRequest, "文件名为空").await;
+            return;
+        }
+        let dir = Path::new(&self.server.config.work_root).join("transfers");
+        if let Err(error) = tokio::fs::create_dir_all(&dir).await {
+            self.err(env, ErrCode::Internal, &format!("创建传输目录: {error}")).await;
+            return;
+        }
+        let mut final_path = dir.join(&name);
+        let mut suffix = 1u32;
+        while final_path.exists() {
+            final_path = dir.join(format!("{name}.{suffix}"));
+            suffix += 1;
+        }
+        self.file_seq = self.file_seq.wrapping_add(1);
+        let transfer = self.file_seq.max(1);
+        let temp = dir.join(format!(".upload-{}-{transfer}", self.conn_id));
+        let Ok(file) = tokio::fs::File::create(&temp).await else {
+            self.err(env, ErrCode::Internal, "创建上传暂存失败").await;
+            return;
+        };
+        self.file_uploads.insert(
+            transfer,
+            FileUpload {
+                temp,
+                final_path: final_path.clone(),
+                size: request.size,
+                received: 0,
+                sha256: Sha256::new(),
+                file: Some(file),
+                committed: false,
+            },
+        );
+        self.reply(
+            env,
+            json!({
+                "transfer": transfer,
+                "path": final_path.to_string_lossy(),
+                "name": name,
+                "size": request.size,
+                "sha256": request.sha256,
+            }),
+        )
+        .await;
+    }
+
+    async fn file_put_commit(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::Admin).await {
+            return;
+        }
+        #[derive(serde::Deserialize)]
+        struct Request {
+            transfer: u32,
+            #[serde(default)]
+            sha256: Option<String>,
+        }
+        let request: Request = match payload(env) {
+            Ok(request) => request,
+            Err(error) => {
+                self.err(env, ErrCode::BadRequest, &error).await;
+                return;
+            }
+        };
+        let Some(mut upload) = self.file_uploads.remove(&request.transfer) else {
+            self.err(env, ErrCode::NotFound, "上传不存在").await;
+            return;
+        };
+        if upload.received != upload.size {
+            self.err(env, ErrCode::BadRequest, "上传大小不完整").await;
+            return;
+        }
+        if let Some(mut file) = upload.file.take() {
+            if let Err(error) = file.flush().await {
+                self.err(env, ErrCode::Internal, &format!("flush 上传: {error}")).await;
+                return;
+            }
+        }
+        let digest = upload.sha256.clone().finalize();
+        let hex = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        if let Some(expected) = request.sha256.as_deref() {
+            if !expected.eq_ignore_ascii_case(&hex) {
+                self.err(env, ErrCode::BadRequest, "sha256 不匹配").await;
+                return;
+            }
+        }
+        if let Err(error) = tokio::fs::rename(&upload.temp, &upload.final_path).await {
+            self.err(env, ErrCode::Internal, &format!("提交上传: {error}")).await;
+            return;
+        }
+        upload.committed = true;
+        self.reply(
+            env,
+            json!({
+                "path": upload.final_path.to_string_lossy(),
+                "size": upload.size,
+                "sha256": hex,
+            }),
+        )
+        .await;
+    }
+
+    async fn handle_file_chunk(&mut self, binary: &[u8]) {
+        let Ok((transfer, offset, data)) = mixum_protocol::frames::unmarshal_file(binary) else {
+            self.send_raw(error_envelope(None, ErrCode::BadRequest, "文件块格式错误"))
+                .await;
+            return;
+        };
+        let Some(upload) = self.file_uploads.get_mut(&transfer) else {
+            self.send_raw(error_envelope(None, ErrCode::NotFound, "上传不存在"))
+                .await;
+            return;
+        };
+        if offset != upload.received || upload.received + data.len() as u64 > upload.size {
+            self.file_uploads.remove(&transfer);
+            self.send_raw(error_envelope(None, ErrCode::BadRequest, "文件块偏移/大小错误"))
+                .await;
+            return;
+        }
+        let Some(file) = upload.file.as_mut() else {
+            self.file_uploads.remove(&transfer);
+            return;
+        };
+        if let Err(error) = file.write_all(data).await {
+            self.file_uploads.remove(&transfer);
+            self.send_raw(
+                error_envelope(None, ErrCode::Internal, &format!("写上传: {error}")),
+            )
+            .await;
+            return;
+        }
+        upload.sha256.update(data);
+        upload.received += data.len() as u64;
+    }
+
+    fn safe_work_file(&self, raw: &str) -> Option<PathBuf> {
+        let base = Path::new(&self.server.config.work_root);
+        std::fs::create_dir_all(base).ok()?;
+        let base = base.canonicalize().ok()?;
+        let candidate = if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            base.join(raw)
+        };
+        let canonical = candidate.canonicalize().ok()?;
+        canonical.starts_with(&base).then_some(canonical)
+    }
+
+    async fn file_get(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::Admin).await {
+            return;
+        }
+        #[derive(serde::Deserialize)]
+        struct Request {
+            path: String,
+        }
+        let request: Request = match payload(env) {
+            Ok(request) => request,
+            Err(error) => {
+                self.err(env, ErrCode::BadRequest, &error).await;
+                return;
+            }
+        };
+        let Some(path) = self.safe_work_file(&request.path) else {
+            self.err(env, ErrCode::Forbidden, "路径不在 work_root 内").await;
+            return;
+        };
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+            self.err(env, ErrCode::NotFound, "文件不存在").await;
+            return;
+        };
+        if !metadata.is_file() {
+            self.err(env, ErrCode::BadRequest, "不是普通文件").await;
+            return;
+        }
+        self.file_seq = self.file_seq.wrapping_add(1);
+        let transfer = self.file_seq.max(1);
+        let size = metadata.len();
+        self.reply(
+            env,
+            json!({
+                "transfer": transfer,
+                "path": path.to_string_lossy(),
+                "name": path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+                "size": size,
+            }),
+        )
+        .await;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let Ok(mut file) = tokio::fs::File::open(&path).await else {
+                return;
+            };
+            let mut offset = 0u64;
+            let mut buffer = vec![0u8; 256 * 1024];
+            while let Ok(read) = file.read(&mut buffer).await {
+                if read == 0 {
+                    break;
+                }
+                let frame = mixum_protocol::frames::marshal_file(transfer, offset, &buffer[..read]);
+                if tx.send(Message::Binary(frame.into())).await.is_err() {
+                    return;
+                }
+                offset += read as u64;
+            }
+            let done = Envelope::new(
+                "file.get.done",
+                Some(json!({"transfer": transfer, "size": size})),
+            );
+            let _ = tx.send(Message::Text(done.to_json().into())).await;
+        });
+    }
+
     async fn send_raw(&self, raw: String) {
         let _ = self.tx.send(Message::Text(raw.into())).await;
     }

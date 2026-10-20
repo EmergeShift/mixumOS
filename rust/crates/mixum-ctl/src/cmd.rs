@@ -24,6 +24,7 @@ pub enum Command {
     Task(TaskCommand),
     Snap(SnapCommand),
     Display(DisplayCommand),
+    File(FileCommand),
     Serve(ServeArgs),
     Power(PowerArgs),
 }
@@ -112,6 +113,32 @@ pub enum DisplaySubcommand {
         out: String,
         #[arg(long, default_value_t = 3)]
         frames: usize,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct FileCommand {
+    #[command(subcommand)]
+    pub command: FileSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FileSubcommand {
+    /// Upload a local file into the node's work_root/transfers directory.
+    Put {
+        path: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download a file from the node's work_root.
+    Get {
+        path: String,
+        #[arg(long)]
+        out: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 

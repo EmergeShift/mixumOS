@@ -7,6 +7,32 @@ pub mod chan {
     pub const AUDIO: u8 = 0x02; // 预留
     pub const CHUNK: u8 = 0x03; // 快照块传输
     pub const STDIO: u8 = 0x04; // 任务 stdio(预留)
+    pub const FILE: u8 = 0x05; // 文件传输
+}
+
+/// 文件帧头:通道标签(1) + transfer id(4) + offset(8)。
+pub const FILE_HEADER_SIZE: usize = 13;
+
+/// 打包文件块。`transfer` 是 `file.put` / `file.get` 返回的 id。
+pub fn marshal_file(transfer: u32, offset: u64, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(FILE_HEADER_SIZE + data.len());
+    out.push(chan::FILE);
+    out.extend_from_slice(&transfer.to_le_bytes());
+    out.extend_from_slice(&offset.to_le_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// 解包文件块。
+pub fn unmarshal_file(buf: &[u8]) -> Result<(u32, u64, &[u8]), TruncatedFrame> {
+    if buf.len() < FILE_HEADER_SIZE || buf[0] != chan::FILE {
+        return Err(TruncatedFrame);
+    }
+    let transfer = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
+    let offset = u64::from_le_bytes([
+        buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12],
+    ]);
+    Ok((transfer, offset, &buf[FILE_HEADER_SIZE..]))
 }
 
 /// video 帧头总长(含通道标签,即数据区起始偏移)。
@@ -156,6 +182,15 @@ mod tests {
         ]
         .concat();
         assert_eq!(buf, expect);
+    }
+
+    #[test]
+    fn file_round_trip() {
+        let frame = marshal_file(7, 123, b"payload");
+        let (transfer, offset, data) = unmarshal_file(&frame).expect("file frame");
+        assert_eq!(transfer, 7);
+        assert_eq!(offset, 123);
+        assert_eq!(data, b"payload");
     }
 
     #[test]
