@@ -138,6 +138,8 @@ pacman -U --noconfirm \
 	"$BUILD"/mixcomp/*.pkg.tar.* \
 	"$BUILD"/mixum-agentd/*.pkg.tar.* \
 	"$BUILD"/mixum-ctl/*.pkg.tar.* >/dev/null
+echo "==> [container] deps:mixum-base"
+install_pkgbuild_deps "$BUILD/mixum-base"
 echo "==> [container] makepkg mixum-base"
 (
 	cd "$BUILD/mixum-base"
