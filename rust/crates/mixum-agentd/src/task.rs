@@ -410,6 +410,7 @@ impl Sandbox for LocalSandbox {
         on_line: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<i32, DriverError> {
         let mut cmd = Command::new(program);
+        apply_x11_env(&mut cmd);
         cmd.args(args)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
@@ -460,6 +461,7 @@ impl Sandbox for LocalSandbox {
         dir: Option<&Path>,
     ) -> Result<u32, DriverError> {
         let mut cmd = Command::new(program);
+        apply_x11_env(&mut cmd);
         cmd.args(args)
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
@@ -636,6 +638,7 @@ impl AgentDriver for ExternalDriver {
         } else {
             Command::new(&command)
         };
+        apply_x11_env(&mut command);
         command
             .kill_on_drop(true)
             // MAP-Bridge 规范环境变量;MIXUM_* 为过渡期兼容,不得再作为规范名。
@@ -1040,6 +1043,21 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(unix)]
+/// B compositor's XWayland exposes its display number here. Inject it into
+/// task/agent processes so X11 apps need no developer-supplied env.
+fn apply_x11_env(command: &mut Command) {
+    let Ok(raw) = std::fs::read_to_string("/run/mixum/xwayland.display") else {
+        return;
+    };
+    let display = raw.trim();
+    if display.is_empty() {
+        return;
+    }
+    command
+        .env("DISPLAY", format!(":{display}"))
+        .env("XMODIFIERS", "@im=mixum");
+}
+
 fn set_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.as_std_mut().process_group(0);
