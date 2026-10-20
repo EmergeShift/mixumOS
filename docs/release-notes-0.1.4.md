@@ -1,6 +1,7 @@
 # mixumOS 0.1.4 — aarch64
 
-状态:pre-release。发布日期:2026-10-20。
+状态:pre-release。发布日期:2026-10-20。构建 commit:`8a6b04d`
+（发布 tag 另含本说明提交）。
 
 ## 亮点
 
@@ -55,13 +56,15 @@ mixum-ctl file put ./input.bin --json
 
 ## 验证
 
-- 在 `map-node-017` / 0.1.4 构建机上验证 `file put` / `file get` 3 MiB
-  随机文件，sha256 一致。
+- 在 `map-node-019`（0.1.4 镜像）内验证包内 `mixum-ctl 0.1.4` 的
+  `file put` / `file get` 3 MiB 随机文件，sha256 一致。
 - X11：XClock 出窗、Xev 指针/键盘、override 窗口点击、剪贴板、
   `xterm` `read` 收到 `XIM中文`。
 - 镜像内 `Xwayland 24.1.14`，登录 shell 实测
   `DISPLAY=:0`、`XMODIFIERS=@im=mixum`。
-- 0.1.4 镜像 `mixum-ctl` 与 agentd 均来自本版本包。
+- 0.1.4 镜像 `mixum-ctl 0.1.4`、`mixum-agentd 0.1.4`、`mixum-base 0.1.4`
+  均已确认；`/usr/sbin/Xwayland` 存在；登录 shell 实测
+  `DISPLAY=:0`、`XMODIFIERS=@im=mixum`。
 
 ## 已知限制
 
@@ -71,6 +74,7 @@ mixum-ctl file put ./input.bin --json
 - 非登录 `docker exec` 不会 source profile；请用 `sh -lc` 或由 agentd 启动。
 - CRIU 跨内核验证 PR 未合入本版本；跨内核仍按 `arch/kernelRelease` 精确拒绝。
 - 本次发布为 aarch64；未同时产出 x86_64 镜像。
+- 配套 MixumART host 侧固定到 main `f7a835a`（含 XWayland/XIM/文件 drop）。
 
 ## 升级提示
 
@@ -78,3 +82,14 @@ mixum-ctl file put ./input.bin --json
   设置 `DISPLAY`/`XMODIFIERS` 仍兼容。
 - 镜像变大是 `xorg-xwayland` 依赖树导致；如只用 A 路线可继续不启动 B
   compositor。
+
+## 发布资产
+
+| 文件 | SHA256 |
+|---|---|
+| `mixumos-0.1.4-aarch64.oci.tar` | `e599410b01ebc3cd64be4f58be7f699444b85c1048a65b8779cc02fdfc3e40f5` |
+| `mixumos-0.1.4-aarch64-rootfs.tar.zst` | `555b31e867de92836cafa568d09fcd8fd19543c95d0fa8cbaae3ee121d00c7e3` |
+| `mixumos-0.1.4-aarch64-repo.tar.zst` | `924be7072642294f82f3d5118b903e0419a59fad1da8708ece84baaa2aceb21b` |
+| `BUILDINFO` | `830e43322c3bb653279b5033cf126569e739e33087f343158e84c765465587b2` |
+
+registry digest:`9b6d1983c45d`（`127.0.0.1:15000/mixumos:0.1.4`）。
