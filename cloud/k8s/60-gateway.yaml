@@ -50,6 +50,9 @@ metadata:
 spec:
   selector:
     app: mixum-gateway
+  # pairing/revoke state is per-replica in M3; keep clients on one replica
+  # where possible (best-effort, see docs/security.md).
+  sessionAffinity: ClientIP
   ports:
     - name: wss
       port: 7701
@@ -88,14 +91,16 @@ spec:
       serviceAccountName: mixum-gateway
       containers:
         - name: gateway
-          # 镜像:需先把 rust/target/release/mixum-gateway 打进镜像并推送
-          # (e2e 用 tests/integration/gateway-e2e.mjs 的 alpine 挂载方式)。
-          image: ghcr.io/mixumos/mixumos-gateway:0.1.0
+          # 镜像构建:TAG=ghcr.io/mixumos/mixumos-gateway:0.1.3 \
+          #   bash cloud/gateway/build.sh --push
+          image: ghcr.io/mixumos/mixumos-gateway:0.1.3
           args:
             - --listen
             - ws://0.0.0.0:7701
             - --data-dir
-            - /var/lib/mixum-gateway
+            - /var/lib/mixum-gateway/state
+            - --identity-dir
+            - /var/lib/mixum-gateway/identity
             - --instance-id
             - $(POD_NAME)
             - --registry
@@ -130,8 +135,10 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - name: identity
-              mountPath: /var/lib/mixum-gateway
+              mountPath: /var/lib/mixum-gateway/identity
               readOnly: true
+            - name: state
+              mountPath: /var/lib/mixum-gateway/state
           resources:
             requests:
               cpu: 50m
@@ -142,3 +149,7 @@ spec:
         - name: identity
           secret:
             secretName: mixum-gateway-identity
+        # Per-replica mutable auth state (revoked/devices/pairs/bootstrap jti).
+        # M3 不共享这部分状态；详见 docs/security.md。
+        - name: state
+          emptyDir: {}
