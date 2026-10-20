@@ -52,10 +52,27 @@ if [ "$SRC_KERNEL" = "$LOCAL_KERNEL" ]; then
 fi
 
 echo "== 执行跨内核 restore(唯一变量:kernel)=="
-criu restore --images-dir "$IMGS" --shell-job --restore-detached -v4 -o restore.log && {
-    echo "PASS: 跨内核 restore 成功(请核对恢复进程计数继续,并记录内核对)"
-    exit 0
-}
+# 恢复进程按路径重开计数器文件,CRIU 会校验文件大小——用源端 dump 后
+# 记录的值预建,保证字节数一致(环境准备,非实验变量)。
+SRC_AFTER_DUMP=$(get counter_after_dump "$META")
+if [ -n "${SRC_AFTER_DUMP:-}" ] && [ "$SRC_AFTER_DUMP" != "missing" ]; then
+    printf '%s' "$SRC_AFTER_DUMP" >/tmp/criu-counter
+fi
+if criu restore --images-dir "$IMGS" --shell-job --restore-detached -v4 -o restore.log; then
+    # 自证:恢复后的进程应继续写计数器——两次采样严格递增,
+    # 且不早于源端 dump 后的值(不依赖人工核对)。
+    C1=$(cat /tmp/criu-counter 2>/dev/null || echo missing)
+    sleep 2
+    C2=$(cat /tmp/criu-counter 2>/dev/null || echo missing)
+    echo "计数采样: dump 后=$SRC_AFTER_DUMP 恢复后第一次=$C1 第二次=$C2"
+    if [ "$C1" != "missing" ] && [ "$C2" != "missing" ] \
+        && [ "$C2" -gt "$C1" ] && [ "$C1" -ge "${SRC_AFTER_DUMP:-0}" ]; then
+        echo "PASS: 跨内核 restore 成功且计数继续($C1 → $C2;源 dump 后=$SRC_AFTER_DUMP)"
+        exit 0
+    fi
+    echo "FAIL: restore 命令返回成功但计数未继续(自证失败)——按协议 §5 先归因环境" >&2
+    exit 1
+fi
 echo "FAIL: 跨内核 restore 失败(源 kernel=$SRC_KERNEL → 目标 kernel=$LOCAL_KERNEL)" >&2
 tail -20 "$IMGS/restore.log" 2>/dev/null || true
 echo "请按协议 §5 对失败进行分类(环境/版本/内核)后再下结论" >&2
