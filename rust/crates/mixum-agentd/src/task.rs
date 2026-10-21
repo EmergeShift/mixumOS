@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, Mutex};
 // 依赖方式接入);这里再导出保持本 crate 内部引用与旧路径不变。
 pub use mixum_agent_driver::{
     now_ms, AgentDriver, DriverError, DriverResult, EventEmitter, InputHub, InputReplyError,
-    Registry, ShellDriver, Signal, Sandbox, Task, TaskSpec, CANCELED, COMPLETED, FAILED, QUEUED,
+    Registry, Sandbox, ShellDriver, Signal, Task, TaskSpec, CANCELED, COMPLETED, FAILED, QUEUED,
     RUNNING, SUSPENDED,
 };
 
@@ -216,10 +216,7 @@ struct BridgeMessage {
 }
 
 /// 向 agent 写一行 MAP-Bridge 消息(串行化到同一 stdin)。
-async fn write_bridge(
-    stdin: &Arc<Mutex<ChildStdin>>,
-    message: &Value,
-) -> Result<(), DriverError> {
+async fn write_bridge(stdin: &Arc<Mutex<ChildStdin>>, message: &Value) -> Result<(), DriverError> {
     let mut stdin = stdin.lock().await;
     stdin
         .write_all(serde_json::to_string(message)?.as_bytes())
@@ -594,13 +591,12 @@ impl Engine {
                 self.emit_state(&task, COMPLETED).await;
             }
             Err(err) => {
-                if task.snapshot_policy().is_some_and(|p| {
-                    p.on_failure == "rollback" || p.on_failure == "restore"
-                }) {
-                    if let (Some(snap), Some(node)) = (
-                        &self.snapshots,
-                        task.pre_snap_node().await,
-                    ) {
+                if task
+                    .snapshot_policy()
+                    .is_some_and(|p| p.on_failure == "rollback" || p.on_failure == "restore")
+                {
+                    if let (Some(snap), Some(node)) = (&self.snapshots, task.pre_snap_node().await)
+                    {
                         let _ = snap.restore(&node, "inplace", None).await;
                     }
                 }
