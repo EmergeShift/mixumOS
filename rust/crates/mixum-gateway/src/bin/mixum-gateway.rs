@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use mixum_gateway::mesh::MeshHub;
 use mixum_gateway::registry::MemoryRegistry;
 use mixum_gateway::registry_k8s::K8sRegistry;
-use mixum_gateway::{Gateway, MeshRouter, NodeRegistry, OutTx, Outbound};
+use mixum_gateway::{ConnectError, Gateway, MeshRouter, NodeRegistry, OutTx, Outbound};
 use mixum_protocol::envelope::Envelope;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -278,7 +278,11 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                 .to_owned();
             if name.is_empty() {
                 let _ = out
-                    .send(Outbound::Text(err_text(Some(&env), "name 必填")))
+                    .send(Outbound::Text(err_text(
+                        Some(&env),
+                        "bad_request",
+                        "name 必填",
+                    )))
                     .await;
                 return Side::Pending;
             }
@@ -288,13 +292,21 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                         let _ = out
                             .send(Outbound::Text(err_text(
                                 Some(&env),
+                                "forbidden",
                                 "节点令牌与 name 不匹配",
                             )))
                             .await;
                         return Side::Pending;
                     }
                     if let Err(e) = gw.node_connected(&name, &version, out.clone()).await {
-                        let _ = out.send(Outbound::Text(err_text(Some(&env), &e))).await;
+                        let code = match e {
+                            ConnectError::InvalidName(_) => "bad_request",
+                            ConnectError::Conflict(_) => "conflict",
+                            ConnectError::Internal(_) => "internal",
+                        };
+                        let _ = out
+                            .send(Outbound::Text(err_text(Some(&env), code, &e.to_string())))
+                            .await;
                         return Side::Pending;
                     }
                     eprintln!("节点已注册: {name} ({version})");
@@ -308,7 +320,11 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                 }
                 _ => {
                     let _ = out
-                        .send(Outbound::Text(err_text(Some(&env), "节点令牌无效")))
+                        .send(Outbound::Text(err_text(
+                            Some(&env),
+                            "forbidden",
+                            "节点令牌无效",
+                        )))
                         .await;
                     Side::Pending
                 }
@@ -328,10 +344,15 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                 Ok((token, device_id, _user)) => json!({
                     "v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.pair.claim.ok",
                     "replyTo":env.get("id").cloned().unwrap_or_default(),
-                    "payload":{"token":token,"deviceId":device_id,"deviceName":device_name}
+                    // RFC 0003:应答只含 token/deviceId,设备名留在 gateway 侧。
+                    "payload":{"token":token,"deviceId":device_id}
                 })
                 .to_string(),
-                Err(e) => err_text(Some(&env), &format!("配对失败: {e}")),
+                Err(e) => err_text(
+                    Some(&env),
+                    pair_claim_error_code(&e),
+                    &format!("配对失败: {e}"),
+                ),
             };
             let _ = out.send(Outbound::Text(reply)).await;
             Side::Pending
@@ -350,7 +371,11 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                 }
                 _ => {
                     let _ = out
-                        .send(Outbound::Text(err_text(Some(&env), "用户令牌无效")))
+                        .send(Outbound::Text(err_text(
+                            Some(&env),
+                            "forbidden",
+                            "用户令牌无效",
+                        )))
                         .await;
                     return Side::Pending;
                 }
@@ -383,6 +408,7 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
             let _ = out
                 .send(Outbound::Text(err_text(
                     None,
+                    "bad_request",
                     "首条消息须为 gateway.register、hello 或 gateway.pair.claim",
                 )))
                 .await;
@@ -391,15 +417,29 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
     }
 }
 
-fn err_text(env: Option<&Value>, message: &str) -> String {
+fn err_text(env: Option<&Value>, code: &str, message: &str) -> String {
     let id = env
         .and_then(|v| v.get("id"))
         .and_then(Value::as_str)
         .unwrap_or_default();
     if id.is_empty() {
-        json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"error.err","payload":{"code":"unauthorized","message":message}}).to_string()
+        json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"error.err","payload":{"code":code,"message":message}}).to_string()
     } else {
-        json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"error.err","replyTo":id,"payload":{"code":"unauthorized","message":message}}).to_string()
+        json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"error.err","replyTo":id,"payload":{"code":code,"message":message}}).to_string()
+    }
+}
+
+/// RFC 0003 错误码按语义归类(错误文本是内部约定,不做机读契约;
+/// 未归类的失败按 internal 处理,不猜成 forbidden)。
+fn pair_claim_error_code(message: &str) -> &'static str {
+    if message.contains("频繁") {
+        "conflict"
+    } else if message.contains("非法") {
+        "bad_request"
+    } else if message.contains("无效") {
+        "forbidden"
+    } else {
+        "internal"
     }
 }
 
@@ -431,4 +471,21 @@ fn spawn_mesh_listener(hub: Arc<MeshHub>, listen: String) {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{err_text, pair_claim_error_code};
+
+    #[test]
+    fn error_codes_are_semantic() {
+        assert!(err_text(None, "bad_request", "x").contains("\"code\":\"bad_request\""));
+        assert_eq!(
+            pair_claim_error_code("配对尝试过于频繁,请稍后再试"),
+            "conflict"
+        );
+        assert_eq!(pair_claim_error_code("deviceName 非法"), "bad_request");
+        assert_eq!(pair_claim_error_code("配对码无效或已过期"), "forbidden");
+        assert_eq!(pair_claim_error_code("签发失败: io"), "internal");
+    }
 }

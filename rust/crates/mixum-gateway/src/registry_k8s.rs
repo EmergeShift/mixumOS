@@ -8,7 +8,7 @@
 //! 多副本语义:每个 gateway Pod 用自己的实例名作 `holderIdentity`;注册表
 //! 共享后,任何副本都能 `get/online`,但出站 socket 只留在 owner Pod。
 
-use crate::registry::{NodeRecord, NodeRegistry};
+use crate::registry::{NodeRecord, NodeRegistry, RegistryError};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
@@ -131,7 +131,7 @@ impl K8sRegistry {
 
 #[async_trait]
 impl NodeRegistry for K8sRegistry {
-    async fn register(&self, record: NodeRecord) -> Result<(), String> {
+    async fn register(&self, record: NodeRecord) -> Result<(), RegistryError> {
         let api = self.api();
         let name = Self::lease_name(&record.name);
         let now = Utc::now();
@@ -143,18 +143,21 @@ impl NodeRegistry for K8sRegistry {
                 let existing = api
                     .get(&name)
                     .await
-                    .map_err(|e| format!("读取既有租约失败: {e}"))?;
+                    .map_err(|e| RegistryError::Internal(format!("读取既有租约失败: {e}")))?;
                 if !Self::expired(&existing, now) {
-                    return Err(format!("节点重名在线:{}", record.name));
+                    return Err(RegistryError::Conflict(format!(
+                        "节点重名在线:{}",
+                        record.name
+                    )));
                 }
                 let mut replacement = lease;
                 replacement.metadata.resource_version = existing.metadata.resource_version.clone();
                 api.replace(&name, &PostParams::default(), &replacement)
                     .await
-                    .map_err(|e| format!("接管租约失败: {e}"))?;
+                    .map_err(|e| RegistryError::Internal(format!("接管租约失败: {e}")))?;
                 Ok(())
             }
-            Err(e) => Err(format!("注册租约失败: {e}")),
+            Err(e) => Err(RegistryError::Internal(format!("注册租约失败: {e}"))),
         }
     }
 
@@ -223,27 +226,27 @@ impl NodeRegistry for K8sRegistry {
         }
     }
 
-    async fn renew(&self, name: &str, owner: &str, _now_ms: i64) -> Result<(), String> {
+    async fn renew(&self, name: &str, owner: &str, _now_ms: i64) -> Result<(), RegistryError> {
         let api = self.api();
         let lease_name = Self::lease_name(name);
         let existing = api
             .get(&lease_name)
             .await
-            .map_err(|e| format!("读取租约失败: {e}"))?;
+            .map_err(|e| RegistryError::Internal(format!("读取租约失败: {e}")))?;
         let same_owner = existing
             .spec
             .as_ref()
             .and_then(|spec| spec.holder_identity.as_deref())
             == Some(owner);
         if !same_owner {
-            return Err(format!("节点 {name} 不属于本实例"));
+            return Err(RegistryError::Conflict(format!("节点 {name} 不属于本实例")));
         }
         let patch = serde_json::json!({
             "spec": { "renewTime": MicroTime(Utc::now()) }
         });
         api.patch(&lease_name, &PatchParams::default(), &Patch::Merge(&patch))
             .await
-            .map_err(|e| format!("租约续约失败: {e}"))?;
+            .map_err(|e| RegistryError::Internal(format!("租约续约失败: {e}")))?;
         Ok(())
     }
 }
