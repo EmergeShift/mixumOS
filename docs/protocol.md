@@ -288,6 +288,9 @@ virtio-gpu/venus 通路成熟后再接。
    (数据为明文,压缩加密由 B 端 Store 落盘时处理——哈希永远是明文哈希);
 4. A→B `snap.push.commit`:`{ count }`;B 校验 missing 全部到齐后落树;
    父节点不在 B 的树中时,节点成为新分支根,label 追加「(远端根)」。
+   commit 由 A 无条件发送:missing 为空(内容全命中 B 的 CAS)时也必须
+   commit,否则新节点的元数据不落 B、B 的树缺新 head;B 对已存在同 id
+   节点幂等返回(重推同一节点因此安全)。
 
 拉取 = 反向调用对方 push。B 端要求令牌含 `snap.sync`。
 

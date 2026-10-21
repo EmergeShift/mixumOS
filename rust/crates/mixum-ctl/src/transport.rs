@@ -159,9 +159,7 @@ fn ws_addr(addr: &str) -> Result<String, Error> {
 }
 
 pub fn known_hosts_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".mixum/known-hosts")
+    crate::power::config_dir().join("known-hosts")
 }
 
 fn load_known(path: &Path) -> Result<HashMap<String, String>, Error> {
