@@ -52,7 +52,7 @@ spec:
                   type: string
                   default: ghcr.io/mixumos/mixumos:latest
                   description: mixumOS 容器镜像(make dist 产出,OCI 双架构)
-                snapshotPVC:
+                snapshotPvc:
                   type: string
                   description: >
                     工作区与快照存储挂载的 PVC。跨 Pod 指向同一 PVC
