@@ -51,40 +51,18 @@ spec:
                 runnerImage:
                   type: string
                   default: ghcr.io/mixumos/mixumos:latest
-                  description: mixumOS 容器镜像(make dist 产出,OCI 双架构)
+                  description: >
+                    mixumOS 容器镜像(make dist 产出,OCI/rootfs 均可)。契约:
+                    镜像内提供 /usr/bin/mixumd 且支持 MIXUM_RUN_ONCE=1;
+                    operator 以显式 command + 空 args 覆盖镜像入口。
                 snapshotPvc:
                   type: string
                   description: >
                     工作区与快照存储挂载的 PVC。跨 Pod 指向同一 PVC
                     即实现任务在云端接力(配合 snap.push/pull)。
-                snapshotPolicy:
-                  type: object
-                  properties:
-                    pre:
-                      type: boolean
-                      default: true
-                    kind:
-                      type: string
-                      default: disk
-                      enum: [disk, memory, hybrid]
-                    onFailure:
-                      type: string
-                      default: none
-                      enum: [none, restore]
                 ttlSecondsAfterFinished:
                   type: integer
                   default: 3600
-                env:
-                  type: array
-                  description: 注入容器的额外环境变量
-                  items:
-                    type: object
-                    required: [name]
-                    properties:
-                      name:
-                        type: string
-                      value:
-                        type: string
             status:
               type: object
               properties:
@@ -92,8 +70,6 @@ spec:
                   type: string
                   enum: [pending, running, completed, failed, canceled]
                 podName:
-                  type: string
-                startedAt:
                   type: string
                 finishedAt:
                   type: string
