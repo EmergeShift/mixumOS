@@ -67,6 +67,8 @@ struct mixcomp_window {
 	uint32_t id;
 	struct wlr_xdg_surface *xdg;
 	struct wlr_surface *surface;
+	// 客户端 pid（window.open 里带给 agentd，用于 GUI 会话匹配）。
+	int pid;
 
 	char app_id[128];
 	char title[256];

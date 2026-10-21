@@ -119,6 +119,7 @@ void stream_send_window(struct mixcomp_server *s, struct mixcomp_window *w,
 	json_object_object_add(root, "title", json_object_new_string(w->title));
 	json_object_object_add(root, "width", json_object_new_int(w->width));
 	json_object_object_add(root, "height", json_object_new_int(w->height));
+	json_object_object_add(root, "pid", json_object_new_int(w->pid));
 	const char *str = json_object_to_json_string(root);
 	rec_send_rc rc = rec_send(s->sock_fd, REC_CONTROL, str, strlen(str));
 	if (rc == REC_SEND_FATAL) {

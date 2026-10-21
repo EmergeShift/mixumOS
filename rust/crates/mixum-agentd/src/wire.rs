@@ -74,6 +74,8 @@ pub struct SnapNode {
     pub kernel: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gui_sessions: Vec<mixum_protocol::GuiSession>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

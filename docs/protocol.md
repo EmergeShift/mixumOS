@@ -158,7 +158,8 @@ task.event 负载:`{ taskId, type, step?, data, ts }`,`data` 恒为对象:
 | snap.push | `{ node, remote, token? }` | `{ node, chunksSent, bytesSent, dedupRatio }` |
 
 SnapNode:`{ id, parent?, branch, label?, kind, auto?, createdAt, origin?,
-sizeBytes, chunks, kernel?, arch? }`。`id` 为 ULID;树语义见 snapshots.md §4。
+sizeBytes, chunks, kernel?, arch?, guiSessions? }`。`id` 为 ULID;树语义见
+snapshots.md §4。`guiSessions` 是 OS 侧扩展（restore 后重放窗口），旧客户端忽略即可。
 
 ### 4.4 显示
 

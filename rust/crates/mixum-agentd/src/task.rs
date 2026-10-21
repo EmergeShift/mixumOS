@@ -4,7 +4,9 @@ use crate::snapshot::SnapshotEngine;
 use crate::wire::TaskEvent;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use mixum_protocol::GuiSession;
 use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -29,6 +31,8 @@ pub struct LocalSandbox {
     pgids: Arc<std::sync::Mutex<Vec<i32>>>,
     // 当前任务树的首领 pid（快照引擎 CRIU dump 用）。
     leader: Option<Arc<AtomicI32>>,
+    // GUI 会话清单：仅记录 spawn_gui 路径，restore 时按它重放。
+    gui: Arc<std::sync::Mutex<HashMap<i32, GuiSession>>>,
 }
 
 impl Default for LocalSandbox {
@@ -41,6 +45,7 @@ impl LocalSandbox {
         Self {
             pgids: Arc::new(std::sync::Mutex::new(Vec::new())),
             leader: None,
+            gui: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -80,6 +85,106 @@ impl LocalSandbox {
             let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pgid), signal);
         }
     }
+
+    /// 当前仍存活的 GUI 启动记录（快照 metadata 钩子用）。
+    pub fn gui_launches(&self) -> Vec<GuiSession> {
+        self.gui
+            .lock()
+            .expect("gui 会话锁")
+            .values()
+            .filter(|session| pid_alive(session.pid))
+            .cloned()
+            .collect()
+    }
+
+    /// restore 后按清单重放：先终止本地旧进程（仅限我们自己跟踪的 pid），
+    /// 再以原命令/环境/工作目录拉起新进程。返回成功拉起的数量。
+    pub fn replay_gui_sessions(&self, sessions: &[GuiSession]) -> usize {
+        let mut started = 0;
+        for session in sessions {
+            if !session.has_launch() {
+                continue;
+            }
+            let tracked = self
+                .gui
+                .lock()
+                .expect("gui 会话锁")
+                .contains_key(&session.pid);
+            if tracked && session.pid > 0 {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-session.pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+                self.gui.lock().expect("gui 会话锁").remove(&session.pid);
+                self.pgids
+                    .lock()
+                    .expect("sandbox 进程组锁")
+                    .retain(|pid| *pid != session.pid);
+            }
+            match self.spawn_replay(session) {
+                Ok(_) => started += 1,
+                Err(error) => eprintln!("GUI 会话重放失败（{}）：{error}", session.command),
+            }
+        }
+        started
+    }
+
+    fn spawn_replay(&self, session: &GuiSession) -> std::io::Result<i32> {
+        let mut cmd = std::process::Command::new(&session.command);
+        cmd.args(&session.args);
+        if !session.cwd.is_empty() {
+            cmd.current_dir(&session.cwd);
+        }
+        if !session.env.is_empty() {
+            cmd.envs(&session.env);
+        }
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd.spawn()?;
+        let pid = child.id() as i32;
+        let mut recorded = session.clone();
+        recorded.pid = pid;
+        self.gui.lock().expect("gui 会话锁").insert(pid, recorded);
+        self.pgids.lock().expect("sandbox 进程组锁").push(pid);
+        let gui = self.gui.clone();
+        let pgids = self.pgids.clone();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            gui.lock().expect("gui 会话锁").remove(&pid);
+            pgids
+                .lock()
+                .expect("sandbox 进程组锁")
+                .retain(|current| *current != pid);
+        });
+        Ok(pid)
+    }
+}
+
+fn pid_alive(pid: i32) -> bool {
+    pid > 0
+        && nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
+/// 重放时保留最小环境：路径、显示、运行时目录与 MIXUM_* 配置。
+fn gui_env() -> BTreeMap<String, String> {
+    const KEEP: [&str; 7] = [
+        "PATH",
+        "HOME",
+        "USER",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "MIXUM_WORK",
+    ];
+    std::env::vars()
+        .filter(|(key, _)| KEEP.contains(&key.as_str()) || key.starts_with("MIXUM_"))
+        .collect()
 }
 
 #[async_trait]
@@ -157,13 +262,29 @@ impl Sandbox for LocalSandbox {
         let mut child = cmd.spawn()?;
         let pid = child.id().ok_or("子进程没有 pid")?;
         self.set_task_pid(task, pid as i32).await;
+        let session = GuiSession {
+            command: program.to_string(),
+            args: args.to_vec(),
+            cwd: dir
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            env: gui_env(),
+            pid: pid as i32,
+            ..Default::default()
+        };
+        self.gui
+            .lock()
+            .expect("gui 会话锁")
+            .insert(pid as i32, session);
         let pgids = self.pgids.clone();
+        let gui = self.gui.clone();
         tokio::spawn(async move {
             let _ = child.wait().await;
             pgids
                 .lock()
                 .expect("sandbox 进程组锁")
                 .retain(|current| *current != pid as i32);
+            gui.lock().expect("gui 会话锁").remove(&(pid as i32));
         });
         Ok(pid)
     }
@@ -960,5 +1081,33 @@ printf '%s\n' '{"type":"done"}'
             "state 事件 data 必须是对象: {states:?}"
         );
         assert!(states.contains(&serde_json::json!({ "state": "completed" })));
+    }
+
+    #[test]
+    fn replay_gui_sessions_spawns_with_recorded_command() {
+        let sandbox = LocalSandbox::new();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("replayed.txt");
+        let session = GuiSession {
+            command: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("echo replayed > {}", target.display()),
+            ],
+            cwd: dir.path().to_string_lossy().into_owned(),
+            env: Default::default(),
+            pid: 999_999,
+            ..Default::default()
+        };
+        assert_eq!(sandbox.replay_gui_sessions(&[session]), 1);
+        let mut replayed = false;
+        for _ in 0..100 {
+            if target.exists() {
+                replayed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(replayed, "重放命令没有产生文件");
     }
 }
