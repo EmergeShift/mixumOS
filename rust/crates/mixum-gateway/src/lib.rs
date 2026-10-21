@@ -18,7 +18,7 @@ pub mod registry;
 pub mod registry_k8s;
 
 pub use mesh::MeshHub;
-pub use registry::{MemoryRegistry, NodeRecord, NodeRegistry};
+pub use registry::{MemoryRegistry, NodeRecord, NodeRegistry, RegistryError};
 
 use async_trait::async_trait;
 use mixum_protocol::ops::{Cap, ErrCode};
@@ -127,6 +127,49 @@ pub struct Gateway {
 pub fn valid_node_name(name: &str) -> bool {
     // RFC 0003 限制的是字符数;按字节数会让中文名提前触发上限。
     !name.is_empty() && name.chars().count() <= 64 && !name.contains(':')
+}
+
+/// 解析 envelope.node:缺省返回 `None`(客户端可自动路由到唯一在线节点);
+/// 出现但不是合法节点名(空串/非字符串/null)一律返回 `Err`,由调用方回
+/// `bad_request`——不静默降级为自动路由。
+fn envelope_node(env: &Value) -> Result<Option<&str>, ()> {
+    match env.get("node") {
+        None => Ok(None),
+        Some(Value::String(name)) if valid_node_name(name) => Ok(Some(name)),
+        Some(_) => Err(()),
+    }
+}
+
+/// 节点注册(连接)失败类别:bin 层据此映射 RFC 0003 错误码,不解析文本。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectError {
+    /// 节点名不合法 → `bad_request`。
+    InvalidName(String),
+    /// 同名节点在线 → `conflict`。
+    Conflict(String),
+    /// 注册表/租约后端故障 → `internal`。
+    Internal(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidName(message) | Self::Conflict(message) | Self::Internal(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {}
+
+impl From<RegistryError> for ConnectError {
+    fn from(err: RegistryError) -> Self {
+        match err {
+            RegistryError::Conflict(message) => Self::Conflict(message),
+            RegistryError::Internal(message) => Self::Internal(message),
+        }
+    }
 }
 
 /// 配对限速桶键:优先取 IP,去掉 ephemeral port;非 SocketAddr 输入原样保留(单测)。
@@ -322,9 +365,11 @@ impl Gateway {
         name: &str,
         version: &str,
         out: OutTx,
-    ) -> Result<(), String> {
+    ) -> Result<(), ConnectError> {
         if !valid_node_name(name) {
-            return Err(format!("节点名非法(1..=64 字符、无冒号): {name}"));
+            return Err(ConnectError::InvalidName(format!(
+                "节点名非法(1..=64 字符、无冒号): {name}"
+            )));
         }
         let record = NodeRecord {
             name: name.to_owned(),
@@ -353,7 +398,7 @@ impl Gateway {
     }
 
     /// 节点心跳续约(relay 每 20s 一次)。
-    pub async fn renew_node(&self, name: &str) -> Result<(), String> {
+    pub async fn renew_node(&self, name: &str) -> Result<(), RegistryError> {
         self.nodes
             .renew(name, &self.instance_id, mixum_protocol::envelope::now_ms())
             .await
@@ -468,30 +513,28 @@ impl Gateway {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let mut node_name = env
-            .get("node")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if !node_name.is_empty() && !valid_node_name(&node_name) {
+        let Ok(field) = envelope_node(&env) else {
             return vec![Outbound::Text(err_envelope(
                 Some(&env),
                 ErrCode::BadRequest,
                 "node 非法(1..=64 字符、无冒号)",
             ))];
-        }
-        if node_name.is_empty() {
-            let online = self.node_offline().await;
-            if online.len() == 1 {
-                node_name = online[0].clone();
-            } else {
-                return vec![Outbound::Text(err_envelope(
-                    Some(&env),
-                    ErrCode::BadRequest,
-                    "请指定 node(多节点在线)",
-                ))];
+        };
+        let node_name = match field {
+            Some(name) => name.to_owned(),
+            None => {
+                let online = self.node_offline().await;
+                if online.len() == 1 {
+                    online[0].clone()
+                } else {
+                    return vec![Outbound::Text(err_envelope(
+                        Some(&env),
+                        ErrCode::BadRequest,
+                        "请指定 node(多节点在线)",
+                    ))];
+                }
             }
-        }
+        };
         let out = Vec::new();
         let Some(node) = self.nodes.get(&node_name).await else {
             return vec![Outbound::Text(err_envelope(
@@ -505,7 +548,7 @@ impl Gateway {
             let Some(mesh) = &self.mesh else {
                 return vec![Outbound::Text(err_envelope(
                     Some(&env),
-                    ErrCode::Unavailable,
+                    ErrCode::Internal,
                     &format!("节点由其他 gateway 副本持有: {node_name}"),
                 ))];
             };
@@ -523,7 +566,7 @@ impl Gateway {
                 }
                 Err(e) => vec![Outbound::Text(err_envelope(
                     Some(&env),
-                    ErrCode::Unavailable,
+                    ErrCode::Internal,
                     &e,
                 ))],
             };
@@ -531,7 +574,7 @@ impl Gateway {
         let Some(node_out) = self.local_outbox(&node_name).await else {
             return vec![Outbound::Text(err_envelope(
                 Some(&env),
-                ErrCode::Unavailable,
+                ErrCode::Internal,
                 &format!("节点连接已失效: {node_name}"),
             ))];
         };
@@ -691,22 +734,18 @@ impl Gateway {
         let Ok(env) = serde_json::from_str::<Value>(text) else {
             return;
         };
-        let node_name = env
-            .get("node")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if !valid_node_name(&node_name) {
+        // mesh 转发必须带 node:缺省视为请求非法,不做单节点自动路由。
+        let Ok(Some(node_name)) = envelope_node(&env) else {
             self.mesh_error(
                 session,
                 &env,
                 ErrCode::BadRequest,
-                "node 非法(1..=64 字符、无冒号)",
+                "node 必填且为 1..=64 字符、不含冒号",
             )
             .await;
             return;
-        }
-        let Some(record) = self.nodes.get(&node_name).await else {
+        };
+        let Some(record) = self.nodes.get(node_name).await else {
             self.mesh_error(
                 session,
                 &env,
@@ -720,17 +759,17 @@ impl Gateway {
             self.mesh_error(
                 session,
                 &env,
-                ErrCode::Unavailable,
+                ErrCode::Internal,
                 &format!("节点由其他 gateway 副本持有: {node_name}"),
             )
             .await;
             return;
         }
-        let Some(out) = self.local_outbox(&node_name).await else {
+        let Some(out) = self.local_outbox(node_name).await else {
             self.mesh_error(
                 session,
                 &env,
-                ErrCode::Unavailable,
+                ErrCode::Internal,
                 &format!("节点连接已失效: {node_name}"),
             )
             .await;
@@ -740,7 +779,7 @@ impl Gateway {
             .mesh_open
             .lock()
             .await
-            .insert(session.to_owned(), node_name.clone())
+            .insert(session.to_owned(), node_name.to_owned())
             .is_none();
         if first {
             let open = json!({
@@ -1161,6 +1200,69 @@ mod tests {
         mpsc::channel(16)
     }
 
+    fn error_code(out: &Outbound) -> String {
+        match out {
+            Outbound::Text(text) => {
+                let value: Value = serde_json::from_str(text).expect("错误信封是 JSON");
+                value
+                    .pointer("/payload/code")
+                    .and_then(Value::as_str)
+                    .expect("错误信封带 payload.code")
+                    .to_owned()
+            }
+            other => panic!("期望文本,实际 {other:?}"),
+        }
+    }
+
+    struct RecordingMesh {
+        replies: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingMesh {
+        fn new() -> Self {
+            Self {
+                replies: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn codes(&self) -> Vec<String> {
+            self.replies
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|text| {
+                    let value: Value = serde_json::from_str(text).unwrap();
+                    value
+                        .pointer("/payload/code")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MeshRouter for RecordingMesh {
+        async fn forward_text(
+            &self,
+            _client_session: &str,
+            _record: &NodeRecord,
+            _text: &str,
+        ) -> Result<String, String> {
+            Err("mesh 不可达".into())
+        }
+        async fn client_session(&self, _mesh_session: &str) -> Option<String> {
+            None
+        }
+        async fn reply_text(&self, _mesh_session: &str, text: &str) {
+            self.replies.lock().unwrap().push(text.to_owned());
+        }
+        async fn reply_binary(&self, _mesh_session: &str, _frame: &[u8]) {}
+        async fn close_client(&self, _client_session: &str) {}
+        async fn close_inbound(&self, _mesh_session: &str) {}
+    }
+
     #[tokio::test]
     async fn client_request_routes_to_node_and_reply_returns() {
         let gw = Gateway::new(Signer::generate());
@@ -1288,8 +1390,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_held_by_another_replica_reports_unavailable() {
-        // M3b 预留路径:注册表里有节点,但本副本没有它的出站连接。
+    async fn node_held_by_another_replica_without_mesh_is_internal() {
+        // M3b 预留路径:注册表里有节点,本副本没有 mesh 转发器。
         let registry = Arc::new(MemoryRegistry::new());
         registry
             .register(NodeRecord {
@@ -1306,7 +1408,105 @@ mod tests {
         let session = gw.client_connected("user:u1", ctx).await;
         let req = json!({"v":1,"id":"r5","op":"task.list","node":"remote","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
-        assert!(matches!(&out[0], Outbound::Text(t) if t.contains("unavailable")));
+        assert_eq!(error_code(&out[0]), "internal");
+    }
+
+    #[tokio::test]
+    async fn mesh_forward_failure_is_internal() {
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(NodeRecord {
+                name: "remote".into(),
+                version: "0.1.0".into(),
+                since: 1,
+                owner: "gw-other".into(),
+                owner_addr: "ws://127.0.0.1:1/mesh".into(),
+            })
+            .await
+            .unwrap();
+        let gw = Gateway::with_options(
+            Signer::generate(),
+            registry,
+            "local".into(),
+            String::new(),
+            Some(Arc::new(RecordingMesh::new())),
+        );
+        let (ctx, _crx) = mpsc_pair();
+        let session = gw.client_connected("user:u1", ctx).await;
+        let req = json!({"v":1,"id":"r6","op":"task.list","node":"remote","payload":{}});
+        let out = gw.on_client_text(&session, &req.to_string()).await;
+        assert_eq!(error_code(&out[0]), "internal");
+    }
+
+    #[tokio::test]
+    async fn stale_local_outbox_is_internal() {
+        // 注册表有本副本记录,但出站连接已不在(进程内状态不一致)。
+        let registry = Arc::new(MemoryRegistry::new());
+        registry
+            .register(NodeRecord {
+                name: "stale".into(),
+                version: "0.1.0".into(),
+                since: 1,
+                owner: "local".into(),
+                owner_addr: String::new(),
+            })
+            .await
+            .unwrap();
+        let gw = Gateway::with_registry(Signer::generate(), registry);
+        let (ctx, _crx) = mpsc_pair();
+        let session = gw.client_connected("user:u1", ctx).await;
+        let req = json!({"v":1,"id":"r7","op":"task.list","node":"stale","payload":{}});
+        let out = gw.on_client_text(&session, &req.to_string()).await;
+        assert_eq!(error_code(&out[0]), "internal");
+    }
+
+    #[tokio::test]
+    async fn mesh_route_errors_use_rfc_codes() {
+        let registry = Arc::new(MemoryRegistry::new());
+        for (name, owner) in [("remote", "gw-other"), ("stale", "local")] {
+            registry
+                .register(NodeRecord {
+                    name: name.into(),
+                    version: "0.1.0".into(),
+                    since: 1,
+                    owner: owner.into(),
+                    owner_addr: String::new(),
+                })
+                .await
+                .unwrap();
+        }
+        let mesh = Arc::new(RecordingMesh::new());
+        let gw = Gateway::with_options(
+            Signer::generate(),
+            registry,
+            "local".into(),
+            String::new(),
+            Some(mesh.clone()),
+        );
+        for (session, req) in [
+            (
+                "ms-1",
+                json!({"v":1,"id":"m1","op":"task.list","node":"remote","payload":{}}),
+            ),
+            (
+                "ms-2",
+                json!({"v":1,"id":"m2","op":"task.list","node":"stale","payload":{}}),
+            ),
+            (
+                "ms-3",
+                json!({"v":1,"id":"m3","op":"task.list","payload":{}}),
+            ),
+        ] {
+            gw.on_mesh_text(session, &req.to_string()).await;
+        }
+        assert_eq!(
+            mesh.codes(),
+            vec![
+                "internal".to_owned(),
+                "internal".to_owned(),
+                "bad_request".to_owned()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1371,12 +1571,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn present_but_invalid_node_field_is_not_auto_routed() {
+        // 单节点在线也不能把空串/null/数字静默降级为自动路由。
+        let gw = Gateway::new(Signer::generate());
+        let (ntx, _nrx) = mpsc_pair();
+        gw.node_connected("only", "0.1.0", ntx).await.unwrap();
+        let (ctx, _crx) = mpsc_pair();
+        let session = gw.client_connected("user:u1", ctx).await;
+        for node in [json!(""), json!(123), Value::Null] {
+            let req = json!({"v":1,"id":"n2","op":"sys.ping","node":node,"payload":{}});
+            let out = gw.on_client_text(&session, &req.to_string()).await;
+            assert_eq!(error_code(&out[0]), "bad_request", "node={node}");
+        }
+    }
+
+    #[tokio::test]
     async fn node_connected_rejects_invalid_name() {
         let gw = Gateway::new(Signer::generate());
         let err = gw
             .node_connected("bad:name", "0.1.0", mpsc_pair().0)
             .await
             .unwrap_err();
-        assert!(err.contains("非法"), "{err}");
+        assert!(matches!(err, ConnectError::InvalidName(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn duplicate_node_connection_is_conflict() {
+        let gw = Gateway::new(Signer::generate());
+        gw.node_connected("a", "0.1.0", mpsc_pair().0)
+            .await
+            .unwrap();
+        let err = gw
+            .node_connected("a", "0.1.0", mpsc_pair().0)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConnectError::Conflict(_)), "{err:?}");
     }
 }

@@ -69,8 +69,9 @@ mac PWA ───┘                      └── WSS 出站注册 ── mixu
 ```
 
 - envelope 加 `node: String`(serde default 空串 + skip_serializing,
-  纯增量,mixumd 忽略之);node 名与注册名同规则:**1..=64 字符、不含冒号**,
-  非法值返回 `bad_request`(不静默降级);
+  纯增量,mixumd 忽略之);gateway 按原始 JSON 区分「字段缺省」与「字段
+  存在但非法」:node 名与注册名同规则(**1..=64 字符、不含冒号**),
+  空串/null/非字符串/超长等一律返回 `bad_request`,不静默降级为自动路由;
 - **无 node 字段**:单节点时路由到唯一在线节点;多节点时返回
   `bad_request`("请指定 node")——不做隐式默认,避免歧义;
 - **请求-应答关联**:gateway 维护 `replyTo → (客户端会话, 原节点)`,
@@ -101,7 +102,7 @@ mac PWA ───┘                      └── WSS 出站注册 ── mixu
   不含 ephemeral port),超限返回 `conflict`;
 - 首条消息与令牌校验失败按语义返回错误码:`bad_request`(请求非法)、
   `forbidden`(令牌/名不匹配)、`conflict`(重名注册、限流)、
-  `not_found`(节点离线)、`internal`(转发链路异常)。
+  `not_found`(节点离线)、`internal`(转发链路异常、租约/后端故障)。
 
 ## 6. 安全边界(诚实清单)
 

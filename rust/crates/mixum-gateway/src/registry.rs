@@ -12,6 +12,25 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
+/// 注册/续约失败类别:调用方据此映射 RFC 0003 错误码,不解析错误文本。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegistryError {
+    /// 同名节点仍在租约内(状态冲突)。
+    Conflict(String),
+    /// 租约后端/存储故障(内部错误)。
+    Internal(String),
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict(message) | Self::Internal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
 /// 注册表中的一条节点元数据。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeRecord {
@@ -28,19 +47,21 @@ pub struct NodeRecord {
 /// 节点注册表(元数据)。
 ///
 /// 不变式:
-/// - `register` 对在线同名节点返回错误(任何 owner;过期租约可由新连接接管);
+/// - `register` 对在线同名节点返回 [`RegistryError::Conflict`]
+///   (任何 owner;过期租约可由新连接接管),后端故障返回
+///   [`RegistryError::Internal`];
 /// - `remove` 只在 owner 匹配时生效,避免旧连接关掉新连接;
 /// - `get` / `online` 过滤过期租约(k8s 后端按 renewTime 判定)。
 #[async_trait]
 pub trait NodeRegistry: Send + Sync {
-    async fn register(&self, record: NodeRecord) -> Result<(), String>;
+    async fn register(&self, record: NodeRecord) -> Result<(), RegistryError>;
     async fn remove(&self, name: &str, owner: &str);
     async fn get(&self, name: &str) -> Option<NodeRecord>;
     /// 在线节点名(排序后返回,便于日志与断言稳定)。
     async fn online(&self) -> Vec<String>;
 
-    /// 节点心跳续约;内存实现无操作。
-    async fn renew(&self, _name: &str, _owner: &str, _now_ms: i64) -> Result<(), String> {
+    /// 节点心跳续约;内存实现只校验归属。
+    async fn renew(&self, _name: &str, _owner: &str, _now_ms: i64) -> Result<(), RegistryError> {
         Ok(())
     }
 
@@ -72,10 +93,13 @@ impl MemoryRegistry {
 
 #[async_trait]
 impl NodeRegistry for MemoryRegistry {
-    async fn register(&self, record: NodeRecord) -> Result<(), String> {
+    async fn register(&self, record: NodeRecord) -> Result<(), RegistryError> {
         let mut nodes = self.nodes.write().await;
         if nodes.contains_key(&record.name) {
-            return Err(format!("节点重名在线:{}", record.name));
+            return Err(RegistryError::Conflict(format!(
+                "节点重名在线:{}",
+                record.name
+            )));
         }
         nodes.insert(record.name.clone(), record);
         Ok(())
@@ -98,12 +122,12 @@ impl NodeRegistry for MemoryRegistry {
         names
     }
 
-    async fn renew(&self, name: &str, owner: &str, _now_ms: i64) -> Result<(), String> {
+    async fn renew(&self, name: &str, owner: &str, _now_ms: i64) -> Result<(), RegistryError> {
         let nodes = self.nodes.read().await;
         match nodes.get(name) {
             Some(record) if record.owner == owner => Ok(()),
-            Some(_) => Err(format!("节点 {name} 不属于本实例")),
-            None => Err(format!("节点不在线: {name}")),
+            Some(_) => Err(RegistryError::Conflict(format!("节点 {name} 不属于本实例"))),
+            None => Err(RegistryError::Internal(format!("节点不在线: {name}"))),
         }
     }
 }
@@ -132,6 +156,24 @@ mod tests {
         assert!(registry.register(record("a", "gw-1")).await.is_err());
         assert!(registry.register(record("a", "gw-2")).await.is_err());
         assert_eq!(registry.online().await, vec!["a".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn errors_are_categorized_for_api_mapping() {
+        let registry = MemoryRegistry::new();
+        registry.register(record("a", "gw-1")).await.unwrap();
+        assert!(matches!(
+            registry.register(record("a", "gw-2")).await,
+            Err(RegistryError::Conflict(_))
+        ));
+        assert!(matches!(
+            registry.renew("a", "gw-2", 42).await,
+            Err(RegistryError::Conflict(_))
+        ));
+        assert!(matches!(
+            registry.renew("ghost", "gw-1", 42).await,
+            Err(RegistryError::Internal(_))
+        ));
     }
 
     #[tokio::test]
