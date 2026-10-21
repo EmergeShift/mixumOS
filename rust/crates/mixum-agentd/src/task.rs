@@ -1088,7 +1088,10 @@ mod tests {
             })
             .await
             .unwrap();
-        for _ in 0..20 {
+        // 上限 5s：CI runner 上进程启动与调度偶发超过 200ms，
+        // 原来固定 20×10ms 的窗口会把这个用例变成 flaky（2026-10-21 出现过一次）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             if matches!(task.state().await.as_str(), COMPLETED | FAILED) {
                 break;
             }
