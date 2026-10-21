@@ -140,18 +140,41 @@ Rust 实现位于 `rust/crates/mixum-snapshot`，并以本节与本文规格为�
 
 Rust 节点 ID 使用本地随机十六进制后缀，时间字段仍为 Unix 毫秒；JSON 字段使用协议规定的 camelCase。Go 侧 bbolt 的事务存储和 Rust 侧 sled 的文件格式不互通，但节点/清单/块的线格式与语义由交叉向量测试锁定。GC 的推送竞态保护已实现(§5,10 分钟 mtime 窗口)。
 
-### 引擎延迟基准（2026-10-17，Linux 容器 release 构建）
+### 引擎延迟基准（2026-10-21 复测，Linux 容器 release 构建）
 
 复现:`cargo run --release -p mixum-snapshot --example bench`。
 
 | 工作区 | 冷打包 | 无变更(中位) | 部分变更 | 恢复物化 |
 |--------|--------|--------------|----------|----------|
-| code:300 × 2 KiB 小文件 | 1651 ms | 9.3 ms | 813 ms | 1593 ms |
-| assets:50 MiB 单文件 | 78.5 ms | 36.7 ms | 77.3 ms | 92.2 ms |
+| code:300 × 2 KiB 小文件 | 2388 ms | 8.8 ms | 373 ms | 689 ms |
+| assets:50 MiB 单文件 | 74.6 ms | 44.9 ms | 90.4 ms | 122 ms |
 
-结论:**「无感前置快照」在热路径成立**(未变更工作区 9 ms / 大文件 37 ms),
-大文件吞吐约 640 MB/s。短板是小文件工作区:逐块「临时文件+rename」与
-sled 单键提交的每文件开销 ≈2.7 ms(打包)/ ≈5.3 ms(恢复),几百个
-小文件即进入秒级。优化方向(未实施):块分组批量落盘、清单复用
-(ino/size/mtime 未变直接引用旧块)、sled 批量事务。跨节点流转
-(盒盖→云端续跑)已由双节点 e2e 全链验证,见 tests/integration/sync-e2e.mjs。
+结论:**「无感前置快照」在热路径成立**(未变更工作区 8.8 ms / 大文件 45 ms),
+大文件吞吐约 640 MB/s。短板仍是小文件工作区:逐块「临时文件+rename」与
+sled 单键提交的每文件开销 ≈2.3 ms(打包)/ ≈2.7 ms(恢复),几百个
+小文件即进入秒级(上轮 2026-10-17 首次测量为冷 1651 ms/恢复 1593 ms,
+本轮恢复降至 689 ms,数字随机器与缓存波动,以同环境复测为准)。优化方向
+(未实施):块分组批量落盘、清单复用(ino/size/mtime 未变直接引用旧块)、
+sled 批量事务。跨节点流转(盒盖→云端续跑)已由双节点 e2e 全链验证,
+见 tests/integration/sync-e2e.mjs。
+
+### 启动延迟基准（2026-10-21，Windows 11 + Docker Desktop/WSL2）
+
+复现:`node tests/integration/startup-bench.mjs --runs 10`(镜像
+`mixumos:0.1.0-x86_64`,入口显式 `/usr/bin/mixumd --config /dev/null`;
+时间戳取自 `docker logs -t` 与 `State.StartedAt`,不受轮询间隔影响)。
+
+| 场景 | container→ready(min/median/p95) | run→ready(median/p95) |
+|------|--------------------------------|-----------------------|
+| 冷启动(新建容器) | 82 / 107 / 118 ms | 226 / 236 ms |
+| 热重启(docker start) | 90 / 102 / 110 ms | 175 / 185 ms |
+
+- `container→ready` = mixumd 进程启动到监听 7601 的延迟(含快照引擎打开、
+  证书与令牌生成);`run→ready` = 宿主发起 docker run/start 到可连接的端到端
+  延迟(含 Docker CLI/daemon/容器创建)。表中为中位数(10 次,宿主负载会影响
+  绝对值;同机复测请以 `--runs 10` 输出为准)。
+- 冷/热容器内延迟接近(107 vs 102 ms),说明主要开销在 mixumd 自身启动;
+  端到端与容器内的差值(冷 119 ms / 热 73 ms)来自 Docker CLI/daemon/容器创建。
+- 会话恢复组合:快照物化(300 小文件 689 ms / 50 MiB 单文件 122 ms)
+  + agentd 启动(约 107 ms)→ 约 0.23–0.80 s;未计入 GUI(mixcomp/foot)
+  启动与宿主冷缓存。

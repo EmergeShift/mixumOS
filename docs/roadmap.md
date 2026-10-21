@@ -77,6 +77,10 @@
       断线重连/光标叠加),接管+输入注入(user 模式鼠标/滚轮/键盘,流 WS
       白名单控制通道),view-e2e.mjs 路由+WS 帧断言与真浏览器实测
       (canvas 渲染+指针注入引出 damage 帧+截图存证);
+- [x] 启动延迟量化(2026-10-21):mixumd 容器内启动到可连接中位
+      107 ms(冷)/102 ms(热),端到端 docker run 中位 226 ms;
+      未变更工作区热快照 8.8 ms、300 文件快照恢复 689 ms
+      (tests/integration/startup-bench.mjs;口径见 docs/snapshots.md §9);
 - [ ] 控制台 PWA:任务流、快照树(图状)、窗口画布(光标映射)、接管按钮。
 - [x] 24h 流稳定性浸泡(2026-10-21,FINAL PASS):可恢复多段累计
       (11 段、1498 分钟,anomalies/断连/卡顿全零),期间两次宿主重启
