@@ -31,6 +31,6 @@ mixum-ctl file get "$path" --out ./result.bin
 可拿到结构化结果。Tauri 窗口文件拖入走同一条通道，上传后把远端路径作为
 文本注入目标窗口。
 
-本地视图默认监听 `127.0.0.1:7602`。根页面和窗口列表是单文件 HTML；浏览器通过 `/api/stream/<window>` WebSocket 接收 JPEG 二进制帧，按协议 27 字节帧头绘制画面并叠加光标元数据。`display record` 把指定窗口的 JPEG 逐帧保存为 `frame-0000.jpg` 等序列。
+本地视图默认监听 `127.0.0.1:7602`。管理页（`/`）每 2s 轮询窗口列表，点击后在**独立弹出窗口**打开 `/view/<id>`——每个容器窗口一个独立视图：标题栏显示窗口标题与接管状态（badge），`display.attach` 以 fps 30 订阅 png（损伤门控下静态窗口零流量，attach 强制出首帧），按协议 27 字节帧头绘制全帧与 damage 补丁，首帧后按内容尺寸 resize，断线 1s 自动重连。视图页支持**接管与输入注入**：`接管/释放` 按钮走 `display.takeover`（agent 持有时强制接管需确认），user 模式下鼠标（motion/button/滚轮）与键盘（keysym+修饰键，F5/F11/F12 放行浏览器）经 `display.input` 注入，坐标按 canvas 缩放映射到物理像素；上行控制信封经流 WS 的白名单通道转发（仅 `display.input`/`display.takeover`/`display.list`，服务端持完整凭据，快照等高权限 op 不放行）。`display record` 把指定窗口的 JPEG 逐帧保存为 `frame-0000.jpg` 等序列。
 
 安全边界：只连接 TLS 1.3；自签证书不依赖系统 CA，而是指纹固定；TOFU 文件与配置文件不应放到共享目录；视图服务只绑定回环地址，生产环境不要将 7602 暴露到局域网。
