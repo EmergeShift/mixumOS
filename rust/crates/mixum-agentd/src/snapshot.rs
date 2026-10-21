@@ -6,6 +6,7 @@
 use crate::wire::{SnapNode, SnapTreeResponse};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -43,6 +44,16 @@ pub trait SnapshotEngine: Send + Sync {
     async fn head(&self) -> Result<Option<String>, SnapshotError>;
     async fn delete(&self, node: &str) -> Result<bool, SnapshotError>;
     async fn gc(&self) -> Result<u32, SnapshotError>;
+
+    /// 导出节点为 `.mart`，返回文件大小。默认不支持。
+    async fn export_mart(&self, _node: &str, _out: &Path) -> Result<u64, SnapshotError> {
+        Err(SnapshotError::Invalid("当前快照后端不支持 .mart 导出".into()))
+    }
+    /// 从 `.mart` 导入节点，返回新节点 id。默认不支持。
+    async fn import_mart(&self, _file: &Path, _origin: &str) -> Result<String, SnapshotError> {
+        Err(SnapshotError::Invalid("当前快照后端不支持 .mart 导入".into()))
+    }
+
     /// sys.info 的 snapshotBackend 字段(对齐 reference 的 BackendName)。
     fn backend_name(&self) -> &str {
         "memory"
@@ -400,6 +411,22 @@ impl SnapshotEngine for RealSnapshotEngine {
             .gc()
             .map(|removed| removed as u32)
             .map_err(Self::map_error)
+    }
+
+    async fn export_mart(&self, node: &str, out: &Path) -> Result<u64, SnapshotError> {
+        let engine = self.engine.lock().expect("快照引擎锁");
+        mixum_mart::export_node(&engine, node, out)
+            .map_err(|error| SnapshotError::Internal(error.to_string()))?;
+        std::fs::metadata(out)
+            .map(|meta| meta.len())
+            .map_err(|error| SnapshotError::Internal(error.to_string()))
+    }
+
+    async fn import_mart(&self, file: &Path, origin: &str) -> Result<String, SnapshotError> {
+        let mut engine = self.engine.lock().expect("快照引擎锁");
+        let report = mixum_mart::import_mart(&mut engine, file, origin)
+            .map_err(|error| SnapshotError::Internal(error.to_string()))?;
+        Ok(report.node.id)
     }
 
     fn backend_name(&self) -> &str {
