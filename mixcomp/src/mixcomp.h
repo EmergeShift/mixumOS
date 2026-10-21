@@ -48,6 +48,9 @@ unsigned char *h264_encode(struct h264_encoder *enc, const unsigned char *bgra,
 #define FRAME_FLAG_HASCURSOR 0x0002
 // bit2=这是 damage 补丁（payload 前 20 字节为 patch 头）。
 #define FRAME_FLAG_PATCH     0x0004
+// bit3=快照冻结状态帧（无负载，仅 27 字节帧头）。客户端收到后应停止解码，
+// 保留最后一帧画面；收到下一个非 frozen 帧即恢复。
+#define FRAME_FLAG_FROZEN    0x0008
 
 // Damage 补丁头（小端）：
 // [0:4] x [4:8] y [8:12] w [12:16] h [16:20] format
@@ -138,11 +141,16 @@ struct mixcomp_server {
 	size_t rx_cap;
 	size_t rx_have;
 
+	// 快照冻结：暂停全部窗口的捕获节拍（snapshot.freeze / snapshot.thaw）。
+	bool snapshot_frozen;
+
 	int jpeg_quality;
 };
 
 // window.c
 void window_create(struct mixcomp_server *s, struct wlr_xdg_surface *xdg);
+// 快照冻结联动：暂停/恢复全部窗口的捕获定时器。
+void windows_set_capture_paused(struct mixcomp_server *s, bool paused);
 
 // stream.c —— 控制通道与帧发送。
 bool stream_connect(struct mixcomp_server *s);

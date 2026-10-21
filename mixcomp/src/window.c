@@ -98,6 +98,10 @@ static void destroy_cb(struct wl_listener *listener, void *data) {
 // wayland 定时器单次触发，回调里重新 arm 到下一个节拍。
 static int timer_cb(void *data) {
 	struct mixcomp_window *w = data;
+	if (w->server->snapshot_frozen) {
+		// 冻结时定时器已被 disarm；这里只防御已排队的回调。
+		return 0;
+	}
 	if (w->timer != NULL) {
 		// 按窗口 fps 重挂节拍（stream.start 可动态调整，缺省 30）。
 		wl_event_source_timer_update(w->timer, w->fps > 0 ? 1000 / w->fps : 33);
@@ -157,6 +161,24 @@ static int timer_cb(void *data) {
 	return 0; // 继续按既有间隔触发
 }
 
+// 快照冻结联动：暂停/恢复全部窗口的捕获节拍。
+// disarm 后不再有 timer 回调，因此既不读像素也不发 frame_done；
+// thaw 时按各窗口当前 fps 重新 arm。冻结期间新映射的窗口由 map_cb 负责不启动节拍。
+void windows_set_capture_paused(struct mixcomp_server *s, bool paused) {
+	s->snapshot_frozen = paused;
+	struct mixcomp_window *w;
+	wl_list_for_each(w, &s->windows, link) {
+		if (w->timer == NULL) {
+			continue;
+		}
+		if (paused) {
+			wl_event_source_timer_update(w->timer, 0);
+		} else {
+			wl_event_source_timer_update(w->timer, w->fps > 0 ? 1000 / w->fps : 33);
+		}
+	}
+}
+
 static void map_cb(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct mixcomp_window *w = wl_container_of(listener, w, map);
@@ -166,7 +188,8 @@ static void map_cb(struct wl_listener *listener, void *data) {
 	w->timer = wl_event_loop_add_timer(wl_display_get_event_loop(s->display),
 			timer_cb, w);
 	if (w->timer != NULL) {
-		wl_event_source_timer_update(w->timer, w->fps > 0 ? 1000 / w->fps : 33);
+		int delay = s->snapshot_frozen ? 0 : (w->fps > 0 ? 1000 / w->fps : 33);
+		wl_event_source_timer_update(w->timer, delay);
 	}
 	stream_send_window(s, w, "window.open");
 	wlr_log(WLR_INFO, "窗口已隔离: id=%u app=%s title=%s %dx%d",

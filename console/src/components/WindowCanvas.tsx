@@ -99,6 +99,8 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const [stats, setStats] = useState({ frames: 0, lastTs: 0 })
   const [error, setError] = useState('')
   const [forceJpeg, setForceJpeg] = useState(false)
+  const [frozen, setFrozen] = useState(false)
+  const frozenRef = useRef(false)
 
   modeRef.current = win.mode
 
@@ -146,6 +148,18 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
     const prevHandler = client.onFrame
     client.onFrame = (f) => {
       if (f.windowId !== win.id) return
+      // 快照冻结状态帧：不喂解码器，保留画布最后一帧，只切 UI 状态。
+      if (f.frozen) {
+        if (!frozenRef.current) {
+          frozenRef.current = true
+          setFrozen(true)
+        }
+        return
+      }
+      if (frozenRef.current) {
+        frozenRef.current = false
+        setFrozen(false)
+      }
       if (f.codec === 'h264') {
         decoderRef.current?.handle(f)
         latestRef.current = f // 仅取帧头元数据(光标/尺寸),像素走解码输出
@@ -343,6 +357,7 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
         <span className={`mode-badge mode-${win.mode}`}>
           {win.mode === 'agent' ? 'agent 持有' : win.mode === 'user' ? '已接管' : '空闲'}
         </span>
+        {frozen && <span className="mode-badge mode-frozen">快照冻结</span>}
         {win.mode === 'user' ? (
           <button className="btn btn-small" onClick={() => void takeover('release')}>
             释放

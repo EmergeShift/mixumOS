@@ -267,6 +267,12 @@ bit2 标记补丁。宿主按补丁合成,不能清屏或改变画布尺寸。`q
 jpeg 生效。GPU/dmabuf 零拷贝不在本实现内,等 Apple Container/VM 的
 virtio-gpu/venus 通路成熟后再接。
 
+**快照冻结联动(2026-10-21 起)**:mixumd 打快照前经私有通道发
+`snapshot.freeze`,mixcomp 停掉所有窗口的捕获定时器(不再读像素、不再发
+`frame_done`),并按各窗口当前编码补一帧 **0 负载**的 `flags` bit3(frozen)
+状态帧;`snapshot.thaw` 后按窗口 fps 重新起节拍。状态帧对公有协议透明:
+宿主看到 bit3 应保留画布最后一帧,不要解码空负载。
+
 **多 comp 源(2026-10-19 起)**:mixumd 的 display broker 维护多个 comp
 连接；每个窗口记录 owner，`stream.start/stop`、`display.input` 和视频帧
 按 owner 路由，帧只接受 owner 的连接。mixcomp(A) 与 B compositor 可同时
