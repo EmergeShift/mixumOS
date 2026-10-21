@@ -84,9 +84,12 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 - dump:`criu dump --tree <pid> --images-dir <dir> [--leave-running]`,
   镜像目录再走一次目录打包进 CAS(挂到节点的 memory 清单);
 - restore:`criu restore --images-dir <dir> --shell-job`;
-- 兼容指纹:节点记录 `arch/kernelRelease`,恢复时强校验;
-  跨内核版本迁移(如容器滚动升级后)在阶段 5 评估 CRIU 的
-  `--external` 与内核版本匹配矩阵;
+- 兼容指纹:节点记录 `arch/kernelRelease`,恢复时强校验(保守门禁);
+  **受控实验(2026-10-20)已验证最小静态进程跨内核 restore 可行**——源 6.18+CRIU 4.2.1
+  → 目标 6.1.0-47+同版本 CRIU,目标 control PASS 后跨内核 restore 两轮
+  PASS(进程计数继续);此前「不可行」系环境混杂,已纠正,方法与证据见
+  docs/criu-feasibility.md §4.4。覆盖范围仅最小静态进程,精确指纹门禁
+  仍为默认,按场景扩展后再评估放宽;
 - v1 限制:纯 memory 快照不允许恢复(必须配合 disk);
   进程持有的外部 fd(unix socket 到 mixumd)由任务引擎在快照前规范化。
 
