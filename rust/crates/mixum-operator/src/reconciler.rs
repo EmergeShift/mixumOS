@@ -135,6 +135,16 @@ fn task_pod(task: &MixumTask) -> Result<k8s_openapi::api::core::v1::Pod, Error> 
         name: "mixumos".into(),
         image: Some(task.spec.runner_image.clone()),
         image_pull_policy: Some("IfNotPresent".into()),
+        // runnerImage 契约:镜像内必须有 /usr/bin/mixumd。OCI 产物自带
+        // ENTRYPOINT /entrypoint.sh,rootfs 导入产物没有;这里显式 command
+        // 覆盖入口,args 显式清空以免镜像 CMD 被追加成 mixumd 的参数。
+        // MIXUM_RUN_ONCE=1 下提交指令、等终态、容器退出。
+        command: Some(vec![
+            "/usr/bin/mixumd".into(),
+            "--config".into(),
+            "/dev/null".into(),
+        ]),
+        args: Some(Vec::new()),
         ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
             name: Some("wss".into()),
             container_port: AGENTD_PORT,
@@ -358,4 +368,99 @@ fn error_policy(obj: Arc<MixumTask>, err: &Error, _ctx: Arc<Context>) -> Action 
 pub fn now_rfc3339() -> String {
     let now: DateTime<Utc> = Utc::now();
     now.to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(spec: serde_json::Value) -> MixumTask {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "mixumos.io/v1",
+            "kind": "MixumTask",
+            "metadata": {
+                "name": "demo",
+                "namespace": "mixumos",
+                "uid": "11111111-1111-1111-1111-111111111111"
+            },
+            "spec": spec,
+        }))
+        .expect("MixumTask 反序列化")
+    }
+
+    fn pod(task: &MixumTask) -> k8s_openapi::api::core::v1::Pod {
+        task_pod(task).expect("task_pod")
+    }
+
+    #[test]
+    fn task_pod_starts_mixumd_with_empty_args() {
+        let pod = pod(&task(serde_json::json!({ "instruction": "echo hi" })));
+        let spec = pod.spec.as_ref().expect("pod spec");
+        let container = &spec.containers[0];
+        assert_eq!(
+            container.command.as_deref(),
+            Some(
+                ["/usr/bin/mixumd", "--config", "/dev/null"]
+                    .map(String::from)
+                    .as_slice()
+            )
+        );
+        assert_eq!(container.args, Some(Vec::new()));
+        assert_eq!(container.image.as_deref(), Some(default_image().as_str()));
+        assert_eq!(container.ports.as_ref().unwrap()[0].container_port, 7601);
+        assert_eq!(spec.restart_policy.as_deref(), Some("Never"));
+        let env = container.env.as_ref().expect("env");
+        assert!(env
+            .iter()
+            .any(|e| e.name == "MIXUM_RUN_ONCE" && e.value.as_deref() == Some("1")));
+        assert!(env
+            .iter()
+            .any(|e| e.name == "MIXUM_INSTRUCTION" && e.value.as_deref() == Some("echo hi")));
+        assert_eq!(pod.metadata.name.as_deref(), Some("mixum-task-demo"));
+        assert_eq!(pod.metadata.owner_references.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn task_pod_mounts_snapshot_pvc() {
+        let pod = pod(&task(
+            serde_json::json!({ "instruction": "echo hi", "snapshotPvc": "e2e-pvc" }),
+        ));
+        let spec = pod.spec.as_ref().unwrap();
+        let volume = &spec.volumes.as_ref().unwrap()[0];
+        assert_eq!(
+            volume.persistent_volume_claim.as_ref().unwrap().claim_name,
+            "e2e-pvc"
+        );
+        let mount = &spec.containers[0].volume_mounts.as_ref().unwrap()[0];
+        assert_eq!(mount.mount_path, "/var/lib/mixum");
+    }
+
+    #[test]
+    fn task_pod_injects_arch_selector_only_when_set() {
+        let with_arch = pod(&task(
+            serde_json::json!({ "instruction": "echo hi", "arch": "arm64" }),
+        ));
+        let selector = with_arch
+            .spec
+            .as_ref()
+            .unwrap()
+            .node_selector
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            selector.get("kubernetes.io/arch").map(String::as_str),
+            Some("arm64")
+        );
+
+        let plain = pod(&task(serde_json::json!({ "instruction": "echo hi" })));
+        assert!(plain.spec.as_ref().unwrap().node_selector.is_none());
+    }
+
+    #[test]
+    fn task_pod_omits_volume_without_pvc() {
+        let pod = pod(&task(serde_json::json!({ "instruction": "echo hi" })));
+        let spec = pod.spec.as_ref().unwrap();
+        assert!(spec.volumes.is_none());
+        assert!(spec.containers[0].volume_mounts.is_none());
+    }
 }
