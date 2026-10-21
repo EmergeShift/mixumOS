@@ -21,6 +21,13 @@ pub struct Criu {
 }
 
 impl Criu {
+    /// 指定二进制路径（测试或自定义安装）。
+    pub fn from_binary(binary: impl Into<PathBuf>) -> Self {
+        Self {
+            binary: binary.into(),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub fn probe() -> Option<Self> {
         for candidate in ["criu", "/usr/sbin/criu", "/usr/bin/criu"] {
@@ -57,12 +64,39 @@ impl Criu {
         dir: impl AsRef<Path>,
         leave_running: bool,
     ) -> Result<(), CriuError> {
+        self.dump_roots(&[pid], dir, leave_running)
+    }
+
+    /// 多根 dump：GUI 场景要同时包含任务树与合成器（Wayland 连接两端）。
+    pub fn dump_roots(
+        &self,
+        pids: &[i32],
+        dir: impl AsRef<Path>,
+        leave_running: bool,
+    ) -> Result<(), CriuError> {
+        let pids: Vec<i32> = pids.iter().copied().filter(|pid| *pid > 0).collect();
+        if pids.is_empty() {
+            return Err(CriuError::Unavailable);
+        }
         std::fs::create_dir_all(dir.as_ref())?;
         let mut cmd = Command::new(&self.binary);
         // --shell-job:任务进程用进程组托管而非会话首,转储必须带此参数。
-        cmd.args(["dump", "--tree", &pid.to_string(), "--images-dir"])
+        cmd.args(["dump"]);
+        for pid in &pids {
+            cmd.args(["--tree", &pid.to_string()]);
+        }
+        cmd.arg("--images-dir")
             .arg(dir.as_ref())
-            .args(["--shell-job", "-v4", "-o", "dump.log"]);
+            .args([
+                "--shell-job",
+                "--ext-unix-sk",
+                "--file-locks",
+                "--ghost-limit",
+                "2147483648",
+                "-v4",
+                "-o",
+                "dump.log",
+            ]);
         if leave_running {
             cmd.arg("--leave-running");
         }
@@ -72,7 +106,7 @@ impl Criu {
         let mut cmd = Command::new(&self.binary);
         cmd.args(["restore", "--images-dir"])
             .arg(dir.as_ref())
-            .args(["-v4", "-o", "restore.log", "--shell-job"]);
+            .args(["-v4", "-o", "restore.log", "--shell-job", "--ext-unix-sk"]);
         run(cmd)
     }
 }
