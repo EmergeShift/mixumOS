@@ -7,7 +7,7 @@
 //! - Pod 结束 → status: completed/failed,Pod 由 ttlSecondsAfterFinished 回收;
 //! - MixumTask 删除 → Pod 经所有者引用自动回收,无需显式处理。
 //!
-//! 快照接力:多个 MixumTask 指向同一 snapshotPVC 时,任务间可经
+//! 快照接力:多个 MixumTask 指向同一 snapshotPvc 时,任务间可经
 //! snap.push/pull 传递快照(docs/protocol.md §6),实现「云端继续跑」。
 
 pub mod reconciler;
