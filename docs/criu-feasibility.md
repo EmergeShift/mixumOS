@@ -100,8 +100,8 @@ Arch rootfs + **CRIU 4.2.1(与源端完全一致)** + Debian 6.1.0-47-amd64
 
 - **② target-control:PASS**(两轮)——目标环境本地 dump → kill → restore
   → 计数继续,环境有效性成立;
-- **③ 跨内核 restore:FAIL**(两轮稳定)。失败点随环境混杂逐个清除而
-  移动,每一层都属**环境类**,不是内核类:
+- **③ 首轮受控尝试:FAIL**(两轮稳定,后经环境分类修复)。失败点随环境
+  混杂逐个清除而移动,每一层都属**环境类**,不是内核类:
   1. initramfs `/dev` 未挂 devtmpfs → init stdio 丢失(init 顺序修复);
   2. Debian 内核包不带 `modules.dep` → 特性探测失败(构建侧 depmod 修复);
   3. 被测进程 stdio 重定向文件在目标端不存在 → dump 侧改为 `/dev/null`,
@@ -110,7 +110,7 @@ Arch rootfs + **CRIU 4.2.1(与源端完全一致)** + Debian 6.1.0-47-amd64
      源端 `counter_after_dump` 值预建同尺寸文件;
   5. 进程 root 目录 mode 不一致(源 0555 / 目标 0755)→ 目标 root 对齐;
   6. 进程 cwd 指向源机专用路径(WSL `/mnt/...`)→ dump 侧固定 cwd 为 `/`。
-  上述每一层失败都属**环境类**;全部消除后进入最终两轮:
+  上述每一层失败都属**环境类**;全部消除后进入最终两轮 PASS:
 
   ```text
   ② target-control:PASS(两轮)
@@ -148,7 +148,8 @@ Arch rootfs + **CRIU 4.2.1(与源端完全一致)** + Debian 6.1.0-47-amd64
   精确比较并返回 `KernelMismatch`/`ArchMismatch`。该闸门是**保守策略**,
   与 §5 的可行性结论解耦,无论重跑结果如何都保留。
 - `mixum-snapshot/src/criu.rs`:`--shell-job` 的用法正确;同内核路径可用。
-- `docs/snapshots.md` §6 的表述已同步为「跨内核未验证 + 精确指纹门禁」。
+- `docs/snapshots.md` §6 已同步为「最小静态进程受控 PASS + 精确指纹门禁」,
+  并明确覆盖范围仅限本次实验。
 
 ## 7. 工程对策(不依赖可行性结论)
 
@@ -157,13 +158,14 @@ Arch rootfs + **CRIU 4.2.1(与源端完全一致)** + Debian 6.1.0-47-amd64
 2. **同内核节点池**:节点打 `mixumos.io/kernel` 标签(如 operator 的
    `arch` nodeSelector 同款机制),memory 快照的 restore 只调度到同内核节点;
    disk 快照不受此限。
-3. **降级路径**:目标内核不同 → memory 快照不可用,改用 disk 快照 +
-   任务重启(记录 RTO);用户可在控制台看到降级原因。
+3. **保守降级路径**:产品默认仍按精确 kernel/arch 拒绝跨内核 memory restore;
+   即使本次受控实验证明最小静态进程可跨内核恢复,在扩展到网络/线程/复杂 fd
+   前,跨内核目标仍走 disk 快照 + 任务重启(记录 RTO),并在控制台显示原因。
 4. **同内核热迁移**:笔记本 → 云端使用同一发行版内核镜像(`dist` 固定
    内核版本)时,CRIU 迁移可行;这是近期可落地的「合盖上云」形态。
-5. **长期方案**:需要真正跨内核时,走 VM 级 live migration
-   (Firecracker/Cloud Hypervisor)或在快照中携带可引导内核,
-   而不是放宽 CRIU 指纹。
+5. **长期方案**:生产级跨内核能力仍需 VM 级 live migration
+   (Firecracker/Cloud Hypervisor)或在快照中携带可引导内核;本次实验只证明
+   最小静态进程在受控条件下可行,不等于可以放宽生产指纹。
 6. **测试策略**:同内核 dump/restore 可进 privileged nightly e2e;
    跨内核只保留实验脚本,不作为 CI 门槛。
 

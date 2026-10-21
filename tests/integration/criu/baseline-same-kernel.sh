@@ -10,6 +10,11 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 command -v criu >/dev/null || { echo "缺少 criu" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "缺少 python3" >&2; exit 1; }
+if ! criu check >/dev/null 2>&1; then
+    echo "criu check 未通过" >&2
+    exit 1
+fi
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 DIR=$(mktemp -d)
@@ -24,8 +29,12 @@ for _ in $(seq 1 50); do [ -s "$PIDFILE" ] && break; sleep 0.1; done
 PID=$(cat "$PIDFILE")
 echo "PID=$PID  counter=$(cat "$COUNTERFILE")"
 
-criu dump --tree "$PID" --images-dir "$IMGS" --shell-job -v4 -o dump.log >"$DIR/dump.out" 2>&1
-echo "DUMP_EXIT=$?"
+if ! criu dump --tree "$PID" --images-dir "$IMGS" --shell-job -v4 -o "$IMGS/dump.log" >"$DIR/dump.out" 2>&1; then
+    echo "DUMP_EXIT=1" >&2
+    tail -20 "$IMGS/dump.log" 2>/dev/null || true
+    exit 1
+fi
+echo "DUMP_EXIT=0"
 sleep 1
 BEFORE=$(cat "$COUNTERFILE")
 sleep 1
@@ -36,8 +45,12 @@ if [ "$BEFORE" != "$AFTER" ]; then
     exit 1
 fi
 
-criu restore --images-dir "$IMGS" --shell-job --restore-detached -v4 -o restore.log >"$DIR/restore.out" 2>&1
-echo "RESTORE_EXIT=$?"
+if ! criu restore --images-dir "$IMGS" --shell-job --restore-detached -v4 -o "$IMGS/restore.log" >"$DIR/restore.out" 2>&1; then
+    echo "RESTORE_EXIT=1" >&2
+    tail -20 "$IMGS/restore.log" 2>/dev/null || true
+    exit 1
+fi
+echo "RESTORE_EXIT=0"
 sleep 1
 RESTORED=$(cat "$COUNTERFILE")
 echo "RESTORED_COUNTER=$RESTORED(应大于 $AFTER)"

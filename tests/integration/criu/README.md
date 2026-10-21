@@ -42,10 +42,10 @@ sudo tests/integration/criu/baseline-same-kernel.sh
 
 ## 第二内核环境(报告的复现要点)
 
-- 内核:与镜像来源不同的版本(实验用 Debian 6.1.0-50-amd64);
+- 内核:与镜像来源不同的版本(实验用 Debian 6.1.0-47-amd64);
   需要与内核**严格匹配**的 modules 包;
-- rootfs:含 CRIU(与源端**同版本**;实验中的 3.16.1 vs 4.2.1 已判定为
-  方法学错误)的 rootfs,打成 initramfs;
+- rootfs:Arch rootfs + CRIU 4.2.1(与源端**同版本**),打成 initramfs;
+  旧的 3.16.1 vs 4.2.1 版本混用实验已判定为方法学错误,不再使用;
 - 加载模块:`crc32c_generic` → `libcrc32c` → `nf_tables` / `ip_tables`;
 - 打开 loopback(`ip link set lo up`),否则 CRIU 的 kerndat 探测失败;
 - 用 QEMU/KVM 启动:
