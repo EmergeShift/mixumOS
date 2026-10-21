@@ -270,9 +270,11 @@ impl Broker {
             return;
         }
         // 任务运行中打开的窗口归 agent:用户可见,接管需 display.takeover。
+        // 无任务时新窗口必须是 free——空 mode 不是合法协议值,console/视图
+        // 页都按 free 展示,服务端需返回一致的值。
         let mut w = window;
-        if tasks_active && w.mode.is_empty() {
-            w.mode = MODE_AGENT.into();
+        if w.mode.is_empty() {
+            w.mode = if tasks_active { MODE_AGENT } else { MODE_FREE }.into();
         }
         let changed = w.clone();
         all.insert(
