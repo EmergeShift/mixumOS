@@ -94,7 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map_err(std::io::Error::other)?;
     }
     let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
-    let sandbox = Arc::new(LocalSandbox::new().with_leader(Arc::clone(&leader)));
+    // 系统级隔离：cgroup freezer 可用时优先，Landlock 限制文件系统写入。
+    let sandbox = Arc::new(
+        LocalSandbox::new()
+            .with_leader(Arc::clone(&leader))
+            .with_isolation(config.work_root.clone()),
+    );
     // broker 提前创建：快照冻结钩子需要同步通知 comp 暂停捕获；
     // 快照 metadata 需要同步读取窗口表，restore 后还要重放 GUI。
     let broker = Broker::new("/run/mixum/display.sock");
