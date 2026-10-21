@@ -1,369 +1,28 @@
 //! 任务引擎、Sandbox 和内建 shell/external 驱动。
 
 use crate::snapshot::SnapshotEngine;
-use crate::wire::{SnapshotPolicy, TaskEvent, TaskView};
+use crate::wire::TaskEvent;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::error::Error;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{broadcast, Mutex};
 
-pub type DriverError = Box<dyn Error + Send + Sync>;
-pub type DriverResult = Result<(), DriverError>;
-
-pub const QUEUED: &str = "queued";
-pub const RUNNING: &str = "running";
-pub const SUSPENDED: &str = "suspended";
-pub const COMPLETED: &str = "completed";
-pub const FAILED: &str = "failed";
-pub const CANCELED: &str = "canceled";
+// 驱动 SPI 整体来自 mixum-agent-driver crate(独立发布,外部 agent 以
+// 依赖方式接入);这里再导出保持本 crate 内部引用与旧路径不变。
+pub use mixum_agent_driver::{
+    now_ms, AgentDriver, DriverError, DriverResult, EventEmitter, InputHub, InputReplyError,
+    Registry, ShellDriver, Signal, Sandbox, Task, TaskSpec, CANCELED, COMPLETED, FAILED, QUEUED,
+    RUNNING, SUSPENDED,
+};
 
 /// 人机输入默认超时(tasks.md §The human-input channel:120 s)。
 pub const INPUT_TIMEOUT_MS: u64 = 120_000;
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TaskSpec {
-    pub instruction: String,
-    #[serde(default)]
-    pub agent: String,
-    #[serde(default)]
-    pub runner: String,
-    /// MAP task.params 是任意 JSON 对象。
-    #[serde(default)]
-    pub params: serde_json::Map<String, Value>,
-    #[serde(default)]
-    pub snapshot_policy: Option<SnapshotPolicy>,
-}
-
-#[derive(Debug)]
-struct TaskInner {
-    state: String,
-    error: Option<String>,
-    started_at: Option<i64>,
-    ended_at: Option<i64>,
-    pre_snap_node: Option<String>,
-    pgids: Vec<i32>,
-}
-
-pub struct Task {
-    pub id: String,
-    pub instruction: String,
-    pub agent: String,
-    pub runner: String,
-    pub params: serde_json::Map<String, Value>,
-    pub created_at: i64,
-    snapshot_policy: Option<SnapshotPolicy>,
-    inner: Mutex<TaskInner>,
-    cancel: tokio::sync::watch::Sender<bool>,
-}
-
-impl Task {
-    fn new(id: String, spec: TaskSpec, agent: String) -> Arc<Self> {
-        let (cancel, _) = tokio::sync::watch::channel(false);
-        Arc::new(Self {
-            id,
-            instruction: spec.instruction,
-            agent,
-            runner: if spec.runner.is_empty() {
-                "here".into()
-            } else {
-                spec.runner
-            },
-            params: spec.params,
-            created_at: now_ms(),
-            snapshot_policy: spec.snapshot_policy.clone(),
-            inner: Mutex::new(TaskInner {
-                state: QUEUED.into(),
-                error: None,
-                started_at: None,
-                ended_at: None,
-                pre_snap_node: None,
-                pgids: vec![],
-            }),
-            cancel,
-        })
-    }
-
-    pub async fn state(&self) -> String {
-        self.inner.lock().await.state.clone()
-    }
-    pub async fn pgids(&self) -> Vec<i32> {
-        self.inner.lock().await.pgids.clone()
-    }
-    pub async fn view(&self) -> TaskView {
-        let inner = self.inner.lock().await;
-        TaskView {
-            id: self.id.clone(),
-            instruction: self.instruction.clone(),
-            agent: self.agent.clone(),
-            runner: self.runner.clone(),
-            state: inner.state.clone(),
-            pre_snap_node: inner.pre_snap_node.clone(),
-            params: self.params.clone(),
-            error: inner.error.clone(),
-            created_at: self.created_at,
-            started_at: inner.started_at,
-            ended_at: inner.ended_at,
-        }
-    }
-    async fn set_state(&self, state: &str) {
-        self.inner.lock().await.state = state.into();
-    }
-    async fn set_error(&self, error: String) {
-        self.inner.lock().await.error = Some(error);
-    }
-    async fn started(&self) {
-        self.inner.lock().await.started_at = Some(now_ms());
-    }
-    async fn ended(&self) {
-        self.inner.lock().await.ended_at = Some(now_ms());
-    }
-    async fn set_pre_snap(&self, node: String) {
-        self.inner.lock().await.pre_snap_node = Some(node);
-    }
-    pub async fn cancel(&self) {
-        let _ = self.cancel.send(true);
-    }
-    fn cancel_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.cancel.subscribe()
-    }
-}
-
-#[async_trait]
-pub trait Sandbox: Send + Sync {
-    async fn exec(
-        &self,
-        task: &Task,
-        program: &str,
-        args: &[String],
-        dir: Option<&Path>,
-        on_line: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Result<i32, DriverError>;
-    async fn spawn_gui(
-        &self,
-        task: &Task,
-        program: &str,
-        args: &[String],
-        dir: Option<&Path>,
-    ) -> Result<u32, DriverError>;
-    async fn snapshot(&self, _task: &Task, _label: &str) -> Result<(), DriverError> {
-        Ok(())
-    }
-    async fn signal(&self, task: &Task, signal: Signal) -> Result<(), DriverError>;
-    async fn set_task_pid(&self, task: &Task, pid: i32);
-    async fn release_task_pid(&self, _task: &Task, _pid: i32) {}
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Signal {
-    Stop,
-    Continue,
-    Term,
-    Kill,
-}
-
-/// `task.reply` 的失败原因:未知/已过期 → not_found,重复答复 → conflict。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputReplyError {
-    NotFound,
-    Conflict,
-}
-
-struct InputEntry {
-    /// None = 已答复/已超时;保留占位以便区分 conflict 与 not_found。
-    sender: Option<tokio::sync::oneshot::Sender<String>>,
-}
-
-/// 人机输入通道:bridge `input.request` 与 MAP `task.reply` 之间的会合点。
-/// 任务终态时由引擎清理,避免占位无限增长。
-#[derive(Default)]
-pub struct InputHub {
-    pending: Mutex<HashMap<(String, String), InputEntry>>,
-}
-
-impl InputHub {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 登记一次 input.request,返回等待回答的接收端。
-    pub async fn open(
-        &self,
-        task_id: &str,
-        reply_id: &str,
-    ) -> tokio::sync::oneshot::Receiver<String> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        self.pending.lock().await.insert(
-            (task_id.to_owned(), reply_id.to_owned()),
-            InputEntry {
-                sender: Some(sender),
-            },
-        );
-        receiver
-    }
-
-    /// 交付一次回答;重复回答同一 reply_id → conflict。
-    pub async fn answer(
-        &self,
-        task_id: &str,
-        reply_id: &str,
-        value: String,
-    ) -> Result<(), InputReplyError> {
-        let mut pending = self.pending.lock().await;
-        match pending.get_mut(&(task_id.to_owned(), reply_id.to_owned())) {
-            None => Err(InputReplyError::NotFound),
-            Some(entry) => match entry.sender.take() {
-                Some(sender) => {
-                    let _ = sender.send(value);
-                    Ok(())
-                }
-                None => Err(InputReplyError::Conflict),
-            },
-        }
-    }
-
-    /// 超时:不再接受回答(保留占位 → 迟到的回答报 conflict)。
-    pub async fn expire(&self, task_id: &str, reply_id: &str) {
-        if let Some(entry) = self
-            .pending
-            .lock()
-            .await
-            .get_mut(&(task_id.to_owned(), reply_id.to_owned()))
-        {
-            entry.sender = None;
-        }
-    }
-
-    pub async fn clear_task(&self, task_id: &str) {
-        self.pending
-            .lock()
-            .await
-            .retain(|(task, _), _| task != task_id);
-    }
-}
-
-#[derive(Clone)]
-pub struct EventEmitter {
-    tx: broadcast::Sender<TaskEvent>,
-    task_id: String,
-    inputs: Arc<InputHub>,
-}
-
-impl EventEmitter {
-    fn new(tx: broadcast::Sender<TaskEvent>, task_id: String, inputs: Arc<InputHub>) -> Self {
-        Self {
-            tx,
-            task_id,
-            inputs,
-        }
-    }
-    pub fn task_id(&self) -> &str {
-        &self.task_id
-    }
-    pub fn inputs(&self) -> Arc<InputHub> {
-        self.inputs.clone()
-    }
-    /// 事件 data 统一为对象(MAP task.event.data: object)。
-    pub async fn emit(&self, event_type: &str, step: Option<&str>, data: Option<Value>) {
-        let _ = self.tx.send(TaskEvent {
-            task_id: self.task_id.clone(),
-            event_type: event_type.into(),
-            step: step.map(str::to_owned),
-            data,
-            ts: now_ms(),
-        });
-    }
-    pub async fn log(&self, line: impl Into<String>) {
-        let line = line.into();
-        self.emit("log", None, Some(serde_json::json!({ "line": line })))
-            .await;
-    }
-    pub async fn step(&self, step: impl Into<String>) {
-        let step = step.into();
-        self.emit(
-            "step",
-            Some(&step),
-            Some(serde_json::json!({ "name": step })),
-        )
-        .await;
-    }
-    pub async fn progress(&self, pct: u32, step: Option<&str>) {
-        let pct = pct.min(100);
-        let data = match step {
-            Some(step) => serde_json::json!({ "pct": pct, "step": step }),
-            None => serde_json::json!({ "pct": pct }),
-        };
-        self.emit("progress", step, Some(data)).await;
-    }
-    /// 人机输入请求:客户端看到 task.event { type: "input", data: { replyId, … } }。
-    pub async fn input_request(
-        &self,
-        reply_id: &str,
-        prompt: &str,
-        choices: Option<Vec<String>>,
-        sensitive: bool,
-    ) {
-        let mut data = serde_json::json!({ "replyId": reply_id, "prompt": prompt });
-        if let Some(choices) = choices {
-            data["choices"] = serde_json::json!(choices);
-        }
-        if sensitive {
-            data["sensitive"] = serde_json::json!(true);
-        }
-        self.emit("input", None, Some(data)).await;
-    }
-    pub async fn window_opened(&self, data: Value) {
-        self.emit("window", None, Some(data)).await;
-    }
-}
-
-#[async_trait]
-pub trait AgentDriver: Send + Sync {
-    fn name(&self) -> &str;
-    async fn run(&self, task: &Task, sandbox: &dyn Sandbox, emit: EventEmitter) -> DriverResult;
-}
-
-#[derive(Default)]
-pub struct Registry {
-    drivers: std::sync::RwLock<HashMap<String, Arc<dyn AgentDriver>>>,
-}
-
-impl Registry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn register<D: AgentDriver + 'static>(&self, driver: D) -> Result<(), String> {
-        let name = driver.name().to_owned();
-        let mut map = self.drivers.write().expect("registry lock");
-        if map.contains_key(&name) {
-            return Err(format!("驱动重名：{name}"));
-        }
-        map.insert(name, Arc::new(driver));
-        Ok(())
-    }
-    pub fn lookup(&self, name: &str) -> Option<Arc<dyn AgentDriver>> {
-        let map = self.drivers.read().expect("registry lock");
-        if name.is_empty() {
-            map.get("shell").cloned()
-        } else {
-            map.get(name).cloned()
-        }
-    }
-    pub fn names(&self) -> Vec<String> {
-        self.drivers
-            .read()
-            .expect("registry lock")
-            .keys()
-            .cloned()
-            .collect()
-    }
-}
 
 pub struct LocalSandbox {
     // std 锁:冻结钩子在同步上下文(FreezeFn)里也要读进程组,锁内无 await。
@@ -504,7 +163,7 @@ impl Sandbox for LocalSandbox {
 
     async fn set_task_pid(&self, task: &Task, pid: i32) {
         self.pgids.lock().expect("sandbox 进程组锁").push(pid);
-        task.inner.lock().await.pgids.push(pid);
+        task.push_pgid(pid).await;
     }
 
     async fn release_task_pid(&self, task: &Task, pid: i32) {
@@ -512,45 +171,7 @@ impl Sandbox for LocalSandbox {
             .lock()
             .expect("sandbox 进程组锁")
             .retain(|current| *current != pid);
-        task.inner
-            .lock()
-            .await
-            .pgids
-            .retain(|current| *current != pid);
-    }
-}
-
-pub struct ShellDriver;
-#[async_trait]
-impl AgentDriver for ShellDriver {
-    fn name(&self) -> &str {
-        "shell"
-    }
-    async fn run(&self, task: &Task, sandbox: &dyn Sandbox, emit: EventEmitter) -> DriverResult {
-        emit.step("plan").await;
-        let command = task
-            .params
-            .get("cmd")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| task.instruction.clone());
-        emit.step("exec").await;
-        let line_emit = emit.clone();
-        let on_line = Arc::new(move |line: String| {
-            let emit = line_emit.clone();
-            tokio::spawn(async move {
-                emit.log(line).await;
-            });
-        });
-        let code = sandbox
-            .exec(task, "/bin/bash", &["-lc".into(), command], None, on_line)
-            .await?;
-        emit.progress(100, Some("exec")).await;
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(format!("shell 驱动：命令退出码 {code}").into())
-        }
+        task.release_pgid(pid).await;
     }
 }
 
@@ -895,7 +516,7 @@ impl Engine {
         self.tasks.lock().await.push(task.clone());
         // MAP tasks.md:task.submit 的应答在 pre-task 快照完成后才发出,
         // 因此快照在这里同步完成(不在 run_inner 里)。
-        if let Some(policy) = task.snapshot_policy.clone() {
+        if let Some(policy) = task.snapshot_policy().cloned() {
             if policy.pre {
                 if let Some(snap) = &self.snapshots {
                     let kind = if policy.kind.is_empty() {
@@ -973,12 +594,12 @@ impl Engine {
                 self.emit_state(&task, COMPLETED).await;
             }
             Err(err) => {
-                if task.snapshot_policy.as_ref().is_some_and(|p| {
+                if task.snapshot_policy().is_some_and(|p| {
                     p.on_failure == "rollback" || p.on_failure == "restore"
                 }) {
                     if let (Some(snap), Some(node)) = (
                         &self.snapshots,
-                        task.inner.lock().await.pre_snap_node.clone(),
+                        task.pre_snap_node().await,
                     ) {
                         let _ = snap.restore(&node, "inplace", None).await;
                     }
@@ -1033,13 +654,6 @@ impl Engine {
         let _ = self.sandbox.signal(&task, Signal::Term).await;
         Ok(())
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default()
 }
 
 #[cfg(unix)]
