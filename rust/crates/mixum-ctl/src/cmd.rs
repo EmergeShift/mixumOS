@@ -158,6 +158,15 @@ pub struct PowerArgs {
     pub remote_token: Option<String>,
     #[arg(long)]
     pub watch: bool,
+    #[arg(long)]
+    pub install: bool,
+    #[arg(long)]
+    pub remove: bool,
+    #[arg(long)]
+    pub print: bool,
+    /// 迁移时长上限(秒);0 = --simulate-sleep 不限时,--watch 默认 30s。
+    #[arg(long, default_value_t = 0)]
+    pub deadline_secs: u64,
 }
 
 fn parse_param(raw: &str) -> Result<(String, String), String> {
