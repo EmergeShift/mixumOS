@@ -5,3 +5,8 @@ dist/out/
 console/node_modules/
 console/dist/
 *.DS_Store
+
+# 内核构建产物与缓存
+kernel/out/
+kernel/.cache/
+kernel/.build/
