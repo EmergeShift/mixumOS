@@ -72,7 +72,11 @@
       「先迁移后放行」不变量(mock 三例单测:正常/失败/超时都必须 ack);
       Linux systemd 钩子(`power --install/--remove/--print`)与 CLI 迁移
       链路已 e2e(tests/integration/power-e2e.mjs);macOS 实机验证待真 Mac;
-- [ ] mixum-ctl 本地窗口视图服务;
+- [x] mixum-ctl 本地窗口视图服务(2026-10-19):管理页(窗口列表 2s 轮询)+
+      每容器窗口独立视图页(标题栏+接管 badge/30fps attach/首帧 resize/
+      断线重连/光标叠加),接管+输入注入(user 模式鼠标/滚轮/键盘,流 WS
+      白名单控制通道),view-e2e.mjs 路由+WS 帧断言与真浏览器实测
+      (canvas 渲染+指针注入引出 damage 帧+截图存证);
 - [ ] 控制台 PWA:任务流、快照树(图状)、窗口画布(光标映射)、接管按钮。
 - [x] 24h 流稳定性浸泡(2026-10-21,FINAL PASS):可恢复多段累计
       (11 段、1498 分钟,anomalies/断连/卡顿全零),期间两次宿主重启
