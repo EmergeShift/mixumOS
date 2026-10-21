@@ -26,12 +26,26 @@ cloud/gateway/      gateway 镜像 Dockerfile + build.sh（M3 部署清单用）
 | 一次性任务 | MixumTask CRD → operator 建 Pod | 云端临时跑指令,跑完回收(类 Manus) |
 
 MixumTask 字段:`instruction`、`agent`、`runnerImage`(默认
-`ghcr.io/mixumos/mixumos:<ver>`)、`snapshotPVC`(快照/工作区卷,PVC 模板
+`ghcr.io/mixumos/mixumos:<ver>`)、`snapshotPvc`(快照/工作区卷,PVC 模板
 由用户预建,跨 Pod 迁移即「云端接力」)、`ttlSecondsAfterFinished`。
+
+`runnerImage` 契约:镜像内必须提供 `/usr/bin/mixumd`,并支持
+`--config /dev/null` 与 `MIXUM_RUN_ONCE=1`。operator 给任务容器设置显式
+`command` 和空 `args` 覆盖镜像入口,所以 OCI 产物(ENTRYPOINT
+`/entrypoint.sh`)与 rootfs 导入产物(无 ENTRYPOINT)都能直接作为
+`runnerImage`。
 
 节点池:arm64 与 x86_64 混合池均可跑(镜像为 OCI index 双 manifest);
 指定架构用 `mixumos.io/arch: "<arm64|amd64>"` nodeSelector(operator 从
 MixumTask 的 `arch` 字段注入)。
+
+## operator e2e
+
+`node tests/integration/operator-e2e.mjs` 在 kind 集群上验证
+MixumTask → 任务 Pod → 状态回写 → TTL 回收。前置与镜像构建命令见脚本头注释;
+`KIND`、`KIND_CLUSTER`、`RUNNER_IMAGE`、`OPERATOR_IMAGE` 可用环境变量覆盖。
+默认只验证 `RUNNER_IMAGE` 指向的镜像;设置 `OCI_RUNNER_IMAGE` 会追加一次
+OCI 产物用例。
 
 ## 安全
 
