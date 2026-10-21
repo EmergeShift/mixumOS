@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use mixum_gateway::mesh::MeshHub;
 use mixum_gateway::registry::MemoryRegistry;
 use mixum_gateway::registry_k8s::K8sRegistry;
-use mixum_gateway::{Gateway, MeshRouter, NodeRegistry, OutTx, Outbound};
+use mixum_gateway::{ConnectError, Gateway, MeshRouter, NodeRegistry, OutTx, Outbound};
 use mixum_protocol::envelope::Envelope;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -299,14 +299,13 @@ async fn classify(gw: &Arc<Gateway>, text: &str, out: OutTx, source: &str) -> Si
                         return Side::Pending;
                     }
                     if let Err(e) = gw.node_connected(&name, &version, out.clone()).await {
-                        // 名字非法是请求问题,重名/占用是状态冲突。
-                        let code = if e.contains("非法") {
-                            "bad_request"
-                        } else {
-                            "conflict"
+                        let code = match e {
+                            ConnectError::InvalidName(_) => "bad_request",
+                            ConnectError::Conflict(_) => "conflict",
+                            ConnectError::Internal(_) => "internal",
                         };
                         let _ = out
-                            .send(Outbound::Text(err_text(Some(&env), code, &e)))
+                            .send(Outbound::Text(err_text(Some(&env), code, &e.to_string())))
                             .await;
                         return Side::Pending;
                     }
@@ -430,14 +429,17 @@ fn err_text(env: Option<&Value>, code: &str, message: &str) -> String {
     }
 }
 
-/// RFC 0003 错误码按语义归类(错误文本是内部约定,不做机读契约)。
+/// RFC 0003 错误码按语义归类(错误文本是内部约定,不做机读契约;
+/// 未归类的失败按 internal 处理,不猜成 forbidden)。
 fn pair_claim_error_code(message: &str) -> &'static str {
     if message.contains("频繁") {
         "conflict"
     } else if message.contains("非法") {
         "bad_request"
-    } else {
+    } else if message.contains("无效") {
         "forbidden"
+    } else {
+        "internal"
     }
 }
 
@@ -484,5 +486,6 @@ mod tests {
         );
         assert_eq!(pair_claim_error_code("deviceName 非法"), "bad_request");
         assert_eq!(pair_claim_error_code("配对码无效或已过期"), "forbidden");
+        assert_eq!(pair_claim_error_code("签发失败: io"), "internal");
     }
 }
