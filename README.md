@@ -82,6 +82,7 @@ make dist ARCHS="aarch64 x86_64"
 | [distro.md](docs/distro.md) | 发行版构建工具链与踩坑记录 |
 | [security.md](docs/security.md) | 威胁模型、令牌、传输、快照加密 |
 | [agent-bridge.md](docs/agent-bridge.md) | agent 进程接入协议(external 驱动) |
+| [migration.md](docs/migration.md) | 跨设备 `.mart` 迁移包与流程 |
 | [gateway.md](docs/gateway.md) | 云端枢纽设计:多容器路由、设备配对、令牌分发 |
 | [criu-feasibility.md](docs/criu-feasibility.md) | CRIU 跨内核迁移可行性验证与工程对策 |
 | [roadmap.md](docs/roadmap.md) | 路线图与阶段完成标准 |
