@@ -1,0 +1,18 @@
+[Unit]
+Description=mixumOS per-window compositor
+# 装配顺序:mixumd 的 display.sock 先就绪,mixcomp 以客户端身份连接。
+After=mixumd.service
+Requires=mixumd.service
+
+[Service]
+# mixumd 以 mixum 用户运行,/run/mixum(display.sock 与 wayland-0 所在)
+# 归 mixum 所有;GUI 应用(如 foot)同样以 mixum 用户连接
+# WAYLAND_DISPLAY=wayland-0 + XDG_RUNTIME_DIR=/run/mixum。
+User=mixum
+Environment=XDG_RUNTIME_DIR=/run/mixum
+ExecStart=/usr/bin/mixcomp --sock /run/mixum/display.sock
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
