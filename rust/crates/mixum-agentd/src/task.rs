@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use mixum_protocol::GuiSession;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +33,9 @@ pub struct LocalSandbox {
     leader: Option<Arc<AtomicI32>>,
     // GUI 会话清单：仅记录 spawn_gui 路径，restore 时按它重放。
     gui: Arc<std::sync::Mutex<HashMap<i32, GuiSession>>>,
+    // 系统级隔离:启用后优先 cgroup v2 freezer,并在 spawn 时套 Landlock。
+    cgroup: Option<crate::isolation::CgroupFreezer>,
+    workspace: Option<PathBuf>,
 }
 
 impl Default for LocalSandbox {
@@ -46,6 +49,8 @@ impl LocalSandbox {
             pgids: Arc::new(std::sync::Mutex::new(Vec::new())),
             leader: None,
             gui: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cgroup: None,
+            workspace: None,
         }
     }
 
@@ -70,8 +75,24 @@ impl LocalSandbox {
         }
     }
 
+    /// 启用系统级隔离：cgroup v2 freezer（内核/委托允许时）+ Landlock
+    /// 目录白名单（Linux 5.13+）。不启用时保持旧行为（SIGSTOP + 无限制），
+    /// 便于测试和不支持的环境。
+    pub fn with_isolation(mut self, workspace: impl Into<PathBuf>) -> Self {
+        self.cgroup = crate::isolation::CgroupFreezer::create();
+        self.workspace = Some(workspace.into());
+        self
+    }
+
     /// 冻结/解冻全部任务进程组(快照引擎的 Freeze 回调,对齐 reference FreezeAll)。
+    /// 有 cgroup freezer 时原子冻结整棵子树（含脱离进程组的孙进程），
+    /// 否则退回进程组 SIGSTOP。
     pub fn freeze_all(&self, stop: bool) {
+        if let Some(cgroup) = &self.cgroup {
+            if cgroup.set_frozen(stop).is_ok() {
+                return;
+            }
+        }
         let signal = if stop {
             nix::libc::SIGSTOP
         } else {
@@ -204,6 +225,11 @@ impl Sandbox for LocalSandbox {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         set_process_group(&mut cmd);
+        crate::isolation::apply_spawn_isolation(
+            cmd.as_std_mut(),
+            self.cgroup.clone(),
+            self.workspace.clone(),
+        );
         if let Some(path) = dir {
             cmd.current_dir(path);
         }
@@ -256,6 +282,11 @@ impl Sandbox for LocalSandbox {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         set_process_group(&mut cmd);
+        crate::isolation::apply_spawn_isolation(
+            cmd.as_std_mut(),
+            self.cgroup.clone(),
+            self.workspace.clone(),
+        );
         if let Some(path) = dir {
             cmd.current_dir(path);
         }
@@ -290,6 +321,13 @@ impl Sandbox for LocalSandbox {
     }
 
     async fn signal(&self, _task: &Task, signal: Signal) -> Result<(), DriverError> {
+        if matches!(signal, Signal::Stop | Signal::Continue) {
+            if let Some(cgroup) = &self.cgroup {
+                if cgroup.set_frozen(matches!(signal, Signal::Stop)).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
         let pgids = self.pgids.lock().expect("sandbox 进程组锁").clone();
         let sig = match signal {
             Signal::Stop => nix::libc::SIGSTOP,
