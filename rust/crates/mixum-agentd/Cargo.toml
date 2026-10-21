@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mixum-agent-driver = { path = "../mixum-agent-driver" }
 mixum-protocol = { path = "../mixum-protocol" }
 async-trait = { workspace = true }
 futures-util = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "mixum-agent-driver"
+description = "mixumOS 任务驱动 SPI：外部 agent 以 impl AgentDriver 接入容器任务引擎"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

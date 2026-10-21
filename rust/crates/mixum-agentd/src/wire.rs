@@ -32,51 +32,9 @@ pub struct HelloResponse {
     pub heartbeat: u32,
 }
 
-/// 任务前置快照策略(MAP tasks.md §Ops)。
-/// MAP 的 `pre` 是 `"always" | "never"`;过渡期同时接受旧客户端的 bool。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SnapshotPolicy {
-    #[serde(default, deserialize_with = "deserialize_pre")]
-    pub pre: bool,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub on_failure: String,
-}
-
-impl Default for SnapshotPolicy {
-    fn default() -> Self {
-        // policy 一旦出现,MAP 缺省 pre=always、kind=disk、onFailure=keep。
-        Self {
-            pre: true,
-            kind: "disk".into(),
-            on_failure: "keep".into(),
-        }
-    }
-}
-
-fn deserialize_pre<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Pre {
-        Bool(bool),
-        MapMode(String),
-    }
-    match Pre::deserialize(deserializer)? {
-        Pre::Bool(value) => Ok(value),
-        Pre::MapMode(mode) => match mode.as_str() {
-            "always" => Ok(true),
-            "never" => Ok(false),
-            other => Err(serde::de::Error::custom(format!(
-                "snapshotPolicy.pre 应为 always|never(旧值 bool 亦可),收到 {other}"
-            ))),
-        },
-    }
-}
+// 任务侧视图类型整体来自 mixum-agent-driver crate(独立发布的驱动 SPI),
+// 这里再导出保持 API 序列化形状与既有引用路径不变。
+pub use mixum_agent_driver::{SnapshotPolicy, TaskEvent, TaskView};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -93,40 +51,6 @@ pub struct TaskSubmitRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub snapshot_policy: Option<SnapshotPolicy>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskView {
-    pub id: String,
-    pub instruction: String,
-    pub agent: String,
-    pub runner: String,
-    pub state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pre_snap_node: Option<String>,
-    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub params: serde_json::Map<String, Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub created_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskEvent {
-    pub task_id: String,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub step: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-    pub ts: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

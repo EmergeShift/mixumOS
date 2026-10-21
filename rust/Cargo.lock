@@ -1525,11 +1525,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mixum-agent-driver"
+version = "0.1.4"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mixum-agentd"
 version = "0.1.4"
 dependencies = [
  "async-trait",
  "futures-util",
+ "mixum-agent-driver",
  "mixum-protocol",
  "mixum-snapshot",
  "nix",
