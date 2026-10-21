@@ -79,7 +79,12 @@
 - [x] gateway M3(2026-10-19,gateway-m3-e2e):`NodeRegistry` trait +
       k8s Lease 共享注册表(心跳续约)、副本间 WS mesh 双向跨副本路由、
       节点掉线跨副本清理;部署清单 cloud/k8s/60-gateway.yaml;
-- [ ] 内存快照跨内核迁移的可行性验证(CRIU 同内核约束的工程对策)。
+- [x] 内存快照跨内核迁移的可行性验证(2026-10-20 受控实验 PASS):源
+      WSL 6.18+CRIU 4.2.1 → 目标 Debian 6.1.0-47+同版本 CRIU,目标
+      control PASS 后跨内核 restore 两轮 PASS(计数 0→1→3 继续);此前
+      「不可行」结论系环境混杂(版本混用/文件 fd/cwd/root mode/modules),
+      已纠正;覆盖范围=最小静态进程,精确内核指纹门禁保留为保守默认,
+      按场景扩展后再评估放宽(docs/criu-feasibility.md §4.4/§7)。
 
 ## 持续事项
 
