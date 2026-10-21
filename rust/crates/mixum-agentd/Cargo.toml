@@ -21,8 +21,10 @@ rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
 nix = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
 rand = { workspace = true }
 mixum-snapshot = { path = "../mixum-snapshot", optional = true }
+mixum-mart = { path = "../mixum-mart", optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -34,4 +36,4 @@ required-features = ["real-snapshot"]
 [features]
 default = ["real-snapshot"]
 # 接入真实快照引擎(mixum-snapshot crate);内存桩保留,--no-default-features 可用。
-real-snapshot = ["dep:mixum-snapshot"]
+real-snapshot = ["dep:mixum-snapshot", "dep:mixum-mart"]
