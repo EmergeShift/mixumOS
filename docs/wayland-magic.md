@@ -75,7 +75,8 @@ mixcomp 主动连 `/run/mixum/display.sock`(mixumd 监听)。
 `0x02` 视频帧(负载即 protocol.md §5 的帧格式)。
 
 - 上行:`window.open` / `window.update`(标题、app_id、尺寸)/ `window.close`;
-- 下行:`stream.start {id,fps}` / `stream.stop` / `input {…}` / `input.mode`;
+- 下行:`stream.start {id,fps}` / `stream.stop` / `input {…}` / `input.mode` /
+  `snapshot.freeze` / `snapshot.thaw`(快照期间暂停/恢复捕获节拍);
 - 断线重连:200ms 轮询定时器驱动;帧发送拥塞时丢帧保实时。
 
 ## 6. 构建与发行版集成

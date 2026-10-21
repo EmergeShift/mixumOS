@@ -504,6 +504,10 @@ textarea {
   background: var(--gray);
 }
 
+.mode-frozen {
+  background: var(--warn);
+}
+
 .canvas-panel {
   flex: 1;
   min-height: 0;
