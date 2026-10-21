@@ -187,6 +187,10 @@ const device = ws(`ws://localhost:${GW_PORT}`);
 await device.opened;
 const claim = await device.call("gateway.pair.claim", { code: pairCode, deviceName: "e2e 设备" });
 if (!claim.op?.endsWith(".ok")) { console.error(`FAIL: pair.claim ${JSON.stringify(claim)}`); process.exit(1); }
+if (claim.payload && "deviceName" in claim.payload) {
+  console.error(`FAIL: pair.claim 回显了 deviceName: ${JSON.stringify(claim.payload)}`);
+  process.exit(1);
+}
 const deviceToken = claim.payload.token;
 device.socket.close();
 
