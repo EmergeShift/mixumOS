@@ -135,6 +135,13 @@ fn task_pod(task: &MixumTask) -> Result<k8s_openapi::api::core::v1::Pod, Error> 
         name: "mixumos".into(),
         image: Some(task.spec.runner_image.clone()),
         image_pull_policy: Some("IfNotPresent".into()),
+        // dist 镜像是 rootfs 导入,无 ENTRYPOINT——任务 Pod 必须显式直起
+        // agentd;MIXUM_RUN_ONCE=1 下提交指令、等终态、容器退出。
+        command: Some(vec![
+            "/usr/bin/mixumd".into(),
+            "--config".into(),
+            "/dev/null".into(),
+        ]),
         ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
             name: Some("wss".into()),
             container_port: AGENTD_PORT,
