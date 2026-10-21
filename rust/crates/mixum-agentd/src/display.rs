@@ -1054,6 +1054,18 @@ mod tests {
         assert_eq!(broker.list().await[0].mode, MODE_FREE);
     }
 
+    #[tokio::test]
+    async fn window_open_without_active_task_is_free() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-free.sock");
+        let open = serde_json::to_vec(&serde_json::json!({
+            "type":"window.open","id":10,"app_id":"a","title":"A",
+            "width":640,"height":480,"focused":false
+        }))
+        .unwrap();
+        broker.handle_comp(&open, 1).await;
+        assert_eq!(broker.list().await[0].mode, MODE_FREE);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn detach_keeps_stream_until_last_same_codec_subscriber_leaves() {
