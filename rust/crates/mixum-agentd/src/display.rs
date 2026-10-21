@@ -270,9 +270,11 @@ impl Broker {
             return;
         }
         // 任务运行中打开的窗口归 agent:用户可见,接管需 display.takeover。
+        // 无任务时新窗口必须是 free——空 mode 不是合法协议值,console/视图
+        // 页都按 free 展示,服务端需返回一致的值。
         let mut w = window;
-        if tasks_active && w.mode.is_empty() {
-            w.mode = MODE_AGENT.into();
+        if w.mode.is_empty() {
+            w.mode = if tasks_active { MODE_AGENT } else { MODE_FREE }.into();
         }
         let changed = w.clone();
         all.insert(
@@ -1049,6 +1051,18 @@ mod tests {
             Err(DisplayError::AgentOwnsInput)
         ));
         broker.set_tasks_active(false).await;
+        assert_eq!(broker.list().await[0].mode, MODE_FREE);
+    }
+
+    #[tokio::test]
+    async fn window_open_without_active_task_is_free() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-free.sock");
+        let open = serde_json::to_vec(&serde_json::json!({
+            "type":"window.open","id":10,"app_id":"a","title":"A",
+            "width":640,"height":480,"focused":false
+        }))
+        .unwrap();
+        broker.handle_comp(&open, 1).await;
         assert_eq!(broker.list().await[0].mode, MODE_FREE);
     }
 
