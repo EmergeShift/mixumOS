@@ -85,7 +85,7 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
   镜像目录再走一次目录打包进 CAS(挂到节点的 memory 清单);
 - restore:`criu restore --images-dir <dir> --shell-job`;
 - 兼容指纹:节点记录 `arch/kernelRelease`,恢复时强校验(保守门禁);
-  **受控实验(2026-10-20)已验证跨内核 restore 可行**——源 6.18+CRIU 4.2.1
+  **受控实验(2026-10-20)已验证最小静态进程跨内核 restore 可行**——源 6.18+CRIU 4.2.1
   → 目标 6.1.0-47+同版本 CRIU,目标 control PASS 后跨内核 restore 两轮
   PASS(进程计数继续);此前「不可行」系环境混杂,已纠正,方法与证据见
   docs/criu-feasibility.md §4.4。覆盖范围仅最小静态进程,精确指纹门禁

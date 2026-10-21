@@ -29,6 +29,8 @@ LOCAL_CRIU=$(criu --version | awk 'NR==1{sub(/^Version: */,""); print}')
 CTRL_CRIU=$(get criu_version "$CTRL")
 SRC_KERNEL=$(get kernel "$META")
 SRC_ARCH=$(get arch "$META")
+CTRL_KERNEL=$(get kernel "$CTRL")
+CTRL_ARCH=$(get arch "$CTRL")
 LOCAL_KERNEL=$(uname -r)
 LOCAL_ARCH=$(uname -m)
 
@@ -43,12 +45,21 @@ echo "目标: kernel=$LOCAL_KERNEL arch=$LOCAL_ARCH criu=$LOCAL_CRIU"
     echo "ABORT: control-ok 的 CRIU 版本($CTRL_CRIU)与本机不一致" >&2
     exit 1
 }
+[ "$CTRL_KERNEL" = "$LOCAL_KERNEL" ] || {
+    echo "ABORT: control-ok 的 kernel($CTRL_KERNEL)与本机($LOCAL_KERNEL)不一致" >&2
+    exit 1
+}
+[ "$CTRL_ARCH" = "$LOCAL_ARCH" ] || {
+    echo "ABORT: control-ok 的 arch($CTRL_ARCH)与本机($LOCAL_ARCH)不一致" >&2
+    exit 1
+}
 [ "$SRC_ARCH" = "$LOCAL_ARCH" ] || {
     echo "ABORT: 架构不一致——架构不是本实验的变量" >&2
     exit 1
 }
 if [ "$SRC_KERNEL" = "$LOCAL_KERNEL" ]; then
-    echo "注意: 两端内核相同——这是同内核恢复,不是跨内核实验" >&2
+    echo "ABORT: 两端内核相同——这不是跨内核实验(请用 baseline-same-kernel.sh)" >&2
+    exit 1
 fi
 
 echo "== 执行跨内核 restore(唯一变量:kernel)=="
@@ -58,7 +69,15 @@ SRC_AFTER_DUMP=$(get counter_after_dump "$META")
 if [ -n "${SRC_AFTER_DUMP:-}" ] && [ "$SRC_AFTER_DUMP" != "missing" ]; then
     printf '%s' "$SRC_AFTER_DUMP" >/tmp/criu-counter
 fi
-if criu restore --images-dir "$IMGS" --shell-job --restore-detached -v4 -o restore.log; then
+# 旧尝试留下的 criu-static-counter 可能继续写同一路径，先确认无人在写。
+C_PRE=$(cat /tmp/criu-counter 2>/dev/null || echo missing)
+sleep 1
+C_PRE2=$(cat /tmp/criu-counter 2>/dev/null || echo missing)
+if [ "$C_PRE" != "$C_PRE2" ]; then
+    echo "ABORT: /tmp/criu-counter 在 restore 前仍在变化，疑似残留进程" >&2
+    exit 1
+fi
+if criu restore --images-dir "$IMGS" --shell-job --restore-detached -v4 -o "$IMGS/restore.log"; then
     # 自证:恢复后的进程应继续写计数器——两次采样严格递增,
     # 且不早于源端 dump 后的值(不依赖人工核对)。
     C1=$(cat /tmp/criu-counter 2>/dev/null || echo missing)

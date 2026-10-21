@@ -11,6 +11,7 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 command -v criu >/dev/null || { echo "缺少 criu" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "缺少 python3" >&2; exit 1; }
 [ $# -ge 1 ] || { echo "用法: target-control.sh <镜像目录>" >&2; exit 1; }
 IMGS="$1"
 [ -d "$IMGS" ] || { echo "镜像目录不存在: $IMGS" >&2; exit 1; }
@@ -31,7 +32,11 @@ python3 "$ROOT/counter.py" "$DIR/pid" "$DIR/counter" </dev/null >"$DIR/proc.log"
 for _ in $(seq 1 50); do [ -s "$DIR/pid" ] && break; sleep 0.1; done
 PID=$(cat "$DIR/pid")
 
-criu dump --tree "$PID" --images-dir "$DIR/imgs" --shell-job -v4 -o dump.log >"$DIR/dump.out" 2>&1
+if ! criu dump --tree "$PID" --images-dir "$DIR/imgs" --shell-job -v4 -o "$DIR/imgs/dump.log" >"$DIR/dump.out" 2>&1; then
+    tail -20 "$DIR/imgs/dump.log" 2>/dev/null || true
+    echo "FAIL: 目标环境本地 dump 失败——环境无效" >&2
+    exit 1
+fi
 sleep 1
 BEFORE=$(cat "$DIR/counter"); sleep 1; AFTER=$(cat "$DIR/counter")
 if [ "$BEFORE" != "$AFTER" ]; then
@@ -39,7 +44,11 @@ if [ "$BEFORE" != "$AFTER" ]; then
     exit 1
 fi
 
-criu restore --images-dir "$DIR/imgs" --shell-job --restore-detached -v4 -o restore.log >"$DIR/restore.out" 2>&1
+if ! criu restore --images-dir "$DIR/imgs" --shell-job --restore-detached -v4 -o "$DIR/imgs/restore.log" >"$DIR/restore.out" 2>&1; then
+    tail -20 "$DIR/imgs/restore.log" 2>/dev/null || true
+    echo "FAIL: 目标环境本地 restore 失败——环境无效" >&2
+    exit 1
+fi
 sleep 1
 RESTORED=$(cat "$DIR/counter")
 if [ "$RESTORED" -le "$AFTER" ]; then

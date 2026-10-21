@@ -17,7 +17,16 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 OUT=$(realpath -m "${1:-/tmp/criu-imgs-cross}")
 BIN=/tmp/criu-static-counter
 
-cc -static -O2 -o "$BIN" "$ROOT/static_counter.c"
+case "$OUT" in
+    /|/tmp|/var|/home|/usr|/etc|/boot|/dev|/proc|/sys|"$ROOT")
+        echo "拒绝危险的镜像目录: $OUT" >&2
+        exit 1
+        ;;
+esac
+if ! cc -static -O2 -o "$BIN" "$ROOT/static_counter.c"; then
+    echo "静态编译失败；需要 libc-static/glibc-static" >&2
+    exit 1
+fi
 rm -rf "$OUT" /tmp/criu-pid /tmp/criu-counter
 mkdir -p "$OUT"
 
@@ -32,8 +41,12 @@ for _ in $(seq 1 50); do [ -s /tmp/criu-pid ] && break; sleep 0.1; done
 PID=$(cat /tmp/criu-pid)
 echo "source kernel: $(uname -r)  pid=$PID"
 
-criu dump --tree "$PID" --images-dir "$OUT" --shell-job -v4 -o dump.log >/tmp/criu-dump-cross.out 2>&1
-echo "DUMP_EXIT=$?"
+if ! criu dump --tree "$PID" --images-dir "$OUT" --shell-job -v4 -o "$OUT/dump.log" >/tmp/criu-dump-cross.out 2>&1; then
+    echo "DUMP_EXIT=1" >&2
+    tail -20 "$OUT/dump.log" 2>/dev/null || true
+    exit 1
+fi
+echo "DUMP_EXIT=0"
 sleep 1
 echo "COUNTER_AFTER_DUMP=$(cat /tmp/criu-counter 2>/dev/null || echo missing)"
 # 受控协议:记录源端元数据;目标端 restore 前断言 CRIU 版本一致
