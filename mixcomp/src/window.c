@@ -204,6 +204,16 @@ void window_create(struct mixcomp_server *s, struct wlr_xdg_surface *xdg) {
 	w->server = s;
 	w->xdg = xdg;
 	w->surface = xdg->surface;
+	if (xdg->surface->resource != NULL) {
+		struct wl_client *client = wl_resource_get_client(xdg->surface->resource);
+		if (client != NULL) {
+			pid_t pid = 0;
+			uid_t uid = 0;
+			gid_t gid = 0;
+			wl_client_get_credentials(client, &pid, &uid, &gid);
+			w->pid = (int)pid;
+		}
+	}
 	w->id = ++s->next_window_id;
 	w->width = 1280;
 	w->height = 800;

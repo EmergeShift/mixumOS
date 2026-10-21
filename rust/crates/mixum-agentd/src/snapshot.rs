@@ -5,6 +5,7 @@
 
 use crate::wire::{SnapNode, SnapTreeResponse};
 use async_trait::async_trait;
+use mixum_protocol::GuiSession;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -70,6 +71,8 @@ pub struct RestoreResult {
     pub restored_to: String,
     pub new_branch: Option<String>,
     pub new_node: Option<String>,
+    /// 恢复节点携带的 GUI 会话清单；调用方按策略重放。
+    pub gui_sessions: Vec<GuiSession>,
 }
 
 #[derive(Clone)]
@@ -152,6 +155,7 @@ impl SnapshotEngine for MemorySnapshotEngine {
             chunks: 0,
             kernel: None,
             arch: None,
+            gui_sessions: Vec::new(),
         };
         state.branch = branch;
         state.head = node.id.clone();
@@ -179,6 +183,7 @@ impl SnapshotEngine for MemorySnapshotEngine {
                     restored_to: selected.id,
                     new_branch: None,
                     new_node: None,
+                    gui_sessions: Vec::new(),
                 })
             }
             "fork" => {
@@ -192,6 +197,7 @@ impl SnapshotEngine for MemorySnapshotEngine {
                     restored_to: selected.id,
                     new_branch: Some(branch),
                     new_node: None,
+                    gui_sessions: Vec::new(),
                 })
             }
             other => Err(SnapshotError::Invalid(format!("未知恢复策略：{other}"))),
@@ -258,6 +264,7 @@ pub struct RealSnapshotEngine {
     engine: SharedEngine,
     /// 当前任务树首领 pid（由 LocalSandbox 写入，CRIU dump 用）。
     leader: Option<Arc<AtomicI32>>,
+    restore_hook: Option<Arc<dyn Fn(Vec<GuiSession>) + Send + Sync>>,
 }
 
 #[cfg(feature = "real-snapshot")]
@@ -270,7 +277,13 @@ impl RealSnapshotEngine {
         Self {
             engine: Arc::new(std::sync::Mutex::new(engine)),
             leader: None,
+            restore_hook: None,
         }
+    }
+
+    /// restore 完成（锁已释放）后回调，用于按 gui_sessions 重放窗口。
+    pub fn set_restore_hook(&mut self, hook: Arc<dyn Fn(Vec<GuiSession>) + Send + Sync>) {
+        self.restore_hook = Some(hook);
     }
 
     /// 包住既有共享句柄(与 SyncBackend 共用同一引擎实例)。
@@ -278,6 +291,7 @@ impl RealSnapshotEngine {
         Self {
             engine,
             leader: None,
+            restore_hook: None,
         }
     }
 
@@ -309,6 +323,7 @@ impl RealSnapshotEngine {
             chunks: node.chunks as u32,
             kernel: (!node.kernel.is_empty()).then_some(node.kernel),
             arch: (!node.arch.is_empty()).then_some(node.arch),
+            gui_sessions: node.gui_sessions,
         }
     }
 
@@ -381,14 +396,21 @@ impl SnapshotEngine for RealSnapshotEngine {
         strategy: &str,
         label: Option<&str>,
     ) -> Result<RestoreResult, SnapshotError> {
-        let mut engine = self.engine.lock().expect("快照引擎锁");
-        let (branch, _selected) = engine
-            .restore(node, strategy, label.unwrap_or_default())
-            .map_err(Self::map_error)?;
+        let (branch, selected) = {
+            let mut engine = self.engine.lock().expect("快照引擎锁");
+            engine
+                .restore(node, strategy, label.unwrap_or_default())
+                .map_err(Self::map_error)?
+        };
+        let sessions = selected.gui_sessions;
+        if let Some(hook) = &self.restore_hook {
+            hook(sessions.clone());
+        }
         Ok(RestoreResult {
             restored_to: node.to_owned(),
             new_branch: (strategy == "fork").then_some(branch),
             new_node: None,
+            gui_sessions: sessions,
         })
     }
 
@@ -567,6 +589,7 @@ mod tests {
     }
 
     #[cfg(feature = "real-snapshot")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_engine_uses_shared_leader_for_memory_snapshot() {
         use std::os::unix::fs::PermissionsExt;
@@ -598,5 +621,43 @@ mod tests {
             .unwrap();
         let stored = shared.lock().unwrap().tree.get(&node.id).unwrap();
         assert!(stored.memory.is_some(), "memory 快照应带 memory 清单");
+    }
+
+    #[cfg(feature = "real-snapshot")]
+    #[tokio::test]
+    async fn restore_hook_receives_gui_sessions() {
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = mixum_snapshot::Engine::open(mixum_snapshot::EngineOptions {
+            data_dir: data.path().into(),
+            root: root.path().into(),
+            skip: vec![],
+            encrypt: false,
+        })
+        .unwrap();
+        engine.metadata = Some(Box::new(|node| {
+            node.gui_sessions.push(mixum_protocol::GuiSession {
+                command: "/usr/bin/foot".into(),
+                ..Default::default()
+            });
+        }));
+        let mut adapter = RealSnapshotEngine::from_engine(engine);
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let hook_seen = seen.clone();
+        adapter.set_restore_hook(Arc::new(move |sessions| {
+            hook_seen.lock().unwrap().extend(sessions);
+        }));
+
+        let node = adapter
+            .create("disk", Some("with-gui"), None, None, false)
+            .await
+            .unwrap();
+        adapter.restore(&node.id, "inplace", None).await.unwrap();
+
+        let sessions = seen.lock().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].command, "/usr/bin/foot");
     }
 }

@@ -1,4 +1,5 @@
 use crate::Manifest;
+use mixum_protocol::GuiSession;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -54,6 +55,9 @@ pub struct TreeNode {
     pub size_bytes: u64,
     #[serde(default)]
     pub chunks: usize,
+    /// GUI 会话清单（OS 侧扩展，文件清单之外）。restore 后按它重放窗口。
+    #[serde(rename = "guiSessions", default, skip_serializing_if = "Vec::is_empty")]
+    pub gui_sessions: Vec<GuiSession>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tags: BTreeMap<String, String>,
 }
@@ -80,6 +84,7 @@ impl TreeNode {
             arch: String::new(),
             size_bytes: 0,
             chunks: 0,
+            gui_sessions: Vec::new(),
             tags: BTreeMap::new(),
         }
     }
