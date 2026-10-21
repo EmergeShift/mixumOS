@@ -55,8 +55,10 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 - **回到任一未来快照**:树里节点永不因回退而丢失,直接 restore 即可;
 - 容器初始化时自动打 `genesis` 快照(空工作区),是全树的根;
 - 删除:仅允许删叶子节点,防止悬空引用;
-- 恢复的安全闸:节点 kernel/arch 与当前环境不一致时拒绝
-  (memory 快照跨内核恢复不可靠;disk 快照的拒绝策略阶段 5 再放宽)。
+- 恢复的安全闸:含 CRIU 内存镜像的节点(memory/hybrid)要求 kernel 完全一致;
+  纯 disk 节点跨内核只记 warn 并放行(文件语义不依赖内核)。`arch` 仍强校验。
+- 恢复期间由宿主冻结全部任务进程组,`materialize` 完成后再解冻,
+  避免 `clear_root` 与运行中的进程读写打架。
 
 ### 用户视角的例子
 
