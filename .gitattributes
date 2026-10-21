@@ -3,3 +3,6 @@
 # "/bin/sh\r"),Docker COPY 进镜像的脚本同样中招。其余文本不强制,
 # 避免全仓重整化的 churn。
 *.sh text eol=lf
+
+# 演示用假合成器：不计入 GitHub 语言统计。
+console/demo/fakecomp.c linguist-vendored
