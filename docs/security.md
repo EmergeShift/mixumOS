@@ -70,7 +70,12 @@
   (帧走 mixumd 的 WSS,鉴权能力生效);
 - external 驱动拉起的 agent 进程:独立进程组、环境最小化
   (MIXUM_INSTRUCTION/TASK_ID/AGENT_BRIDGE),不继承 shell 历史;
-- 前置快照冻结用 SIGSTOP 而非 ptrace/cgroup 需权路径(降权友好)。
+- 快照冻结优先用 **cgroup v2 freezer**（`cgroup.freeze=1`，原子覆盖整棵
+  进程树，含脱离进程组的孙进程）；内核/委托不允许时退回进程组 SIGSTOP；
+- 文件系统写入白名单：Linux 5.13+ 在 `pre_exec` 里套 **Landlock**，
+  任务只能写工作区、`/tmp`、`/dev`、`/run`，其余只读；内核未启用
+  Landlock 时退回容器边界（非特权 + 独立工作区卷）。高危命令的语义
+  拦截在 MixumART 侧做，OS 层只负责兜底回滚与资源边界。
 
 ## 6. 演进位(阶段标记)
 
