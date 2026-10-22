@@ -81,6 +81,7 @@ make dist ARCHS="aarch64 x86_64"
 | [protocol.md](docs/protocol.md) | 线协议 v1:envelope、ops、能力令牌、二进制帧 |
 | [snapshots.md](docs/snapshots.md) | 快照引擎设计 + 基准数字(§9) |
 | [tests/poc/fuse-lazy](tests/poc/fuse-lazy) | FUSE 惰性挂载 PoC 脚本与判定标准 |
+| [tests/poc/qemu-full](tests/poc/qemu-full) | QEMU virt 启动 linux-mixum full |
 | [poc-criu-wayland.md](docs/poc-criu-wayland.md) | CRIU + Wayland 会话快照 PoC 与结论 |
 | [console.md](docs/console.md) | Web 控制台(PWA)架构与对接 |
 | [wayland-magic.md](docs/wayland-magic.md) | mixcomp 合成器与窗口流实现 |
