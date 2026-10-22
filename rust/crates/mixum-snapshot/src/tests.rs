@@ -388,6 +388,7 @@ fn restore_freeze_failure_leaves_workspace_untouched() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn hybrid_restore_runs_criu_and_prepare_hook() {
     use std::os::unix::fs::PermissionsExt;
@@ -427,6 +428,7 @@ fn hybrid_restore_runs_criu_and_prepare_hook() {
     assert!(log.contains("restore"), "缺少 CRIU restore: {log}");
 }
 
+#[cfg(unix)]
 #[test]
 fn multi_root_dump_passes_every_tree() {
     use std::os::unix::fs::PermissionsExt;
