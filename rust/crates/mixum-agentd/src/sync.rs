@@ -146,6 +146,10 @@ impl SyncBackend {
     /// snap.push.commit:校验缺失块全部到齐后落树。
     /// 父节点不在本地树中时,节点成为新分支根,label 追加「(远端根)」。
     pub fn commit(&self, stage: ImportStage) -> Result<String, SyncError> {
+        let origin = stage.node.origin.trim();
+        if origin.is_empty() && !stage.node.origin.is_empty() {
+            return Err(SyncError::Conflict("origin 不能为纯空白".into()));
+        }
         for hash in &stage.missing {
             if !stage.received.contains(hash) {
                 let head = hash.get(..12).unwrap_or(hash);
@@ -176,10 +180,10 @@ impl SyncBackend {
         node.label = stage.node.label.clone();
         node.kernel = stage.node.kernel.clone();
         node.arch = stage.node.arch.clone();
-        node.origin = if stage.node.origin.is_empty() {
+        node.origin = if origin.is_empty() {
             "remote".to_owned()
         } else {
-            stage.node.origin.clone()
+            origin.to_owned()
         };
         node.disk = Some(stage.manifest);
         if !node.parent.is_empty() && engine.tree.get(&node.parent).is_err() {
@@ -545,6 +549,54 @@ mod tests {
         assert_eq!(id, "snap_empty_1");
         let engine = backend.engine.lock().unwrap();
         assert!(engine.tree.get("snap_empty_1").is_ok());
+    }
+
+    #[test]
+    fn commit_rejects_blank_origin() {
+        let (_dir, backend) = open_backend("commit-blank-origin");
+        let stage = backend.stage_import(ImportRequest {
+            node: RemoteNodeMeta {
+                id: "snap_blank_origin".into(),
+                branch: "main".into(),
+                kind: KIND_DISK.into(),
+                origin: "  ".into(),
+                ..Default::default()
+            },
+            manifest: Manifest {
+                version: 1,
+                files: vec![],
+                dirs: vec![],
+            },
+            chunks: vec![],
+        });
+        let err = backend.commit(stage).unwrap_err().to_string();
+        assert!(err.contains("origin"), "实际：{err}");
+    }
+
+    #[test]
+    fn commit_trims_origin() {
+        let (_dir, backend) = open_backend("commit-trim-origin");
+        let stage = backend.stage_import(ImportRequest {
+            node: RemoteNodeMeta {
+                id: "snap_trim_origin".into(),
+                branch: "main".into(),
+                kind: KIND_DISK.into(),
+                origin: " node-a ".into(),
+                ..Default::default()
+            },
+            manifest: Manifest {
+                version: 1,
+                files: vec![],
+                dirs: vec![],
+            },
+            chunks: vec![],
+        });
+        backend.commit(stage).unwrap();
+        let engine = backend.engine.lock().unwrap();
+        assert_eq!(
+            engine.tree.get("snap_trim_origin").unwrap().origin,
+            "node-a"
+        );
     }
 
     #[test]
