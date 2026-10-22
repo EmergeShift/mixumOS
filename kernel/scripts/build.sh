@@ -10,6 +10,7 @@
 # 宿主机只需要 Docker；脚本会把自身重新拉进构建容器执行。
 set -euo pipefail
 
+ORIG_ARGS=("$@")
 VERSION="${MIXUM_KERNEL_VERSION:-6.18.35}"
 VARIANT="micro"
 ARCH="$(uname -m)"
@@ -61,18 +62,15 @@ if [[ "${MIXUM_KERNEL_BUILDER:-0}" != "1" ]]; then
     curl -fL --retry 3 --connect-timeout 20 -o "$SRC_TAR.part" "$URL"
     mv "$SRC_TAR.part" "$SRC_TAR"
   fi
-  if [[ ! -d "$SRC_DIR" ]]; then
-    echo "解压源码（宿主）"
-    tar -C "$BUILD_ROOT" -xf "$SRC_TAR"
-  fi
   docker build -q -t mixum-kernel-builder:bookworm -f "$KERNEL_DIR/Dockerfile" "$KERNEL_DIR" >/dev/null
   exec docker run --rm \
     -v "$KERNEL_DIR:/work/kernel" -w /work/kernel \
     -e MIXUM_KERNEL_BUILDER=1 \
     mixum-kernel-builder:bookworm \
-    bash scripts/build.sh "$@"
+    bash scripts/build.sh "${ORIG_ARGS[@]}"
 fi
 
+BUILD_ROOT="/build"
 mkdir -p "$CACHE" "$BUILD_ROOT" "$OUT"
 
 SRC_TAR="$CACHE/linux-${VERSION}.tar.xz"
@@ -109,7 +107,9 @@ case "$BASE" in
     cp "$ARCH_CFG" .config
     ;;
   file:*)
-    cp "${BASE#file:}" .config
+    BASE_FILE="${BASE#file:}"
+    [[ "$BASE_FILE" != /* ]] && BASE_FILE="$KERNEL_DIR/$BASE_FILE"
+    cp "$BASE_FILE" .config
     ;;
   *)
     echo "--base 只支持 defconfig | arch | file:<path>" >&2
