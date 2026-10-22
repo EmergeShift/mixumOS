@@ -108,7 +108,7 @@ zcat /proc/config.gz | grep -E "CHECKPOINT_RESTORE|LANDLOCK|FUSE_FS|USERFAULTFD"
 | 内核 | 构建 | 安装/启动 | 备注 |
 |---|---|---|---|
 | `linux-mixum-micro` | ✅ arm64 `Image` 31 MB | ✅ Apple Container：`uname -r` = `6.18.35-mixum-micro` | CRIU + Wayland（Sway+foot）dump/restore 已 PoC；需 48-bit VA + diag |
-| `linux-mixum` | ✅ arm64 `Image` 62 MB + `modules.tar.zst` 397 MB | ❌ Apple Container 启动卡住 | 全量内核面向完整 VM/裸机，需自己的 initramfs/rootfs；QEMU/裸机待验 |
+| `linux-mixum` | ✅ arm64 `Image` 62 MB + `modules.tar.zst` 397 MB | ✅ QEMU virt + 最小 initramfs；❌ Apple Container | 全量内核面向完整 VM/裸机；QEMU 实测 `FULL_KERNEL_BOOT_OK` |
 
 构建命令：
 
