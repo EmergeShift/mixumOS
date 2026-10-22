@@ -1553,27 +1553,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "map-core"
-version = "0.1.0"
-source = "git+ssh://git@github.com/EmergeShift/Mixum-Agent-Protocol?rev=3d3ec030f997641102143378ca59abbf8e6ba786#3d3ec030f997641102143378ca59abbf8e6ba786"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "map-snapshot"
 version = "0.1.0"
-source = "git+ssh://git@github.com/EmergeShift/Mixum-Agent-Protocol?rev=3d3ec030f997641102143378ca59abbf8e6ba786#3d3ec030f997641102143378ca59abbf8e6ba786"
 dependencies = [
  "libc",
- "map-core",
  "memmap2",
  "rkyv",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "walkdir",
 ]
