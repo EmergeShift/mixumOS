@@ -62,7 +62,8 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 - **GUI 会话清单（OS 扩展）**：节点元数据可带 `guiSessions`，由 `spawn_gui`
   路径记录（命令、参数、cwd、最小环境、pid），快照时与 mixcomp 窗口表按 pid
   合并出 app_id/title/几何。restore 完成后 agentd 终止本地旧进程并按清单重拉；
-  **仅当节点 origin 为空（本机产生）时才自动重放**，sync 推送/`.mart` 导入的节点
+  **仅当节点 origin 为空（本机产生）且为 disk 快照时才自动重放**：memory/hybrid
+  恢复已由 CRIU 带回进程，重放会产生重复窗口；sync 推送/`.mart` 导入的节点
   跳过，避免执行不可信元数据里的命令；环境只保留 PATH/HOME/USER/DISPLAY/
   WAYLAND_DISPLAY/XDG_RUNTIME_DIR/MIXUM_WORK，`MIXUM_*` 令牌不入快照。
   外部驱动自己拉起的 GUI 进程不在清单内。

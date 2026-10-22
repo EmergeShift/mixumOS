@@ -158,9 +158,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         adapter.set_leader(Arc::clone(&leader));
         // restore 写回文件后按节点里的 gui_sessions 重放窗口（旧进程会被替换）。
         let replay_sandbox = Arc::clone(&sandbox);
-        adapter.set_restore_hook(Arc::new(move |origin, sessions| {
-            if !mixum_agentd::task::gui_replay_trusted(&origin) {
-                eprintln!("跳过 GUI 会话重放：节点来源 {origin:?} 非本机");
+        adapter.set_restore_hook(Arc::new(move |origin, memory_restored, sessions| {
+            if !mixum_agentd::task::gui_replay_trusted(&origin, memory_restored) {
+                eprintln!("跳过 GUI 会话重放：origin={origin:?} memory_restored={memory_restored}");
                 return;
             }
             let started = replay_sandbox.replay_gui_sessions(&sessions);
