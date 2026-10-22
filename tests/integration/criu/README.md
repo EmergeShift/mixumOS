@@ -16,12 +16,16 @@ sudo tests/integration/criu/dump-for-cross-kernel.sh /tmp/criu-imgs-cross
 # ② 目标端 control:必须先 PASS(本地同内核 dump/restore)
 sudo tests/integration/criu/target-control.sh /tmp/criu-imgs-cross
 
-# ③ 跨内核 restore:脚本断言「CRIU 版本一致 + control-ok 存在」后才执行
+# ③ 跨内核 restore:脚本断言受控条件后才执行
 sudo tests/integration/criu/restore-for-cross-kernel.sh /tmp/criu-imgs-cross
 ```
 
 - ② 失败 ⇒ 目标环境无效,实验终止,**不得**进入 ③;
 - ③ 的 CRIU 版本与 meta.txt 不一致 ⇒ 脚本中止(版本是混杂变量,不允许);
+- ③ 要求 control-ok 的 CRIU/内核/arch 与当前目标一致且生成于 24h 内;
+  两端内核相同 ⇒ 脚本中止(同内核恢复请用 `baseline-same-kernel.sh`);
+- ③ 在 restore 前拒绝残留的 `criu-static-counter` 进程,并确认计数器静止,
+  避免旧进程造成假 PASS;
 - ③ 失败后按报告 §5 对失败分类(环境/版本/内核)才能下结论。
 
 环境对齐要点(2026-10-20 受控重跑踩实):目标端除内核外必须与源端

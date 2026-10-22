@@ -62,5 +62,7 @@ fi
     echo "criu_version=$CRIU_VER"
     echo "kernel=$(uname -r)"
     echo "arch=$(uname -m)"
+    # 时间戳用于拒绝陈旧标记(换内核/重启后残留的 control-ok 不可用)。
+    echo "generated_at=$(date +%s)"
 } >"$IMGS/control-ok"
 echo "PASS: 目标环境 control(本地 dump/restore)——control-ok 已写入 $IMGS"
