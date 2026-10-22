@@ -192,8 +192,13 @@ fn pid_alive(pid: i32) -> bool {
         && nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
-/// 重放时保留最小环境：路径、显示、运行时目录与 MIXUM_* 配置。
+/// 重放时保留最小环境：路径、显示、运行时目录与 MIXUM_WORK。
 fn gui_env() -> BTreeMap<String, String> {
+    gui_env_from(std::env::vars())
+}
+
+/// 只保留启动 GUI 必需的最小环境；MIXUM_* 里的令牌/密钥不入快照。
+fn gui_env_from(vars: impl IntoIterator<Item = (String, String)>) -> BTreeMap<String, String> {
     const KEEP: [&str; 7] = [
         "PATH",
         "HOME",
@@ -203,9 +208,15 @@ fn gui_env() -> BTreeMap<String, String> {
         "XDG_RUNTIME_DIR",
         "MIXUM_WORK",
     ];
-    std::env::vars()
-        .filter(|(key, _)| KEEP.contains(&key.as_str()) || key.starts_with("MIXUM_"))
+    vars.into_iter()
+        .filter(|(key, _)| KEEP.contains(&key.as_str()))
         .collect()
+}
+
+/// 只重放本机产生的快照（origin 为空）。经 sync 推送或 .mart 导入的节点，
+/// origin 非空且内容不可信，restore 时不得自动执行其中的 command/args。
+pub fn gui_replay_trusted(origin: &str) -> bool {
+    origin.trim().is_empty()
 }
 
 #[async_trait]
@@ -321,13 +332,8 @@ impl Sandbox for LocalSandbox {
     }
 
     async fn signal(&self, _task: &Task, signal: Signal) -> Result<(), DriverError> {
-        if matches!(signal, Signal::Stop | Signal::Continue) {
-            if let Some(cgroup) = &self.cgroup {
-                if cgroup.set_frozen(matches!(signal, Signal::Stop)).is_ok() {
-                    return Ok(());
-                }
-            }
-        }
+        // per-task 信号必须只作用于该任务进程组；cgroup freezer 是全局的，
+        // 只用于快照的 freeze_all，不能在这里冻结所有任务。
         let pgids = self.pgids.lock().expect("sandbox 进程组锁").clone();
         let sig = match signal {
             Signal::Stop => nix::libc::SIGSTOP,
@@ -1147,5 +1153,35 @@ printf '%s\n' '{"type":"done"}'
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(replayed, "重放命令没有产生文件");
+    }
+}
+
+#[cfg(test)]
+mod gui_env_tests {
+    use super::*;
+
+    #[test]
+    fn gui_env_strips_tokens_and_unknown_mixum_vars() {
+        let env = gui_env_from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("MIXUM_WORK".to_string(), "/var/lib/mixum/work".to_string()),
+            ("MIXUM_GATEWAY_TOKEN".to_string(), "secret".to_string()),
+            ("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string()),
+        ]);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(
+            env.get("MIXUM_WORK").map(String::as_str),
+            Some("/var/lib/mixum/work")
+        );
+        assert!(!env.contains_key("MIXUM_GATEWAY_TOKEN"));
+        assert!(!env.contains_key("LD_PRELOAD"));
+    }
+
+    #[test]
+    fn only_local_origin_is_trusted_for_replay() {
+        assert!(gui_replay_trusted(""));
+        assert!(gui_replay_trusted("  "));
+        assert!(!gui_replay_trusted("remote"));
+        assert!(!gui_replay_trusted("test-host"));
     }
 }
