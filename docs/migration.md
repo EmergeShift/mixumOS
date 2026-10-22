@@ -170,3 +170,20 @@ image.oci.tar           # 可选：目标无法直接 pull 时携带 OCI layout
 3. 跨 runtime：WSL2（同架构）→ Apple Container，窗口按清单重开；
 4. 失败注入：目标缺镜像、arch 不一致、`.mart` 截断；
 5. 性能：1 GB 工作区导出/导入时间、峰值内存、传输去重率。
+
+## 9. 实现进度（2026-10-22）
+
+- **mixumOS**：`mixum-mart` 桥 + `snap.export` / `snap.import` 已实现；
+  `.mart` 往返、损坏拒绝、transfer 路径穿越都有测试。
+- **MixumART**：
+  - `file.get` 流式下载、`snap.export/import` 调用；
+  - 快照行「导出」、迁移包缓存列表、导入；
+  - **源环境 → 目标环境直接迁移**（导出→下载→上传→导入，不落盘手工文件）；
+  - 导出时自动读取源容器 `container inspect`，生成
+    `<node>.migration.json`（镜像引用 + `@sha256` digest、env、ports、command、
+    来源节点/分支、`.mart` 校验和）。
+- **未完成**：
+  - 目标端按 `migration.json` 自动创建/启动容器（目前目标环境需已存在）；
+  - `guiSessions` 采集与重放；
+  - mounts 的 inspect（Apple Container 当前返回空，Docker/WSL2 待接）；
+  - 跨设备时 `.mart` 仍需两端 MixumART 能直连各自 agentd。
