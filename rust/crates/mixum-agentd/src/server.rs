@@ -672,6 +672,7 @@ impl Session {
             ops::op::DISPLAY_INPUT => self.display_input(&env).await,
             ops::op::DISPLAY_CLIPBOARD => self.display_clipboard(&env).await,
             ops::op::PRIVILEGE_DECISION => self.privilege_decision(&env).await,
+            ops::op::PRIVILEGE_LIST => self.privilege_list(&env).await,
             ops::op::AUDIO_ATTACH => self.audio_attach(&env).await,
             ops::op::AUDIO_DETACH => self.audio_detach(&env).await,
             ops::op::FILE_PUT => self.file_put(&env).await,
@@ -1656,6 +1657,14 @@ impl Session {
             Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
         }
     }
+    async fn privilege_list(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::Admin).await {
+            return;
+        }
+        let pending = self.server.privilege.list().await;
+        self.reply(env, json!({"requests": pending})).await;
+    }
+
     async fn privilege_decision(&mut self, env: &Envelope) {
         if !self.require(env, Cap::Admin).await {
             return;

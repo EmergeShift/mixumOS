@@ -44,6 +44,7 @@ pub struct Outcome {
 }
 
 struct Pending {
+    request: Value,
     tx: oneshot::Sender<Decision>,
 }
 
@@ -93,7 +94,13 @@ impl PrivilegeBroker {
             "expiresAt": created_at + REQUEST_TTL.as_millis() as i64,
         });
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id.clone(), Pending { tx });
+        self.pending.lock().await.insert(
+            id.clone(),
+            Pending {
+                request: event.clone(),
+                tx,
+            },
+        );
         self.sessions
             .broadcast_admin(Envelope::new("privilege.request", Some(event.clone())))
             .await;
@@ -121,6 +128,16 @@ impl PrivilegeBroker {
         self.audit(&id, &event, "executed", Some(&decision.reason))
             .await;
         outcome
+    }
+
+    /// Current pending requests for Admin clients that connected after the push.
+    pub async fn list(&self) -> Vec<Value> {
+        self.pending
+            .lock()
+            .await
+            .values()
+            .map(|pending| pending.request.clone())
+            .collect()
     }
 
     /// 由 Mart/CLI 的 `privilege.decision` 调用。
