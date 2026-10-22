@@ -65,4 +65,6 @@ package() {
 	cd "$pkgname/mixcomp"
 	install -Dm755 mixcomp "$pkgdir/usr/bin/mixcomp"
 	install -Dm644 README.md "$pkgdir/usr/share/doc/mixcomp/README.md"
+	install -Dm644 "$startdir/mixcomp.service" \
+		"$pkgdir/usr/lib/systemd/system/mixcomp.service"
 }
