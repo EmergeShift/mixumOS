@@ -89,6 +89,8 @@ impl Criu {
             .arg(dir.as_ref())
             .args([
                 "--shell-job",
+                // GUI 快照必须把 Wayland 连接两端都包含进来；外部 unix socket
+                // 由 --ext-unix-sk 放行，幽灵文件上限放大以容纳 wlroots shm。
                 "--ext-unix-sk",
                 "--file-locks",
                 "--ghost-limit",
