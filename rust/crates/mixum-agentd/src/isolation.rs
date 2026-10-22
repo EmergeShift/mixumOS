@@ -171,6 +171,42 @@ pub fn apply_spawn_isolation(
 /// 系统级目录白名单：只允许写工作区、/tmp、/dev、/run；其余只读。
 /// `/run` 是 Wayland/X11 socket 所在，`/dev` 是 /dev/null 等基础设备。
 #[cfg(target_os = "linux")]
+fn home_tool_dirs_from(home: &Path) -> Vec<PathBuf> {
+    [
+        ".cache", ".local", ".config", ".npm", ".cargo", ".rustup", ".mixum",
+    ]
+    .iter()
+    .map(|name| home.join(name))
+    .collect()
+}
+
+fn home_tool_dirs() -> Vec<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home_tool_dirs_from(&home))
+        .unwrap_or_default()
+}
+
+fn extra_writable_dirs() -> Vec<PathBuf> {
+    std::env::var_os("MIXUM_LANDLOCK_EXTRA_WRITABLE")
+        .map(|raw| {
+            raw.to_string_lossy()
+                .split(':')
+                .filter(|item| !item.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 启动时预建 HOME 下的工具目录：Landlock 只能按已存在目录授权，
+/// 父目录 HOME 本身只读，任务无法自行创建这些目录。
+pub fn prepare_user_dirs() {
+    for dir in home_tool_dirs() {
+        let _ = fs::create_dir_all(dir);
+    }
+}
+
 fn build_ruleset(workspace: &Path) -> io::Result<landlock::RulesetCreated> {
     use landlock::{
         Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
@@ -188,16 +224,19 @@ fn build_ruleset(workspace: &Path) -> io::Result<landlock::RulesetCreated> {
         .add_rule(PathBeneath::new(root, AccessFs::from_read(abi)))
         .map_err(io::Error::other)?;
 
-    for path in [
-        workspace,
-        Path::new("/tmp"),
-        Path::new("/dev"),
-        Path::new("/run"),
-    ] {
+    let mut writable = vec![
+        workspace.to_path_buf(),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/run"),
+    ];
+    writable.extend(home_tool_dirs());
+    writable.extend(extra_writable_dirs());
+    for path in writable {
         if !path.is_dir() {
             continue;
         }
-        let fd = PathFd::new(path).map_err(io::Error::other)?;
+        let fd = PathFd::new(&path).map_err(io::Error::other)?;
         ruleset = ruleset
             .add_rule(PathBeneath::new(fd, AccessFs::from_all(abi)))
             .map_err(io::Error::other)?;
@@ -253,6 +292,14 @@ mod tests {
         let created = CgroupFreezer::create();
         std::env::remove_var("MIXUM_CGROUP_ROOT");
         assert!(created.is_none());
+    }
+
+    #[test]
+    fn home_tool_dirs_are_scoped_to_known_subdirs() {
+        let dirs = home_tool_dirs_from(Path::new("/var/lib/mixum"));
+        assert!(dirs.contains(&PathBuf::from("/var/lib/mixum/.cache")));
+        assert!(dirs.contains(&PathBuf::from("/var/lib/mixum/.npm")));
+        assert!(!dirs.contains(&PathBuf::from("/var/lib/mixum")));
     }
 
     #[test]

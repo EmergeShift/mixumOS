@@ -79,6 +79,7 @@ impl LocalSandbox {
     /// 目录白名单（Linux 5.13+）。不启用时保持旧行为（SIGSTOP + 无限制），
     /// 便于测试和不支持的环境。
     pub fn with_isolation(mut self, workspace: impl Into<PathBuf>) -> Self {
+        crate::isolation::prepare_user_dirs();
         self.cgroup = crate::isolation::CgroupFreezer::create();
         self.workspace = Some(workspace.into());
         self
@@ -213,10 +214,10 @@ fn gui_env_from(vars: impl IntoIterator<Item = (String, String)>) -> BTreeMap<St
         .collect()
 }
 
-/// 只重放本机产生的快照（origin 为空）。经 sync 推送或 .mart 导入的节点，
-/// origin 非空且内容不可信，restore 时不得自动执行其中的 command/args。
-pub fn gui_replay_trusted(origin: &str) -> bool {
-    origin.trim().is_empty()
+/// 只重放本机产生的 disk 快照：memory/hybrid 恢复已由 CRIU 带回进程，
+/// 再按 guiSessions 重放会产生重复窗口；sync/import 节点 origin 非空且不可信。
+pub fn gui_replay_trusted(origin: &str, memory_restored: bool) -> bool {
+    !memory_restored && origin.trim().is_empty()
 }
 
 #[async_trait]
@@ -1179,9 +1180,11 @@ mod gui_env_tests {
 
     #[test]
     fn only_local_origin_is_trusted_for_replay() {
-        assert!(gui_replay_trusted(""));
-        assert!(gui_replay_trusted("  "));
-        assert!(!gui_replay_trusted("remote"));
-        assert!(!gui_replay_trusted("test-host"));
+        assert!(gui_replay_trusted("", false));
+        assert!(gui_replay_trusted("  ", false));
+        assert!(!gui_replay_trusted("remote", false));
+        assert!(!gui_replay_trusted("test-host", false));
+        assert!(!gui_replay_trusted("", true));
+        assert!(!gui_replay_trusted("test-host", true));
     }
 }

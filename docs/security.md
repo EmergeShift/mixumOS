@@ -73,7 +73,9 @@
 - 快照冻结优先用 **cgroup v2 freezer**（`cgroup.freeze=1`，原子覆盖整棵
   进程树，含脱离进程组的孙进程）；内核/委托不允许时退回进程组 SIGSTOP；
 - 文件系统写入白名单：Linux 5.13+ 在 `pre_exec` 里套 **Landlock**，
-  任务只能写工作区、`/tmp`、`/dev`、`/run`，其余只读；内核未启用
+  任务只能写工作区、`/tmp`、`/dev`、`/run`，以及 HOME 下预建的工具目录
+  （`.cache/.local/.config/.npm/.cargo/.rustup/.mixum`，可用
+  `MIXUM_LANDLOCK_EXTRA_WRITABLE` 追加），其余只读；内核未启用
   Landlock 时退回容器边界（非特权 + 独立工作区卷）。高危命令的语义
   拦截在 MixumART 侧做，OS 层只负责兜底回滚与资源边界。
 

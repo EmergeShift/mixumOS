@@ -257,7 +257,7 @@ impl SnapshotEngine for MemorySnapshotEngine {
 #[cfg(feature = "real-snapshot")]
 pub type SharedEngine = Arc<std::sync::Mutex<mixum_snapshot::Engine>>;
 #[cfg(feature = "real-snapshot")]
-type RestoreHook = Arc<dyn Fn(String, Vec<GuiSession>) + Send + Sync>;
+type RestoreHook = Arc<dyn Fn(String, bool, Vec<GuiSession>) + Send + Sync>;
 
 /// mixum-snapshot crate 的异步适配器:trait 语义与 Go reference 的
 /// snap.Engine 调用面逐项对齐(create 的 branch 参数同 Go 一并忽略)。
@@ -284,7 +284,7 @@ impl RealSnapshotEngine {
     }
 
     /// restore 完成（锁已释放）后回调，用于按 gui_sessions 重放窗口。
-    /// 回调参数：节点 origin 与 GUI 会话清单。origin 非空表示 sync/import 来源。
+    /// 回调参数：节点 origin、是否已由 CRIU 恢复内存、GUI 会话清单。
     pub fn set_restore_hook(&mut self, hook: RestoreHook) {
         self.restore_hook = Some(hook);
     }
@@ -406,9 +406,10 @@ impl SnapshotEngine for RealSnapshotEngine {
                 .map_err(Self::map_error)?
         };
         let origin = selected.origin.clone();
+        let memory_restored = selected.memory.is_some();
         let sessions = selected.gui_sessions;
         if let Some(hook) = &self.restore_hook {
-            hook(origin, sessions.clone());
+            hook(origin, memory_restored, sessions.clone());
         }
         Ok(RestoreResult {
             restored_to: node.to_owned(),
@@ -650,8 +651,9 @@ mod tests {
         let mut adapter = RealSnapshotEngine::from_engine(engine);
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let hook_seen = seen.clone();
-        adapter.set_restore_hook(Arc::new(move |origin, sessions| {
+        adapter.set_restore_hook(Arc::new(move |origin, memory_restored, sessions| {
             assert!(origin.is_empty(), "本地快照 origin 应为空");
+            assert!(!memory_restored, "disk 快照不应标记内存恢复");
             hook_seen.lock().unwrap().extend(sessions);
         }));
 
