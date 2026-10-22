@@ -101,3 +101,24 @@ zcat /proc/config.gz | grep -E "CHECKPOINT_RESTORE|LANDLOCK|FUSE_FS|USERFAULTFD"
 - `linux-mixum` / `linux-mixum-micro` 是**构建与配置的品牌**；不要宣称内核由 mixum 从零编写，
   也不要用 “Linux” 暗示官方认证。
 - 发布时同时归档：源码 tarball、`.config`、补丁、构建脚本、校验和。
+
+
+## 验收记录（2026-10-22）
+
+| 内核 | 构建 | 安装/启动 | 备注 |
+|---|---|---|---|
+| `linux-mixum-micro` | ✅ arm64 `Image` 31 MB | ✅ Apple Container：`uname -r` = `6.18.35-mixum-micro` | CRIU + Wayland（Sway+foot）dump/restore 已 PoC；需 48-bit VA + diag |
+| `linux-mixum` | ✅ arm64 `Image` 62 MB + `modules.tar.zst` 397 MB | ❌ Apple Container 启动卡住 | 全量内核面向完整 VM/裸机，需自己的 initramfs/rootfs；QEMU/裸机待验 |
+
+构建命令：
+
+```bash
+# micro（Apple Container / kata guest）
+./scripts/build.sh --variant micro --arch arm64 --base file:.cache/kata.config
+
+# full（Arch 风格全量；当前用 defconfig + full.fragment）
+./scripts/build.sh --variant full --arch arm64
+```
+
+> `linux-mixum` 的“Arch 基底”指 config 取向；x86_64 上可用
+> `--base arch` 拉 Arch 官方 config，arm64 目前用 defconfig + fragment。
