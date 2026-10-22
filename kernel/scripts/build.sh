@@ -175,6 +175,11 @@ echo "编译 $TARGET（$ARCH，$JOBS 并发）"
 make "${MAKE_ARGS[@]}" "$TARGET"
 if [[ "$MODULES" == "1" || "$VARIANT" == "full" ]]; then
   make "${MAKE_ARGS[@]}" modules
+  # 全量内核给外设用：把模块装进输出目录并打成一个包，镜像里解到 /lib/modules。
+  make "${MAKE_ARGS[@]}" modules_install INSTALL_MOD_PATH="$OUT/modules" DEPMOD=true
+  tar -C "$OUT/modules" -c . | zstd -T0 -q -o "$OUT/modules.tar.zst"
+  rm -rf "$OUT/modules"
+  echo "模块: $OUT/modules.tar.zst"
 fi
 
 # ---- 产物 ----
