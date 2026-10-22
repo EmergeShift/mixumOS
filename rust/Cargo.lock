@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-agent-driver"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-agentd"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-ctl"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "dirs",
@@ -1698,7 +1698,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-gateway"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-mart"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "map-snapshot",
  "mixum-protocol",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-operator"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "futures-util",
@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "mixum-snapshot"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "hkdf",
