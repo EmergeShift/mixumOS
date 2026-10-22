@@ -359,21 +359,14 @@ mod tests {
             .prefix("mixum-landlock-denied")
             .tempdir_in(cwd)
             .unwrap();
-        let script = format!(
-            "grep -q '^Landlock:' /proc/self/status || exit 42; \
-             echo ok > {}/allowed.txt; \
-             echo bad > {}/denied.txt",
-            allowed.path().display(),
-            denied.path().display()
-        );
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(script);
+        cmd.arg("-c")
+            .arg("echo ok > \"$1\"; echo bad > \"$2\"")
+            .arg("sh")
+            .arg(allowed.path().join("allowed.txt"))
+            .arg(denied.path().join("denied.txt"));
         apply_spawn_isolation(&mut cmd, None, Some(allowed.path().to_path_buf()));
         let status = cmd.status().unwrap();
-        if status.code() == Some(42) {
-            eprintln!("内核报告没有 Landlock，跳过");
-            return;
-        }
         assert!(!status.success(), "工作区外写入应该失败");
         assert!(allowed.path().join("allowed.txt").exists());
         assert!(!denied.path().join("denied.txt").exists());
@@ -396,25 +389,18 @@ mod tests {
         let allowed = home.join(".cache").join(format!("mixum-landlock-{tag}"));
         let denied = home.join(format!("mixum-landlock-{tag}"));
         let workspace = TempDir::new().unwrap();
-        let script = format!(
-            "grep -q '^Landlock:' /proc/self/status || exit 42; \
-             echo ok > {}; \
-             echo bad > {}",
-            allowed.display(),
-            denied.display()
-        );
         let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c").arg(script);
+        cmd.arg("-c")
+            .arg("echo ok > \"$1\"; echo bad > \"$2\"")
+            .arg("sh")
+            .arg(&allowed)
+            .arg(&denied);
         apply_spawn_isolation(&mut cmd, None, Some(workspace.path().to_path_buf()));
         let status = cmd.status().expect("spawn sh");
         let allowed_written = allowed.exists();
         let denied_written = denied.exists();
         let _ = std::fs::remove_file(&allowed);
         let _ = std::fs::remove_file(&denied);
-        if status.code() == Some(42) {
-            eprintln!("内核未启用 Landlock，跳过");
-            return;
-        }
         assert!(allowed_written, "HOME 工具目录应可写");
         assert!(!denied_written, "HOME 根目录应只读");
         assert!(!status.success(), "写 HOME 根目录应该失败");
