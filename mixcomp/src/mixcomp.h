@@ -16,6 +16,7 @@
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_text_input_v3.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 
@@ -147,6 +148,11 @@ struct mixcomp_server {
 	bool snapshot_frozen;
 
 	int jpeg_quality;
+
+	// 文本提交（text_input.c）：客户端 text-input-v3 对象与焦点窗口。
+	struct wlr_text_input_manager_v3 *text_input_mgr;
+	struct wl_list text_inputs; // struct mixcomp_text_input::link
+	struct wl_listener new_text_input;
 };
 
 // window.c
@@ -167,5 +173,13 @@ void stream_poll_control(struct mixcomp_server *s);
 // input.c —— 内建注入客户端。
 bool input_init(struct mixcomp_server *s);
 void input_handle_json(struct mixcomp_server *s, const char *json, size_t len);
+
+// text_input.c —— 宿主输入法提交的文本注入焦点窗口。
+void text_input_init(struct mixcomp_server *s);
+void text_input_focus(struct mixcomp_server *s, struct mixcomp_window *w);
+void text_input_commit(struct mixcomp_server *s, struct mixcomp_window *w,
+		const char *text);
+void text_input_forget_window(struct mixcomp_server *s,
+		struct mixcomp_window *w);
 
 #endif
