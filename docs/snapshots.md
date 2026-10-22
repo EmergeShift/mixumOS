@@ -100,7 +100,8 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 协议见 protocol.md §6。补充语义:
 
 - origin 字段记录来源主机名,树里可见「这个分支从哪来」;
-- 推送是幂等的:第二次推送 missing 为空,零字节传输;
+- 推送是幂等的:第二次推送 missing 为空,零字节传输;同内容的新快照
+  (盒盖自动快照)同样零字节,commit 照常落树,云端不会缺新 head;
 - 传输只发明文块,哈希即校验和;落盘加密是各端自己的事;
 - 「mac 盒盖 → 云端续跑」链路:mixum-ctl 监听电源事件 → hybrid 快照
   → snap.push 到云端 → 云端容器 restore 该节点 → 任务继续;

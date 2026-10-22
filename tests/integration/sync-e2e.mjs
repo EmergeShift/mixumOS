@@ -12,6 +12,8 @@
 //       云端 snap.tree/snap.restore → head 迁移;文件物化由外层 shell 校验。
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
+import { execFileSync } from "node:child_process";
+
 const [deviceToken, cloudToken] = process.argv.slice(2);
 if (!deviceToken || !cloudToken) {
   console.error("用法: node sync-e2e.mjs <deviceToken> <cloudToken> [devicePort] [cloudPort]");
@@ -94,6 +96,10 @@ const deviceHello = await device.connect();
 console.log(`device: ${deviceHello.server} ${deviceHello.arch} hostname`);
 const cloudHello = await cloud.connect();
 console.log(`cloud:  ${cloudHello.server} ${cloudHello.arch}`);
+
+// 0. 造真实内容:空 work_root 的快照 manifest 为 0 块,首推/幂等断言会落空。
+execFileSync("docker", ["exec", "mixum-device", "sh", "-c",
+  "mkdir -p /var/lib/mixum/work && echo 'sync-e2e seed' > /var/lib/mixum/work/seed.txt"]);
 
 // 1. 设备端快照(合盖前迁移)。
 const snap = await device.call("snap.create", { kind: "disk", label: "合盖前迁移" });

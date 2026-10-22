@@ -68,7 +68,11 @@
 - [x] mixcomp H.264 流(openh264 编码,attach 协商 + WebCodecs 解码,
       JPEG 路径保留;2026-10-17,静态内容 10s 流量 JPEG 的 1/84,
       动态内容预期 1/5~1/20);自适应帧率、脏区仍待做;
-- [ ] mixum-ctl:macOS 电力钩子(盒盖前快照上传)、本地窗口视图服务;
+- [x] mixum-ctl 电力钩子(2026-10-20):macOS IOKit 监听盒盖前快照上传,
+      「先迁移后放行」不变量(mock 三例单测:正常/失败/超时都必须 ack);
+      Linux systemd 钩子(`power --install/--remove/--print`)与 CLI 迁移
+      链路已 e2e(tests/integration/power-e2e.mjs);macOS 实机验证待真 Mac;
+- [ ] mixum-ctl 本地窗口视图服务;
 - [ ] 控制台 PWA:任务流、快照树(图状)、窗口画布(光标映射)、接管按钮。
 
 完成标准:手机发指令 → 云端 agent 开 Chrome → mac 上看到独立原生风格窗口,
