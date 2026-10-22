@@ -129,7 +129,9 @@ Arch rootfs + **CRIU 4.2.1(与源端完全一致)** + Debian 6.1.0-47-amd64
 1. **同版本 CRIU**(两端 `criu --version` 完全一致;脚本断言,不一致即中止);
 2. **目标环境 control 先行**:在目标 VM 上先跑
    `target-control.sh`(同内核本地 dump → kill → restore → 计数继续),
-   失败则目标环境判定无效,实验终止,不得进入跨内核步骤;
+   失败则目标环境判定无效,实验终止,不得进入跨内核步骤;control-ok
+   记录 CRIU/内核/arch/生成时间,restore 前校验一致且不超过 24h
+   (换内核/重启后的陈旧标记不可用);
 3. **同 arch**;记录两端 kernel release、CRIU 版本、内核关键 config
    (CHECKPOINT_RESTORE / NETFILTER / NF_TABLES / SYSVIPC / CGROUP_*)与
    模块列表;
@@ -181,6 +183,14 @@ sudo tests/integration/criu/target-control.sh /tmp/criu-imgs-cross
 # ③ 目标 VM:断言版本一致 + control-ok 存在后,执行跨内核 restore
 sudo tests/integration/criu/restore-for-cross-kernel.sh /tmp/criu-imgs-cross
 ```
+
+### 8.1 复现状态(2026-10-22)
+
+- #26 受控重跑使用的目标 VM(6.1.0-47 + CRIU 4.2.1 initramfs)是临时产物,
+  未入库;WSL /tmp 清理后不能直接复用。
+- 重新复跑需按 README 重建目标 VM;仓库只保留可移植脚本,不提交内核/rootfs。
+- #68 的 control-ok 时效/残留进程校验已用合成负向测试验证(3/3 ABORT);
+  完整 VM 复跑待目标环境重建后执行。
 
 第二内核 VM 的组装(initramfs、模块、loopback、QEMU 启动)见
 `tests/integration/criu/README.md`。脚本只包含可移植的测试逻辑;
