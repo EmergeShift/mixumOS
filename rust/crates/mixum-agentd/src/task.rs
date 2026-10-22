@@ -133,7 +133,13 @@ impl LocalSandbox {
                 .expect("gui 会话锁")
                 .contains_key(&session.pid);
             if tracked && session.pid > 0 {
-                terminate_tracked(session.pid);
+                if !terminate_tracked(session.pid) {
+                    eprintln!(
+                        "GUI 会话重放跳过（pid {} 未退出）：{}",
+                        session.pid, session.command
+                    );
+                    continue;
+                }
                 self.gui.lock().expect("gui 会话锁").remove(&session.pid);
                 self.pgids
                     .lock()
@@ -154,11 +160,7 @@ impl LocalSandbox {
         if !session.cwd.is_empty() {
             cmd.current_dir(&session.cwd);
         }
-        let env = if session.env.is_empty() {
-            gui_env()
-        } else {
-            session.env.clone()
-        };
+        let env = replay_env(session);
         cmd.env_clear().envs(&env);
         apply_x11_env_std(&mut cmd);
         cmd.stdin(std::process::Stdio::null())
@@ -201,22 +203,22 @@ fn pid_alive(pid: i32) -> bool {
 
 /// 终止重放前的旧进程：先 SIGTERM 并等待退出，超时再 SIGKILL，
 /// 避免新旧窗口/控制 socket 在同一 pid 上争用。
-fn terminate_tracked(pid: i32) {
+fn terminate_tracked(pid: i32) -> bool {
     if pid <= 0 {
-        return;
+        return true;
     }
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(-pid),
         nix::sys::signal::Signal::SIGTERM,
     );
     if wait_pid_gone(pid, Duration::from_secs(1)) {
-        return;
+        return true;
     }
     let _ = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(-pid),
         nix::sys::signal::Signal::SIGKILL,
     );
-    let _ = wait_pid_gone(pid, Duration::from_millis(300));
+    wait_pid_gone(pid, Duration::from_millis(300))
 }
 
 fn wait_pid_gone(pid: i32, timeout: Duration) -> bool {
@@ -249,6 +251,16 @@ fn gui_env_from(vars: impl IntoIterator<Item = (String, String)>) -> BTreeMap<St
     vars.into_iter()
         .filter(|(key, _)| KEEP.contains(&key.as_str()))
         .collect()
+}
+
+/// 重放环境:无论快照里记录了什么,都按 GUI 白名单过滤;
+/// 空环境退回当前进程的最小 GUI 环境。
+fn replay_env(session: &GuiSession) -> BTreeMap<String, String> {
+    if session.env.is_empty() {
+        gui_env()
+    } else {
+        gui_env_from(session.env.iter().map(|(k, v)| (k.clone(), v.clone())))
+    }
 }
 
 /// 只重放本机产生的 disk 快照：memory/hybrid 恢复已由 CRIU 带回进程，
@@ -1233,6 +1245,31 @@ mod gui_env_tests {
         );
         assert!(!env.contains_key("MIXUM_GATEWAY_TOKEN"));
         assert!(!env.contains_key("LD_PRELOAD"));
+    }
+
+    #[test]
+    fn replay_env_filters_recorded_snapshot_variables() {
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        env.insert("HOME".to_string(), "/home/u".to_string());
+        env.insert("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string());
+        env.insert("MIXUM_GATEWAY_TOKEN".to_string(), "secret".to_string());
+        let session = GuiSession {
+            command: "app".into(),
+            env,
+            ..GuiSession::default()
+        };
+        let filtered = replay_env(&session);
+        assert_eq!(filtered.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(filtered.get("HOME").map(String::as_str), Some("/home/u"));
+        assert!(!filtered.contains_key("LD_PRELOAD"));
+        assert!(!filtered.contains_key("MIXUM_GATEWAY_TOKEN"));
+    }
+
+    #[test]
+    fn terminate_tracked_returns_for_invalid_pid() {
+        assert!(terminate_tracked(0));
+        assert!(terminate_tracked(-1));
     }
 
     #[test]
