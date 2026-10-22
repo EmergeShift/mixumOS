@@ -1,6 +1,12 @@
 # linux-mixum-micro：VM guest 快路径（Apple Container / WSL2 / QEMU microVM）。
 CONFIG_LOCALVERSION="-mixum-micro"
 
+# Apple Virtualization / kata 都按 48-bit VA/PA 启动；defconfig 可能选 52-bit。
+CONFIG_ARM64_VA_BITS_48=y
+CONFIG_ARM64_VA_BITS=48
+CONFIG_ARM64_PA_BITS_48=y
+CONFIG_ARM64_PA_BITS=48
+
 # ---- 模块 ----
 CONFIG_MODULES=y
 CONFIG_MODULE_UNLOAD=y
