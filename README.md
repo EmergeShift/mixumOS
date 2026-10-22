@@ -79,6 +79,7 @@ make dist ARCHS="aarch64 x86_64"
 | [snapshots.md](docs/snapshots.md) | 快照引擎设计 + 基准数字(§9) |
 | [console.md](docs/console.md) | Web 控制台(PWA)架构与对接 |
 | [wayland-magic.md](docs/wayland-magic.md) | mixcomp 合成器与窗口流实现 |
+| [backends.md](docs/backends.md) | 宿主后端形态:Docker/WSL2/nvx/k8s |
 | [distro.md](docs/distro.md) | 发行版构建工具链与踩坑记录 |
 | [security.md](docs/security.md) | 威胁模型、令牌、传输、快照加密 |
 | [agent-bridge.md](docs/agent-bridge.md) | agent 进程接入协议(external 驱动) |
