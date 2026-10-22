@@ -5,9 +5,15 @@ set -e
 
 DATA=/var/lib/mixum
 WORK=/var/lib/mixum/work
-mkdir -p "$WORK" /run/mixum
+HOME_DIR=/var/lib/mixum/home
+mkdir -p "$DATA" "$WORK" "$HOME_DIR" /run/mixum /run/mixum/pulse
+# 数据目录只有 root 可读（token/key/snapshot）；agent 只能碰 work/home。
+chmod 0711 "$DATA"
+chown root:root "$DATA" 2>/dev/null || true
+chown mixum:mixum "$WORK" "$HOME_DIR" /run/mixum /run/mixum/pulse 2>/dev/null || true
+chmod 0750 "$WORK" "$HOME_DIR"
 export XDG_RUNTIME_DIR=/run/mixum
-chmod 700 "$XDG_RUNTIME_DIR"
+chmod 0750 "$XDG_RUNTIME_DIR"
 
 # 1. mixumd（后台，证书自签、令牌落盘）
 GW_ARGS=""
