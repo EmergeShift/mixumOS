@@ -27,7 +27,7 @@
 | 值 | 通道 | 负载 |
 |----|------|------|
 | 0x01 | video | 视频帧(§5) |
-| 0x02 | audio | 预留 |
+| 0x02 | audio | s16le 交织 PCM(见 §4.5.1) |
 | 0x03 | chunk | 快照块(§6) |
 | 0x04 | stdio | 任务 stdio 字节流(预留) |
 | 0x05 | file | 文件块:`[0x05][u32 transfer][u64 offset][data]` |
@@ -168,7 +168,7 @@ snapshots.md §4。`guiSessions` 是 OS 侧扩展（restore 后重放窗口）�
 | display.list | — | `{ windows: [Window] }` |
 | display.attach | `{ window, fps?, codec?: "jpeg"\|"h264"\|"png", quality?: 1-100 }` | `{ window, codec, width, height, fps }`(codec = 实际编码,此后二进制 video 帧) |
 | display.detach | `{ window }` | `{ window }` |
-| display.input | `{ window, type, … }` | `{ ok: true }` |
+| display.input | `{ window, type, … }`;type = `pointer_motion`/`pointer_button`/`pointer_axis`/`key`/`text`;`text` 为宿主输入法已提交的字符串(≤8192 字节),经服务端 text-input-v3 交给焦点窗口 | `{ ok: true }` |
 | display.takeover | `{ window, action: claim\|release, force? }` | `{ mode }` |
 | display.windows | — | `{ subscribed }`(此后推送窗口增删/改名) |
 
@@ -190,6 +190,25 @@ file 帧的 `transfer` 与应答一致，`offset` 必须顺序递增。CLI：
 mixum-ctl file put ./model.bin --name model.bin   # 打印远端绝对路径
 mixum-ctl file get /var/lib/mixum/work/transfers/out.bin --out ./out.bin
 ```
+
+### 4.5.1 音频流
+
+音频是容器级（不是每窗口），需要 `display.view` 能力。
+
+| op | 请求 | 应答 |
+|----|------|------|
+| audio.attach | — | `{ sampleRate: 48000, channels: 2, format: "s16le", chunkMs: 20 }`；随后二进制 audio 帧 |
+| audio.detach | — | `{ ok: true }`；停止本连接的音频推送 |
+
+- 采集命令由服务端配置 `audio_command`（或环境变量 `MIXUM_AUDIO_CMD`）
+  指定，默认未配置时 `audio.attach` 返回 `unsupported`。典型值：
+  `parec --format=s16le --rate=48000 --channels=2 --latency-msec=20`。
+- 第一个订阅者启动采集进程，最后一个 `detach`/断连后终止；采集进程输出
+  定长 PCM，服务端切成 20ms 块广播。
+- audio 帧：`[0]` 通道标签 `0x02`，`[1..5]` u32 序号，`[5..13]` u64 采集
+  时刻（微秒，采集进程内单调时钟），其后是 `3840` 字节 s16le 交织 PCM
+  （48kHz 双声道 20ms）。接收端用序号检测丢块、用时间戳步长推进播放
+  时钟（异常时重新对齐）；订阅者积压时服务端丢弃最旧块（broadcast 容量 32）。
 
 Window:`{ id, appId, title, width, height, focused, mode: agent|user|free,
 codec? }`。codec = 窗口流的实际编码,由 mixcomp 能力回告(如请求 h264

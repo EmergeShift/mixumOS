@@ -1,0 +1,168 @@
+//! 容器音频采集与广播。
+//!
+//! 采集命令由 `audio_command` 配置（默认读 PulseAudio/PipeWire 的 parec），
+//! 输出定长 s16le 交织 PCM；这里切成 20ms 块，加音频帧头后广播给订阅连接。
+//! 第一个订阅者启动采集进程，最后一个离开时终止。
+
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use mixum_protocol::frames;
+use tokio::sync::broadcast;
+
+pub const SAMPLE_RATE: u32 = 48_000;
+pub const CHANNELS: u16 = 2;
+pub const CHUNK_MS: u32 = 20;
+pub const CHUNK_BYTES: usize =
+    (SAMPLE_RATE as usize / 1000 * CHUNK_MS as usize) * CHANNELS as usize * 2;
+
+pub struct AudioSubscription {
+    pub rx: broadcast::Receiver<Arc<[u8]>>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub chunk_ms: u32,
+}
+
+pub struct AudioHub {
+    command: Option<String>,
+    subscribers: AtomicUsize,
+    child: Mutex<Option<Child>>,
+    /// 每次 start/stop 递增；旧 reader 线程看到代数变化后退出，避免
+    /// kill 慢一拍时把上一轮音频混进新订阅。
+    generation: AtomicU64,
+    tx: broadcast::Sender<Arc<[u8]>>,
+}
+
+impl AudioHub {
+    pub fn new(command: Option<String>) -> Arc<Self> {
+        let (tx, _) = broadcast::channel(32);
+        Arc::new(Self {
+            command,
+            subscribers: AtomicUsize::new(0),
+            child: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            tx,
+        })
+    }
+
+    /// 订阅音频帧；返回 (接收端, 采样率, 声道数, 块时长)。
+    pub fn subscribe(self: &Arc<Self>) -> Result<AudioSubscription, String> {
+        let Some(command) = self.command.clone() else {
+            return Err("未配置音频采集命令(audio_command)".into());
+        };
+        let rx = self.tx.subscribe();
+        if self.subscribers.fetch_add(1, Ordering::SeqCst) == 0 {
+            if let Err(e) = self.start(&command) {
+                self.subscribers.fetch_sub(1, Ordering::SeqCst);
+                return Err(e);
+            }
+        }
+        Ok(AudioSubscription {
+            rx,
+            sample_rate: SAMPLE_RATE,
+            channels: CHANNELS,
+            chunk_ms: CHUNK_MS,
+        })
+    }
+
+    pub fn unsubscribe(&self) {
+        if self.subscribers.fetch_sub(1, Ordering::SeqCst) <= 1 {
+            self.stop();
+        }
+    }
+
+    fn start(self: &Arc<Self>, command: &str) -> Result<(), String> {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut command_builder = Command::new("sh");
+        command_builder
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // 采集命令通常是 `parec ...`；让 sh 与 parec 同属一个新进程组，
+        // stop 时整组杀，避免只杀 sh 留下 parec 孤儿。
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command_builder.process_group(0);
+        }
+        let mut child = command_builder
+            .spawn()
+            .map_err(|e| format!("启动音频采集失败: {e}"))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "音频采集无 stdout".to_owned())?;
+        let tx = self.tx.clone();
+        let hub = Arc::clone(self);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut pcm = vec![0u8; CHUNK_BYTES];
+            let mut seq: u32 = 0;
+            let start = std::time::Instant::now();
+            while hub.generation.load(Ordering::SeqCst) == generation
+                && stdout.read_exact(&mut pcm).is_ok()
+            {
+                let pts_us = start.elapsed().as_micros() as u64;
+                let frame = frames::marshal_audio(seq, pts_us, &pcm);
+                seq = seq.wrapping_add(1);
+                // 没有订阅者时 send 返回 Err；保留采集进程等待新订阅者。
+                let _ = tx.send(Arc::from(frame));
+            }
+        });
+        *self.child.lock().expect("音频子进程锁") = Some(child);
+        Ok(())
+    }
+
+    fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(mut child) = self.child.lock().expect("音频子进程锁").take() {
+            #[cfg(unix)]
+            {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-(child.id() as i32)),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+/// 会话侧守卫：Drop 时退订，最后一个订阅者离开会终止采集进程。
+pub struct AudioGuard(Arc<AudioHub>);
+
+impl AudioGuard {
+    pub fn new(hub: Arc<AudioHub>) -> Self {
+        Self(hub)
+    }
+}
+
+impl Drop for AudioGuard {
+    fn drop(&mut self) {
+        self.0.unsubscribe();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_is_twenty_milliseconds() {
+        assert_eq!(CHUNK_BYTES, 3840);
+        assert_eq!(CHUNK_BYTES, (48000 * 20 / 1000) * 2 * 2);
+    }
+
+    #[test]
+    fn subscribe_without_command_is_unsupported() {
+        let hub = AudioHub::new(None);
+        assert!(hub.subscribe().is_err());
+    }
+}

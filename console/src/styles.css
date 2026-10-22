@@ -803,3 +803,43 @@ textarea {
     height: 46%;
   }
 }
+
+/* 隐藏的输入法接收框:定位到画布点击处,让系统候选窗跟随指针。
+   组合结果经 compositionend/input 以 display.input text 发给远端。 */
+.canvas-wrap .ime-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 拖拽上传:文件落到容器 work_root/transfers（file.put）。 */
+.canvas-wrap .canvas-drop {
+  position: absolute;
+  inset: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed #6aa9ff;
+  border-radius: 8px;
+  background: rgba(20, 40, 70, 0.55);
+  color: #dce9ff;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+/* 音频音量滑杆（画布工具栏） */
+.canvas-head .audio-vol {
+  width: 70px;
+  accent-color: #6aa9ff;
+}
+
+.canvas-head .audio-off {
+  width: 70px;
+  accent-color: #e0b050;
+}

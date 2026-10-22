@@ -1,0 +1,14 @@
+[Unit]
+Description=mixumOS container audio (PulseAudio null sink)
+Before=mixumd.service
+
+[Service]
+User=mixum
+Environment=XDG_RUNTIME_DIR=/run/mixum
+Environment=PULSE_RUNTIME_PATH=/run/mixum/pulse
+ExecStart=/usr/bin/pulseaudio --daemonize=no --exit-idle-time=-1 -n --file=/etc/mixum/pulse.pa
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

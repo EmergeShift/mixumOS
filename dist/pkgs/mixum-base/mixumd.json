@@ -2,6 +2,7 @@
 	"listen": "0.0.0.0:7601",
 	"dataDir": "/var/lib/mixum",
 	"workRoot": "/var/lib/mixum/work",
+	"audioCommand": "parec --format=s16le --rate=48000 --channels=2 --latency-msec=20 --device=mixum.monitor",
 	"encryptSnapshots": true,
 	"tokenTtlSec": 86400
 }
