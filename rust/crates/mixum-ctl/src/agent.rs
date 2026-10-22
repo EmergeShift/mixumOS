@@ -1,7 +1,7 @@
 //! 内置 agent 目录、一键安装与提示词模板。
 //!
 //! 安装通过 shell 任务在容器内执行：先按包管理器补依赖，再跑官方安装器，
-//! 最后把提示词模板写到 /root/.mixum/agents/<name>/PROMPT.md。
+//! 最后把提示词模板写到 $HOME/.mixum/agents/<name>/PROMPT.md。
 
 use serde_json::json;
 
@@ -17,6 +17,10 @@ pub struct AgentSpec {
 }
 
 const NPM_BOOTSTRAP: &str = r#"if ! command -v npm >/dev/null 2>&1; then
+  if [ "$(id -u)" != "0" ]; then
+    echo "缺少 npm；当前任务不是 root，无法用包管理器安装。请管理员预装 nodejs/npm。" >&2
+    exit 1
+  fi
   if command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm nodejs npm
   elif command -v apk >/dev/null 2>&1; then
@@ -30,6 +34,10 @@ const NPM_BOOTSTRAP: &str = r#"if ! command -v npm >/dev/null 2>&1; then
 fi"#;
 
 const CURL_BOOTSTRAP: &str = r#"if ! command -v curl >/dev/null 2>&1; then
+  if [ "$(id -u)" != "0" ]; then
+    echo "缺少 curl；当前任务不是 root，无法用包管理器安装。请管理员预装 curl。" >&2
+    exit 1
+  fi
   if command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm curl
   elif command -v apk >/dev/null 2>&1; then
@@ -46,30 +54,30 @@ pub const AGENTS: &[AgentSpec] = &[
     AgentSpec {
         name: "claude-code",
         summary: "Anthropic Claude Code（npm 官方包）",
-        probe: "command -v claude >/dev/null 2>&1",
-        install: r#"npm install -g @anthropic-ai/claude-code
-command -v claude"#,
+        probe: "command -v claude >/dev/null 2>&1 || [ -x \"$HOME/.local/bin/claude\" ]",
+        install: r#"npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code
+command -v claude || test -x "$HOME/.local/bin/claude""#,
     },
     AgentSpec {
         name: "codex",
         summary: "OpenAI Codex CLI（npm 官方包）",
-        probe: "command -v codex >/dev/null 2>&1",
-        install: r#"npm install -g @openai/codex
-command -v codex"#,
+        probe: "command -v codex >/dev/null 2>&1 || [ -x \"$HOME/.local/bin/codex\" ]",
+        install: r#"npm install -g --prefix "$HOME/.local" @openai/codex
+command -v codex || test -x "$HOME/.local/bin/codex""#,
     },
     AgentSpec {
         name: "gemini-cli",
         summary: "Google Gemini CLI（npm 官方包）",
-        probe: "command -v gemini >/dev/null 2>&1",
-        install: r#"npm install -g @google/gemini-cli
-command -v gemini"#,
+        probe: "command -v gemini >/dev/null 2>&1 || [ -x \"$HOME/.local/bin/gemini\" ]",
+        install: r#"npm install -g --prefix "$HOME/.local" @google/gemini-cli
+command -v gemini || test -x "$HOME/.local/bin/gemini""#,
     },
     AgentSpec {
         name: "opencode",
         summary: "OpenCode（官方安装脚本）",
-        probe: "command -v opencode >/dev/null 2>&1",
+        probe: "command -v opencode >/dev/null 2>&1 || [ -x \"$HOME/.opencode/bin/opencode\" ]",
         install: r#"curl -fsSL https://opencode.ai/install | bash
-command -v opencode || command -v "$HOME/.opencode/bin/opencode""#,
+test -x "$HOME/.opencode/bin/opencode""#,
     },
 ];
 
@@ -85,7 +93,7 @@ pub fn names() -> Vec<&'static str> {
 pub fn template(name: &str) -> String {
     format!(
         r#"你正在 mixumOS 容器内工作（由 mixumOS 管理，agent 名称：{name}）。
-工作区：/root/work。任务开始时 mixumOS 会自动创建快照，长任务失败可回退重跑。
+工作区：/var/lib/mixum/work。任务开始时 mixumOS 会自动创建快照，长任务失败可回退重跑。
 任务：{{{{instruction}}}}
 要求：
 - 先读代码和文档，再动手修改；一次只做一件事；
@@ -105,7 +113,7 @@ fn prompt_write(spec: &AgentSpec) -> String {
 
 /// `custom` 非空时替换官方安装命令（仍写入提示词），用于测试或私有源。
 pub fn install_script_with(spec: &AgentSpec, custom: Option<&str>) -> String {
-    let mut script = String::from("set -e\n");
+    let mut script = String::from("set -e\nexport PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:$PATH\"\nmkdir -p \"$HOME/.local/bin\"\n");
     if let Some(custom) = custom {
         script.push_str(custom);
         script.push('\n');
@@ -221,7 +229,7 @@ mod tests {
         let text = template("codex");
         assert!(text.contains("{{instruction}}"));
         assert!(text.contains("codex"));
-        assert!(text.contains("/root/work"));
+        assert!(text.contains("/var/lib/mixum/work"));
     }
 
     #[test]
@@ -229,7 +237,7 @@ mod tests {
         let spec = find("claude-code").unwrap();
         let script = install_script_with(spec, None);
         assert!(script.starts_with("set -e\n"));
-        assert!(script.contains("npm install -g @anthropic-ai/claude-code"));
+        assert!(script.contains("npm install -g --prefix \"$HOME/.local\" @anthropic-ai/claude-code"));
         assert!(script.contains("$HOME/.mixum/agents/claude-code/PROMPT.md"));
         assert!(script.contains("MIXUM_PROMPT_EOF"));
         let opencode = install_script_with(find("opencode").unwrap(), None);
