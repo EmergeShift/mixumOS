@@ -170,6 +170,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
+/// 选择 WS 子协议:优先 MAP 规范名 `map.v1`,过渡期接受 `mixum.v1`;
+/// 未请求任何已知子协议则不回(客户端可能因此拒绝连接)。
+fn select_subprotocol(offered: &str) -> Option<&'static str> {
+    let mut legacy = false;
+    for part in offered.split(',') {
+        match part.trim() {
+            "map.v1" => return Some("map.v1"),
+            "mixum.v1" => legacy = true,
+            _ => {}
+        }
+    }
+    legacy.then_some("mixum.v1")
+}
+
 /// 与 agentd 一致:客户端请求 `mixum.v1` 子协议时回同值,未请求则不回
 /// (MAP 客户端按子协议拒绝服务端)。
 #[allow(clippy::result_large_err)]
@@ -186,8 +200,8 @@ where
             .get("sec-websocket-protocol")
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        if offered.split(',').any(|part| part.trim() == "mixum.v1") {
-            if let Ok(value) = "mixum.v1".parse() {
+        if let Some(selected) = select_subprotocol(offered) {
+            if let Ok(value) = selected.parse() {
                 resp.headers_mut().insert("sec-websocket-protocol", value);
             }
         }
@@ -500,7 +514,7 @@ fn spawn_mesh_listener(hub: Arc<MeshHub>, listen: String) {
 }
 
 #[cfg(test)]
-mod tests {
+mod subprotocol_tests {
     use super::{err_text, pair_claim_error_code};
 
     #[test]
@@ -513,5 +527,22 @@ mod tests {
         assert_eq!(pair_claim_error_code("deviceName 非法"), "bad_request");
         assert_eq!(pair_claim_error_code("配对码无效或已过期"), "forbidden");
         assert_eq!(pair_claim_error_code("签发失败: io"), "internal");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subprotocol_prefers_map_v1_and_accepts_legacy() {
+        assert_eq!(select_subprotocol("map.v1"), Some("map.v1"));
+        assert_eq!(select_subprotocol("mixum.v1"), Some("mixum.v1"));
+        assert_eq!(
+            select_subprotocol("mixum.v1, map.v1"),
+            Some("map.v1")
+        );
+        assert_eq!(select_subprotocol("other.v1"), None);
+        assert_eq!(select_subprotocol(""), None);
     }
 }
