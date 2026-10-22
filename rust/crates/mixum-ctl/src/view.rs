@@ -31,13 +31,13 @@ load();setInterval(load,2000);
 </script>"#;
 
 const VIEW_HTML: &str = r#"<!doctype html><meta charset=utf-8><title>mixum 视图</title>
-<style>body{font:13px system-ui;margin:0;background:#111;color:#eee;display:flex;flex-direction:column;height:100vh}#bar{padding:.3rem .6rem;background:#1a1a1a;border-bottom:1px solid #333;white-space:nowrap;overflow:hidden;display:flex;gap:.5rem;align-items:center}#title{flex:1;overflow:hidden;text-overflow:ellipsis}.badge{font-size:11px;padding:.1rem .4rem;border-radius:3px;background:#444}.badge.user{background:#2a6e2a}.badge.agent{background:#7a2a2a}#tk{padding:.2rem .6rem}#au{padding:.2rem .6rem}#vol{width:90px}#stage{position:relative;display:inline-block;align-self:center;max-width:100%;background:#222;line-height:0;overflow:auto}#c{display:block;max-width:100%;background:#222;outline:none}#o{position:absolute;left:0;top:0;pointer-events:none}#i{position:absolute;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none;overflow:hidden;pointer-events:none}</style>
-<div id=bar><span id=title>窗口 __ID__ 连接中…</span><span id=mode class=badge>free</span><button id=tk>接管</button><button id=au>音频</button><input id=vol type=range min=0 max=100 value=80 title=音量><span id=af class=badge></span></div>
+<style>body{font:13px system-ui;margin:0;background:#111;color:#eee;display:flex;flex-direction:column;height:100vh}#bar{padding:.3rem .6rem;background:#1a1a1a;border-bottom:1px solid #333;white-space:nowrap;overflow:hidden;display:flex;gap:.5rem;align-items:center}#title{flex:1;overflow:hidden;text-overflow:ellipsis}.badge{font-size:11px;padding:.1rem .4rem;border-radius:3px;background:#444}.badge.user{background:#2a6e2a}.badge.agent{background:#7a2a2a}#tk{padding:.2rem .6rem}#au{padding:.2rem .6rem}#vol{width:90px}#off{width:70px;accent-color:#e0b050}#stage{position:relative;display:inline-block;align-self:center;max-width:100%;background:#222;line-height:0;overflow:auto}#c{display:block;max-width:100%;background:#222;outline:none}#o{position:absolute;left:0;top:0;pointer-events:none}#i{position:absolute;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none;overflow:hidden;pointer-events:none}</style>
+<div id=bar><span id=title>窗口 __ID__ 连接中…</span><span id=mode class=badge>free</span><button id=tk>接管</button><button id=au>音频</button><input id=vol type=range min=0 max=100 value=80 title=音量><input id=off type=range min=-200 max=200 step=10 value=0 title=A/V偏移(ms)><span id=af class=badge></span></div>
 <div id=stage><canvas id=c tabindex=0></canvas><canvas id=o></canvas><textarea id=i aria-label="输入法输入" autocomplete=off autocorrect=off spellcheck=false></textarea></div>
 <script>
 const id=__ID__, c=document.querySelector('#c'), x=c.getContext('2d'), o=document.querySelector('#o'), ox=o.getContext('2d'), ime=document.querySelector('#i'),
       bar=document.querySelector('#bar'), modeEl=document.querySelector('#mode'), tk=document.querySelector('#tk'),
-      au=document.querySelector('#au'), vol=document.querySelector('#vol'), af=document.querySelector('#af');
+      au=document.querySelector('#au'), vol=document.querySelector('#vol'), off=document.querySelector('#off'), af=document.querySelector('#af');
 let mode='free', stream=null, haveFull=false, audio=null;
 const pending=new Map();
 function title(t){document.title=`${t} — mixum`;document.querySelector('#title').textContent=`${id}: ${t}`;}
@@ -62,16 +62,18 @@ au.onclick=async()=>{
     const ctx=new AudioContext({sampleRate:fmt.sampleRate});
     await ctx.resume();
     const gain=ctx.createGain();gain.gain.value=vol.value/100;gain.connect(ctx.destination);
-    audio={ctx,gain,next:0,frames:0,lastSeq:-1,drops:0,sampleRate:fmt.sampleRate,channels:fmt.channels};
+    audio={ctx,gain,next:0,lead:0.06+off.value/1000,frames:0,lastSeq:-1,lastPts:-1,drops:0,sampleRate:fmt.sampleRate,channels:fmt.channels};
     au.textContent='静音';
   }catch(e){bar.textContent=`${id}: 音频 ${e.message}`;}
 };
 vol.oninput=()=>{if(audio)audio.gain.gain.value=vol.value/100;};
+off.oninput=()=>{if(audio)audio.lead=Math.max(0.01,0.06+off.value/1000);};
 function playAudio(buf){
   const a=audio;if(!a)return;
-  const b=new Uint8Array(buf);if(b.length<7)return;
-  const seq=new DataView(buf,1,4).getUint32(0,true);
-  const bytes=b.subarray(5);const pcm=new Int16Array(bytes.length>>1);new Uint8Array(pcm.buffer).set(bytes);
+  const b=new Uint8Array(buf);if(b.length<15)return;
+  const dv=new DataView(buf,1,12);
+  const seq=dv.getUint32(0,true), pts=Number(dv.getBigUint64(4,true));
+  const bytes=b.subarray(13);const pcm=new Int16Array(bytes.length>>1);new Uint8Array(pcm.buffer).set(bytes);
   const frames=pcm.length/a.channels;
   if(a.lastSeq>=0&&seq!==a.lastSeq+1)a.drops++;
   a.lastSeq=seq;
@@ -79,8 +81,12 @@ function playAudio(buf){
   for(let ch=0;ch<a.channels;ch++){const out=ab.getChannelData(ch);for(let i=0;i<frames;i++)out[i]=pcm[i*a.channels+ch]/32768;}
   const src=a.ctx.createBufferSource();src.buffer=ab;src.connect(a.gain);
   const now=a.ctx.currentTime;
-  if(a.next<now+0.02||a.next>now+0.5)a.next=now+0.05;
-  src.start(a.next);a.next+=ab.duration;a.frames++;
+  const delta=a.lastPts>=0?(pts-a.lastPts)/1e6:0;
+  a.lastPts=pts;
+  let start=a.next;
+  if(start<now+0.01||start>now+0.5)start=now+a.lead;
+  src.start(start);
+  a.next=start+(delta>0&&delta<=0.5?delta:ab.duration);a.frames++;
   if(a.frames%25===0)af.textContent=`${a.frames}${a.drops?` / 丢${a.drops}`:''}`;
 }
 tk.onclick=async()=>{

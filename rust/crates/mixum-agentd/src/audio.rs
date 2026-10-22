@@ -86,8 +86,10 @@ impl AudioHub {
             use std::io::Read;
             let mut pcm = vec![0u8; CHUNK_BYTES];
             let mut seq: u32 = 0;
+            let start = std::time::Instant::now();
             while stdout.read_exact(&mut pcm).is_ok() {
-                let frame = frames::marshal_audio(seq, &pcm);
+                let pts_us = start.elapsed().as_micros() as u64;
+                let frame = frames::marshal_audio(seq, pts_us, &pcm);
                 seq = seq.wrapping_add(1);
                 // 没有订阅者时 send 返回 Err；保留采集进程等待新订阅者。
                 let _ = tx.send(Arc::from(frame));
