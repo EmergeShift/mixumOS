@@ -1104,16 +1104,20 @@ printf '%s\n' '{"type":"done"}'
             })
             .await
             .unwrap();
-        for _ in 0..50 {
-            if task.state().await == COMPLETED {
+        let mut states = Vec::new();
+        for _ in 0..100 {
+            while let Ok(event) = events.try_recv() {
+                if event.event_type == "state" {
+                    states.push(event.data.unwrap_or_default());
+                }
+            }
+            if task.state().await == COMPLETED
+                && states.contains(&serde_json::json!({ "state": "completed" }))
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let states: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
-            .filter(|event| event.event_type == "state")
-            .map(|event| event.data.unwrap_or_default())
-            .collect();
         assert!(
             states.contains(&serde_json::json!({ "state": "queued" })),
             "state 事件 data 必须是对象: {states:?}"
