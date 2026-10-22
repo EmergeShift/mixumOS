@@ -79,6 +79,7 @@ impl LocalSandbox {
     /// 目录白名单（Linux 5.13+）。不启用时保持旧行为（SIGSTOP + 无限制），
     /// 便于测试和不支持的环境。
     pub fn with_isolation(mut self, workspace: impl Into<PathBuf>) -> Self {
+        crate::isolation::prepare_user_dirs();
         self.cgroup = crate::isolation::CgroupFreezer::create();
         self.workspace = Some(workspace.into());
         self
@@ -132,10 +133,7 @@ impl LocalSandbox {
                 .expect("gui 会话锁")
                 .contains_key(&session.pid);
             if tracked && session.pid > 0 {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(-session.pid),
-                    nix::sys::signal::Signal::SIGTERM,
-                );
+                terminate_tracked(session.pid);
                 self.gui.lock().expect("gui 会话锁").remove(&session.pid);
                 self.pgids
                     .lock()
@@ -156,9 +154,13 @@ impl LocalSandbox {
         if !session.cwd.is_empty() {
             cmd.current_dir(&session.cwd);
         }
-        if !session.env.is_empty() {
-            cmd.envs(&session.env);
-        }
+        let env = if session.env.is_empty() {
+            gui_env()
+        } else {
+            session.env.clone()
+        };
+        cmd.env_clear().envs(&env);
+        apply_x11_env_std(&mut cmd);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -167,6 +169,11 @@ impl LocalSandbox {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
+        crate::isolation::apply_spawn_isolation(
+            &mut cmd,
+            self.cgroup.clone(),
+            self.workspace.clone(),
+        );
         let mut child = cmd.spawn()?;
         let pid = child.id() as i32;
         let mut recorded = session.clone();
@@ -192,8 +199,44 @@ fn pid_alive(pid: i32) -> bool {
         && nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
-/// 重放时保留最小环境：路径、显示、运行时目录与 MIXUM_* 配置。
+/// 终止重放前的旧进程：先 SIGTERM 并等待退出，超时再 SIGKILL，
+/// 避免新旧窗口/控制 socket 在同一 pid 上争用。
+fn terminate_tracked(pid: i32) {
+    if pid <= 0 {
+        return;
+    }
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(-pid),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+    if wait_pid_gone(pid, Duration::from_secs(1)) {
+        return;
+    }
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(-pid),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    let _ = wait_pid_gone(pid, Duration::from_millis(300));
+}
+
+fn wait_pid_gone(pid: i32, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    !pid_alive(pid)
+}
+
+/// 重放时保留最小环境：路径、显示、运行时目录与 MIXUM_WORK。
 fn gui_env() -> BTreeMap<String, String> {
+    gui_env_from(std::env::vars())
+}
+
+/// 只保留启动 GUI 必需的最小环境；MIXUM_* 里的令牌/密钥不入快照。
+fn gui_env_from(vars: impl IntoIterator<Item = (String, String)>) -> BTreeMap<String, String> {
     const KEEP: [&str; 7] = [
         "PATH",
         "HOME",
@@ -203,9 +246,15 @@ fn gui_env() -> BTreeMap<String, String> {
         "XDG_RUNTIME_DIR",
         "MIXUM_WORK",
     ];
-    std::env::vars()
-        .filter(|(key, _)| KEEP.contains(&key.as_str()) || key.starts_with("MIXUM_"))
+    vars.into_iter()
+        .filter(|(key, _)| KEEP.contains(&key.as_str()))
         .collect()
+}
+
+/// 只重放本机产生的 disk 快照：memory/hybrid 恢复已由 CRIU 带回进程，
+/// 再按 guiSessions 重放会产生重复窗口；sync/import 节点 origin 非空且不可信。
+pub fn gui_replay_trusted(origin: &str, memory_restored: bool) -> bool {
+    !memory_restored && origin.is_empty()
 }
 
 #[async_trait]
@@ -274,7 +323,10 @@ impl Sandbox for LocalSandbox {
         args: &[String],
         dir: Option<&Path>,
     ) -> Result<u32, DriverError> {
+        let env = gui_env();
         let mut cmd = Command::new(program);
+        cmd.env_clear();
+        cmd.envs(&env);
         apply_x11_env(&mut cmd);
         cmd.args(args)
             .kill_on_drop(true)
@@ -299,7 +351,7 @@ impl Sandbox for LocalSandbox {
             cwd: dir
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            env: gui_env(),
+            env,
             pid: pid as i32,
             ..Default::default()
         };
@@ -321,13 +373,8 @@ impl Sandbox for LocalSandbox {
     }
 
     async fn signal(&self, _task: &Task, signal: Signal) -> Result<(), DriverError> {
-        if matches!(signal, Signal::Stop | Signal::Continue) {
-            if let Some(cgroup) = &self.cgroup {
-                if cgroup.set_frozen(matches!(signal, Signal::Stop)).is_ok() {
-                    return Ok(());
-                }
-            }
-        }
+        // per-task 信号必须只作用于该任务进程组；cgroup freezer 是全局的，
+        // 只用于快照的 freeze_all，不能在这里冻结所有任务。
         let pgids = self.pgids.lock().expect("sandbox 进程组锁").clone();
         let sig = match signal {
             Signal::Stop => nix::libc::SIGSTOP,
@@ -846,17 +893,30 @@ impl Engine {
 #[cfg(unix)]
 /// B compositor's XWayland exposes its display number here. Inject it into
 /// task/agent processes so X11 apps need no developer-supplied env.
-fn apply_x11_env(command: &mut Command) {
-    let Ok(raw) = std::fs::read_to_string("/run/mixum/xwayland.display") else {
-        return;
-    };
+fn x11_display() -> Option<String> {
+    let raw = std::fs::read_to_string("/run/mixum/xwayland.display").ok()?;
     let display = raw.trim();
     if display.is_empty() {
-        return;
+        None
+    } else {
+        Some(format!(":{display}"))
     }
-    command
-        .env("DISPLAY", format!(":{display}"))
-        .env("XMODIFIERS", "@im=mixum");
+}
+
+fn apply_x11_env(command: &mut Command) {
+    if let Some(display) = x11_display() {
+        command
+            .env("DISPLAY", display)
+            .env("XMODIFIERS", "@im=mixum");
+    }
+}
+
+fn apply_x11_env_std(command: &mut std::process::Command) {
+    if let Some(display) = x11_display() {
+        command
+            .env("DISPLAY", display)
+            .env("XMODIFIERS", "@im=mixum");
+    }
 }
 
 fn set_process_group(command: &mut Command) {
@@ -1151,5 +1211,37 @@ printf '%s\n' '{"type":"done"}'
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(replayed, "重放命令没有产生文件");
+    }
+}
+
+#[cfg(test)]
+mod gui_env_tests {
+    use super::*;
+
+    #[test]
+    fn gui_env_strips_tokens_and_unknown_mixum_vars() {
+        let env = gui_env_from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("MIXUM_WORK".to_string(), "/var/lib/mixum/work".to_string()),
+            ("MIXUM_GATEWAY_TOKEN".to_string(), "secret".to_string()),
+            ("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string()),
+        ]);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(
+            env.get("MIXUM_WORK").map(String::as_str),
+            Some("/var/lib/mixum/work")
+        );
+        assert!(!env.contains_key("MIXUM_GATEWAY_TOKEN"));
+        assert!(!env.contains_key("LD_PRELOAD"));
+    }
+
+    #[test]
+    fn only_local_origin_is_trusted_for_replay() {
+        assert!(gui_replay_trusted("", false));
+        assert!(!gui_replay_trusted("  ", false));
+        assert!(!gui_replay_trusted("remote", false));
+        assert!(!gui_replay_trusted("test-host", false));
+        assert!(!gui_replay_trusted("", true));
+        assert!(!gui_replay_trusted("test-host", true));
     }
 }

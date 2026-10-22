@@ -12,13 +12,22 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 /// cgroup v2 冻结器。`create` 失败（只读挂载 / 无委托）就退回信号路径。
+///
+/// 句柄可克隆：克隆共享同一目录，只有最后一个句柄释放时才尝试删除，
+/// 避免 spawn 时的临时克隆在任务退出后把共享 cgroup 清掉。
 #[derive(Debug, Clone)]
 pub struct CgroupFreezer {
+    inner: Arc<CgroupInner>,
+}
+
+#[derive(Debug)]
+struct CgroupInner {
     dir: PathBuf,
     procs: PathBuf,
     freeze: PathBuf,
@@ -42,9 +51,9 @@ impl CgroupFreezer {
             return None;
         }
         let freezer = Self::at(dir);
-        if !freezer.freeze.exists() {
+        if !freezer.inner.freeze.exists() {
             // 不是 cgroupfs（或没有 freezer 支持）：清掉刚建的目录。
-            let _ = fs::remove_dir(&freezer.dir);
+            let _ = fs::remove_dir(&freezer.inner.dir);
             return None;
         }
         Some(freezer)
@@ -53,30 +62,32 @@ impl CgroupFreezer {
     /// 指定目录（测试或自定义挂载点使用）。
     pub fn at(dir: PathBuf) -> Self {
         Self {
-            procs: dir.join("cgroup.procs"),
-            freeze: dir.join("cgroup.freeze"),
-            dir,
+            inner: Arc::new(CgroupInner {
+                procs: dir.join("cgroup.procs"),
+                freeze: dir.join("cgroup.freeze"),
+                dir,
+            }),
         }
     }
 
     /// 把调用进程挂进该 cgroup。cgroup v2 约定写 "0" 表示当前进程。
     pub fn attach_current(&self) -> io::Result<()> {
-        fs::write(&self.procs, b"0")
+        fs::write(&self.inner.procs, b"0")
     }
 
     /// 原子冻结/解冻整棵子树。
     pub fn set_frozen(&self, frozen: bool) -> io::Result<()> {
-        fs::write(&self.freeze, if frozen { b"1" } else { b"0" })
+        fs::write(&self.inner.freeze, if frozen { b"1" } else { b"0" })
     }
 
     pub fn dir(&self) -> &Path {
-        &self.dir
+        &self.inner.dir
     }
 }
 
-impl Drop for CgroupFreezer {
+impl Drop for CgroupInner {
     fn drop(&mut self) {
-        // 进程退出后 cgroup 变空，remove_dir 才可能成功；失败不影响主流程。
+        // 所有句柄都释放后才走到这里；cgroup 仍非空时 remove_dir 失败，留给内核/下次启动。
         let _ = fs::remove_dir(&self.dir);
     }
 }
@@ -159,6 +170,46 @@ pub fn apply_spawn_isolation(
 
 /// 系统级目录白名单：只允许写工作区、/tmp、/dev、/run；其余只读。
 /// `/run` 是 Wayland/X11 socket 所在，`/dev` 是 /dev/null 等基础设备。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn home_tool_dirs_from(home: &Path) -> Vec<PathBuf> {
+    [
+        ".cache", ".local", ".config", ".npm", ".cargo", ".rustup", ".mixum",
+    ]
+    .iter()
+    .map(|name| home.join(name))
+    .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn home_tool_dirs() -> Vec<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home_tool_dirs_from(&home))
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn extra_writable_dirs() -> Vec<PathBuf> {
+    std::env::var_os("MIXUM_LANDLOCK_EXTRA_WRITABLE")
+        .map(|raw| {
+            raw.to_string_lossy()
+                .split(':')
+                .filter(|item| !item.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 启动时预建 HOME 下的工具目录：Landlock 只能按已存在目录授权，
+/// 父目录 HOME 本身只读，任务无法自行创建这些目录。
+pub fn prepare_user_dirs() {
+    #[cfg(target_os = "linux")]
+    for dir in home_tool_dirs() {
+        let _ = fs::create_dir_all(dir);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn build_ruleset(workspace: &Path) -> io::Result<landlock::RulesetCreated> {
     use landlock::{
@@ -177,16 +228,19 @@ fn build_ruleset(workspace: &Path) -> io::Result<landlock::RulesetCreated> {
         .add_rule(PathBeneath::new(root, AccessFs::from_read(abi)))
         .map_err(io::Error::other)?;
 
-    for path in [
-        workspace,
-        Path::new("/tmp"),
-        Path::new("/dev"),
-        Path::new("/run"),
-    ] {
+    let mut writable = vec![
+        workspace.to_path_buf(),
+        PathBuf::from("/tmp"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/run"),
+    ];
+    writable.extend(home_tool_dirs());
+    writable.extend(extra_writable_dirs());
+    for path in writable {
         if !path.is_dir() {
             continue;
         }
-        let fd = PathFd::new(path).map_err(io::Error::other)?;
+        let fd = PathFd::new(&path).map_err(io::Error::other)?;
         ruleset = ruleset
             .add_rule(PathBeneath::new(fd, AccessFs::from_all(abi)))
             .map_err(io::Error::other)?;
@@ -245,6 +299,25 @@ mod tests {
     }
 
     #[test]
+    fn home_tool_dirs_are_scoped_to_known_subdirs() {
+        let dirs = home_tool_dirs_from(Path::new("/var/lib/mixum"));
+        assert!(dirs.contains(&PathBuf::from("/var/lib/mixum/.cache")));
+        assert!(dirs.contains(&PathBuf::from("/var/lib/mixum/.npm")));
+        assert!(!dirs.contains(&PathBuf::from("/var/lib/mixum")));
+    }
+
+    #[test]
+    fn clone_drop_does_not_remove_shared_cgroup_dir() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let owner = CgroupFreezer::at(path.clone());
+        let temporary = owner.clone();
+        drop(temporary);
+        assert!(path.exists(), "临时句柄释放不应删除共享 cgroup 目录");
+        drop(owner);
+    }
+
+    #[test]
     fn landlock_stub_is_noop_off_linux() {
         let dir = TempDir::new().unwrap();
         if cfg!(target_os = "linux") {
@@ -294,5 +367,46 @@ mod tests {
         assert!(!status.success(), "工作区外写入应该失败");
         assert!(allowed.path().join("allowed.txt").exists());
         assert!(!denied.path().join("denied.txt").exists());
+    }
+
+    /// HOME 白名单的负向验证：工具子目录可写，HOME 根目录仍只读。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn home_tool_dirs_are_writable_but_home_itself_is_not() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            eprintln!("HOME 未设置，跳过");
+            return;
+        };
+        if !home.is_dir() {
+            eprintln!("HOME 不存在，跳过");
+            return;
+        }
+        prepare_user_dirs();
+        let tag = std::process::id();
+        let allowed = home.join(".cache").join(format!("mixum-landlock-{tag}"));
+        let denied = home.join(format!("mixum-landlock-{tag}"));
+        let workspace = TempDir::new().unwrap();
+        let script = format!(
+            "grep -q '^Landlock:' /proc/self/status || exit 42; \
+             echo ok > {}; \
+             echo bad > {}",
+            allowed.display(),
+            denied.display()
+        );
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(script);
+        apply_spawn_isolation(&mut cmd, None, Some(workspace.path().to_path_buf()));
+        let status = cmd.status().expect("spawn sh");
+        let allowed_written = allowed.exists();
+        let denied_written = denied.exists();
+        let _ = std::fs::remove_file(&allowed);
+        let _ = std::fs::remove_file(&denied);
+        if status.code() == Some(42) {
+            eprintln!("内核未启用 Landlock，跳过");
+            return;
+        }
+        assert!(allowed_written, "HOME 工具目录应可写");
+        assert!(!denied_written, "HOME 根目录应只读");
+        assert!(!status.success(), "写 HOME 根目录应该失败");
     }
 }
