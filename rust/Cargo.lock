@@ -1646,6 +1646,7 @@ dependencies = [
  "sled",
  "tempfile",
  "thiserror 1.0.69",
+ "tracing",
  "zstd",
 ]
 

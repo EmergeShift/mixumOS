@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 use tempfile::TempDir;
@@ -328,4 +328,62 @@ fn decode_hex(value: &str) -> Vec<u8> {
             ((high << 4) | low) as u8
         })
         .collect()
+}
+
+#[test]
+fn disk_snapshot_cross_kernel_is_allowed() {
+    let mut node = TreeNode::new("n1", "", "main", KIND_DISK);
+    node.kernel = "6.1.0-old".into();
+    node.disk = Some(Manifest::empty());
+    assert!(Engine::check_kernel_compat(&node, "6.9.0-new").is_ok());
+}
+
+#[test]
+fn memory_snapshot_cross_kernel_is_rejected() {
+    let mut node = TreeNode::new("n1", "", "main", KIND_MEMORY);
+    node.kernel = "6.1.0-old".into();
+    node.memory = Some(Manifest::empty());
+    assert!(matches!(
+        Engine::check_kernel_compat(&node, "6.9.0-new"),
+        Err(EngineError::KernelMismatch { .. })
+    ));
+}
+
+#[test]
+fn restore_freezes_tasks_around_materialize() {
+    let (mut e, _data, root) = engine(false);
+    let n1 = e.snapshot(KIND_DISK, "n1", false).unwrap();
+    fs::write(root.path().join("hello.txt"), "v2").unwrap();
+    e.snapshot(KIND_DISK, "n2", false).unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hook_seen = Arc::clone(&seen);
+    let guard_root = root.path().to_path_buf();
+    e.freeze = Some(Box::new(move |action| {
+        hook_seen.lock().unwrap().push("freeze".to_string());
+        let result = action();
+        let content = fs::read_to_string(guard_root.join("hello.txt")).unwrap_or_default();
+        hook_seen.lock().unwrap().push(content);
+        hook_seen.lock().unwrap().push("thaw".to_string());
+        result
+    }));
+
+    e.restore(&n1.id, "inplace", "").unwrap();
+    assert_eq!(&*seen.lock().unwrap(), &["freeze", "v1", "thaw"]);
+}
+
+#[test]
+fn restore_freeze_failure_leaves_workspace_untouched() {
+    let (mut e, _data, root) = engine(false);
+    let n1 = e.snapshot(KIND_DISK, "n1", false).unwrap();
+    fs::write(root.path().join("hello.txt"), "v2").unwrap();
+    e.freeze = Some(Box::new(|_| {
+        Err(EngineError::Freeze("任务停不下来".into()))
+    }));
+
+    assert!(e.restore(&n1.id, "inplace", "").is_err());
+    assert_eq!(
+        fs::read_to_string(root.path().join("hello.txt")).unwrap(),
+        "v2"
+    );
 }
