@@ -50,9 +50,24 @@ OUT="$KERNEL_DIR/out/linux-${VARIANT}-${ARCH}"
 
 if [[ "${MIXUM_KERNEL_BUILDER:-0}" != "1" ]]; then
   command -v docker >/dev/null || { echo "需要 Docker" >&2; exit 1; }
+  # 在宿主上解压：Docker Desktop 的 bind mount 对内核 tarball 里的 symlink
+  # 可能返回 EPERM，导致半个源码树。
+  mkdir -p "$CACHE" "$BUILD_ROOT"
+  SRC_TAR="$CACHE/linux-${VERSION}.tar.xz"
+  SRC_DIR="$BUILD_ROOT/linux-${VERSION}"
+  if [[ ! -f "$SRC_TAR" ]]; then
+    URL="https://cdn.kernel.org/pub/linux/kernel/v${VERSION%%.*}.x/linux-${VERSION}.tar.xz"
+    echo "下载内核源码: $URL"
+    curl -fL --retry 3 --connect-timeout 20 -o "$SRC_TAR.part" "$URL"
+    mv "$SRC_TAR.part" "$SRC_TAR"
+  fi
+  if [[ ! -d "$SRC_DIR" ]]; then
+    echo "解压源码（宿主）"
+    tar -C "$BUILD_ROOT" -xf "$SRC_TAR"
+  fi
   docker build -q -t mixum-kernel-builder:bookworm -f "$KERNEL_DIR/Dockerfile" "$KERNEL_DIR" >/dev/null
   exec docker run --rm \
-    -v "$REPO_DIR:/work" -w /work/kernel \
+    -v "$KERNEL_DIR:/work/kernel" -w /work/kernel \
     -e MIXUM_KERNEL_BUILDER=1 \
     mixum-kernel-builder:bookworm \
     bash scripts/build.sh "$@"
