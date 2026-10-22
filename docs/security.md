@@ -75,7 +75,9 @@
 - 文件系统写入白名单：Linux 5.13+ 在 `pre_exec` 里套 **Landlock**，
   任务只能写工作区、`/tmp`、`/dev`、`/run`，以及 HOME 下预建的工具目录
   （`.cache/.local/.config/.npm/.cargo/.rustup/.mixum`，可用
-  `MIXUM_LANDLOCK_EXTRA_WRITABLE` 追加），其余只读；内核未启用
+  `MIXUM_LANDLOCK_EXTRA_WRITABLE` 追加），其余只读；GUI 会话重放与
+  `spawn_gui` 走同一隔离路径，且子进程 `env_clear()` 后只注入白名单变量。
+  Linux 负向测试覆盖工作区外与 HOME 根目录写入被拒；内核未启用
   Landlock 时退回容器边界（非特权 + 独立工作区卷）。高危命令的语义
   拦截在 MixumART 侧做，OS 层只负责兜底回滚与资源边界。
 

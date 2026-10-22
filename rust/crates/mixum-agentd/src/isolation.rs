@@ -368,4 +368,45 @@ mod tests {
         assert!(allowed.path().join("allowed.txt").exists());
         assert!(!denied.path().join("denied.txt").exists());
     }
+
+    /// HOME 白名单的负向验证：工具子目录可写，HOME 根目录仍只读。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn home_tool_dirs_are_writable_but_home_itself_is_not() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            eprintln!("HOME 未设置，跳过");
+            return;
+        };
+        if !home.is_dir() {
+            eprintln!("HOME 不存在，跳过");
+            return;
+        }
+        prepare_user_dirs();
+        let tag = std::process::id();
+        let allowed = home.join(".cache").join(format!("mixum-landlock-{tag}"));
+        let denied = home.join(format!("mixum-landlock-{tag}"));
+        let workspace = TempDir::new().unwrap();
+        let script = format!(
+            "grep -q '^Landlock:' /proc/self/status || exit 42; \
+             echo ok > {}; \
+             echo bad > {}",
+            allowed.display(),
+            denied.display()
+        );
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(script);
+        apply_spawn_isolation(&mut cmd, None, Some(workspace.path().to_path_buf()));
+        let status = cmd.status().expect("spawn sh");
+        let allowed_written = allowed.exists();
+        let denied_written = denied.exists();
+        let _ = std::fs::remove_file(&allowed);
+        let _ = std::fs::remove_file(&denied);
+        if status.code() == Some(42) {
+            eprintln!("内核未启用 Landlock，跳过");
+            return;
+        }
+        assert!(allowed_written, "HOME 工具目录应可写");
+        assert!(!denied_written, "HOME 根目录应只读");
+        assert!(!status.success(), "写 HOME 根目录应该失败");
+    }
 }
