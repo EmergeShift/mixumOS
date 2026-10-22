@@ -589,7 +589,7 @@ impl Gateway {
             .unwrap_or(false);
         if need_open {
             let open = json!({
-                "v":1,"id":mixum_protocol::envelope::new_id(),
+                "v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),
                 "op":"gateway.session.open",
                 "payload":{"gatewaySession":session,"node":node_name}
             });
@@ -721,7 +721,7 @@ impl Gateway {
             mesh.close_inbound(session).await;
             if let Some(out) = self.local_outbox(&node).await {
                 let close = json!({
-                    "v":1,"id":mixum_protocol::envelope::new_id(),
+                    "v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),
                     "op":"gateway.session.close","payload":{"gatewaySession":session}
                 })
                 .to_string();
@@ -783,7 +783,7 @@ impl Gateway {
             .is_none();
         if first {
             let open = json!({
-                "v":1,"id":mixum_protocol::envelope::new_id(),
+                "v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),
                 "op":"gateway.session.open",
                 "payload":{"gatewaySession":session,"node":node_name}
             });
