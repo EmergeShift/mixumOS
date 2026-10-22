@@ -18,6 +18,7 @@ export function parseVideoFrame(data: Uint8Array): VideoFrame | null {
     size: dv.getUint32(13, true),
     keyframe: (dv.getUint16(17, true) & 1) !== 0,
     hasCursor: (dv.getUint16(17, true) & 2) !== 0,
+    frozen: (dv.getUint16(17, true) & 8) !== 0,
     cursorX: dv.getInt16(19, true),
     cursorY: dv.getInt16(21, true),
     cursorW: dv.getUint16(23, true),

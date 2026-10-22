@@ -555,6 +555,52 @@ static struct mixcomp_window *find_window(struct mixcomp_server *s, int id) {
 	return NULL;
 }
 
+// 快照冻结状态帧：27 字节帧头 + 0 负载，按窗口当前协商的 codec 选记录类型，
+// 保证 agentd 按 codec 路由到正确订阅者；客户端看到 FRAME_FLAG_FROZEN 即
+// 停止解码并保留最后一帧。
+static void stream_send_frozen(struct mixcomp_server *s, struct mixcomp_window *w) {
+	if (!s->sock_ready) {
+		return;
+	}
+	uint8_t rec_type = REC_VIDEO;
+	if (w->png_mode) {
+		rec_type = REC_VIDEO_PNG;
+	}
+#ifdef HAVE_OPENH264
+	else if (w->h264 != NULL) {
+		rec_type = REC_VIDEO_H264;
+	}
+#endif
+	uint8_t hdr[FRAME_HDR];
+	hdr[0] = 0x01;
+	uint32_t id = w->id, wd = (uint32_t)w->width, ht = (uint32_t)w->height, sz = 0;
+	memcpy(hdr + 1, &id, 4);
+	memcpy(hdr + 5, &wd, 4);
+	memcpy(hdr + 9, &ht, 4);
+	memcpy(hdr + 13, &sz, 4);
+	uint16_t flags = FRAME_FLAG_FROZEN;
+	if (w->have_cursor) {
+		flags |= FRAME_FLAG_HASCURSOR;
+	}
+	memcpy(hdr + 17, &flags, 2);
+	int16_t cx = (int16_t)w->cursor_x, cy = (int16_t)w->cursor_y;
+	uint16_t cw = 16, ch = 16;
+	memcpy(hdr + 19, &cx, 2);
+	memcpy(hdr + 21, &cy, 2);
+	memcpy(hdr + 23, &cw, 2);
+	memcpy(hdr + 25, &ch, 2);
+
+	uint8_t rec[5 + FRAME_HDR];
+	uint32_t len = FRAME_HDR;
+	memcpy(rec, &len, 4);
+	rec[4] = rec_type;
+	memcpy(rec + 5, hdr, FRAME_HDR);
+	rec_send_rc rc = rec_send_raw(s->sock_fd, rec, sizeof(rec));
+	if (rc == REC_SEND_FATAL) {
+		stream_mark_dead(s);
+	}
+}
+
 // stream_poll_control —— 主循环里轮询 mixumd 的控制消息。
 void stream_poll_control(struct mixcomp_server *s) {
 	if (!s->sock_ready) {
@@ -640,6 +686,17 @@ void stream_poll_control(struct mixcomp_server *s) {
 							}
 #endif
 						}
+					} else if (strcmp(t, "snapshot.freeze") == 0) {
+						// 先停捕获节拍，再给每个在推流的窗口补一个状态帧。
+						windows_set_capture_paused(s, true);
+						struct mixcomp_window *w;
+						wl_list_for_each(w, &s->windows, link) {
+							if (w->want_stream) {
+								stream_send_frozen(s, w);
+							}
+						}
+					} else if (strcmp(t, "snapshot.thaw") == 0) {
+						windows_set_capture_paused(s, false);
 					} else if (strcmp(t, "input") == 0 ||
 							strcmp(t, "input.mode") == 0) {
 						input_handle_json(s, (const char *)payload, len);

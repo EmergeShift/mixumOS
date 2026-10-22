@@ -94,6 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map_err(std::io::Error::other)?;
     }
     let sandbox = Arc::new(LocalSandbox::new());
+    // broker 提前创建：快照冻结钩子需要同步通知 comp 暂停捕获。
+    let broker = Broker::new("/run/mixum/display.sock");
 
     // 快照引擎:git 式树 + 内容寻址块存储 + CRIU 探测。
     #[cfg(feature = "real-snapshot")]
@@ -109,12 +111,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             engine.backend_name(),
             engine.criu.as_ref().is_some_and(|criu| criu.available())
         );
-        // 快照冻结回调:冻结全部任务进程组,快照点即冻结点(无感)。
+        // 快照冻结回调:先通知 comp 暂停捕获并推冻结状态帧,再冻结任务进程组。
+        // 通知是同步尽力而为(try_send),不阻塞快照路径;comp 晚一个节拍收到
+        // 也不影响正确性——SIGSTOP 已经生效,只是少发几帧旧画面。
         let freeze_sandbox = Arc::clone(&sandbox);
+        let freeze_broker = broker.clone();
         engine.freeze = Some(Box::new(move |action| {
+            freeze_broker.try_notify_comps(serde_json::json!({"type": "snapshot.freeze"}));
             freeze_sandbox.freeze_all(true);
             let result = action();
             freeze_sandbox.freeze_all(false);
+            freeze_broker.try_notify_comps(serde_json::json!({"type": "snapshot.thaw"}));
             result
         }));
         let adapter = mixum_agentd::snapshot::RealSnapshotEngine::from_engine(engine);
@@ -126,7 +133,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Arc::new(mixum_agentd::snapshot::MemorySnapshotEngine::new());
 
     let engine = Engine::with_snapshots(registry, sandbox, Some(snapshots.clone()));
-    let broker = Broker::new("/run/mixum/display.sock");
     let _ = broker.start().await;
     // 接管状态机接线:任务运行→新窗口归 agent(接管需 claim);任务清零→回 free。
     let broker_for_tasks = broker.clone();
