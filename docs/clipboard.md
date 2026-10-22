@@ -61,7 +61,8 @@
 
 - 需要 `display.input` 能力，且令牌的窗口 ACL 覆盖 `window`；
 - 窗口处于 `agent` 模式时拒绝（`conflict`），与 `display.input` 同规；
-- `text` 必须是 UTF-8，长度 1..=4 MiB；空串与超限返回 `bad_request`；
+- `text` 必须是 UTF-8，长度 1..=4 MiB；空串与超限返回 `bad_request`
+  （清空 selection 不在 v1 语义内，留待后续显式 `clear`）；
 - 窗口不存在 `not_found`；comp 不支持 A 路线时 `conflict`；
 - 成功仅表示文本已送入 owner comp 的控制通道，不保证应用已读取。
 
@@ -71,13 +72,16 @@
 {"op":"display.clipboard.changed","payload":{"window":3,"text":"hello"}}
 ```
 
-推送给已订阅 `display.windows` 的会话（该订阅已要求 `display.view`）。
-`window` 用于客户端做窗口级同步与回声抑制；不携带 comp id（客户端不感知）。
+推送给已订阅 `display.windows` **且令牌窗口 ACL 覆盖 `window`** 的会话
+（订阅本身要求 `display.view`）。仅 `display.view` 不够：剪贴板内容比
+窗口画面更敏感，不能因为能看全屏就默认能读所有窗口的剪贴板。`window`
+用于客户端做窗口级同步与回声抑制；不携带 comp id（客户端不感知）。
+超过 4 MiB 的上行内容截断并丢弃，不推送部分文本。
 
-命名说明：上游已有同名的 `display.clipboard` 请求，若复用它作为推送事件，
-同一 op 会同时表示"拉取请求"和"异步事件"，客户端只能靠 `id`/`replyTo`
-区分，容易误判。本草案建议事件使用 `display.clipboard.changed`。
-（fork 参考实现目前复用了 `display.clipboard`，合并前需二选一。）
+命名说明：**定为 `display.clipboard.changed`**。上游已有同名的
+`display.clipboard` 请求，若复用它作为推送事件，同一 op 会同时表示
+"拉取请求"和"异步事件"，客户端只能靠 `id`/`replyTo` 区分，容易误判。
+fork 参考实现复用了 `display.clipboard`，落地前必须改名。
 
 ### 4.3 兼容路径
 
@@ -115,11 +119,11 @@
   `protocol_errors`（**参考实现当前缺少这一校验，落地时必须补**）；
 - 前提是 `window.id` 在 broker 内唯一；首占者胜，另一 comp 的同 id 更新
   被忽略。该假设已存在于现有窗口表，本文不改变；
-- comp 能力：建议 comp 连接后上报
+- comp 能力：**v1 要求** comp 连接后上报
   `{"type":"capabilities","clipboard":true}`（agentd↔comp 私有协议，不进 MAP）。
   broker 记录该标记；未声明能力的 comp 收到 `clipboard.set` 时回
-  `conflict`，避免"应答成功但无效果"。该握手是新增项，需在评审中确认是否
-  接受；若不接受，替代方案是乐观投递 + 文档声明。
+  `conflict`，避免"应答成功但无效果"。没有能力握手就不发 `set`，也不广播
+  `changed`；这样旧 comp 不会产生假成功。
 
 ## 7. 实现约束（wlroots 0.18 / mixcomp）
 
@@ -184,12 +188,12 @@ e2e（容器内真实 Wayland 客户端）：
 参考实现：fork `1179e72`（原始）、`475da2c`（sync 后恢复 A 路线）、
 `tests/integration/clipboard-e2e.mjs`。
 
-## 11. 未决问题
+## 11. 评审结论（2026-10-22）
 
-1. 上行事件 op 名：`display.clipboard.changed`（本文建议）还是复用
-   `display.clipboard`（fork 现状）？
-2. comp 能力握手是否接受？若不接受，缺失 A 能力时如何避免"假成功"？
-3. 空串语义：拒绝（本文建议）还是清空 selection？
-4. B compositor 的 A 路线实现排期；在此之前其窗口的 `set` 应明确返回
-   `conflict`。
-5. 是否在 v2 扩展 `text/html`/图片，以及是否需要内容类型协商。
+1. 上行事件使用 **`display.clipboard.changed`**；fork 的复用实现合并前改名。
+2. **要求 comp 能力握手**；未声明 `clipboard` 的 comp 一律 `conflict`，
+   不产生假成功。
+3. **空串拒绝**；清空 selection 不在 v1，后续用显式 `clear` 定义。
+4. 事件必须按令牌窗口 ACL 再过滤，不能只依赖 `display.view`。
+5. 仍待排期：B compositor 的 A 路线实现；在此之前其窗口 `set` 返回
+   `conflict`。富 MIME（`text/html`/图片）留 v2。
