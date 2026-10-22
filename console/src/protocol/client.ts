@@ -3,6 +3,8 @@
 // 回复用 replyTo 指向请求 id。
 import { parseVideoFrame } from './video'
 import type {
+  AudioAttachResponse,
+  AudioChunk,
   DisplayAttachResponse,
   DisplayInputRequest,
   Envelope,
@@ -49,6 +51,8 @@ export class MixumClient {
   private retry = 0
   private wantClosed = false
   private hello: HelloResponse | null = null
+  private audioFormat: { sampleRate: number; channels: number } | null = null
+  private audioWanted = false
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private missPings = 0
@@ -69,6 +73,7 @@ export class MixumClient {
   onTaskEvent: (e: TaskEvent) => void = () => {}
   onWindowPush: (w: WindowInfo) => void = () => {}
   onFrame: (f: VideoFrame) => void = () => {}
+  onAudio: (chunk: AudioChunk) => void = () => {}
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN && this.hello !== null
@@ -167,7 +172,18 @@ export class MixumClient {
       if (typeof ev.data === 'string') {
         this.onText(ev.data)
       } else {
-        const frame = parseVideoFrame(new Uint8Array(ev.data))
+        const bytes = new Uint8Array(ev.data)
+        if (bytes[0] === 0x02 && bytes.length >= 5) {
+          if (this.audioFormat) {
+            const seq = new DataView(bytes.buffer, bytes.byteOffset + 1, 4).getUint32(0, true)
+            const pcmBytes = bytes.subarray(5)
+            const pcm = new Int16Array(pcmBytes.length >> 1)
+            new Uint8Array(pcm.buffer).set(pcmBytes)
+            this.onAudio({ seq, ...this.audioFormat, pcm })
+          }
+          return
+        }
+        const frame = parseVideoFrame(bytes)
         if (frame) {
           frame.codec = this.attached.get(frame.windowId)?.codec ?? 'jpeg'
           this.onFrame(frame)
@@ -225,6 +241,9 @@ export class MixumClient {
           fps: sub.fps,
           codec: sub.codec,
         })
+      }
+      if (this.audioWanted) {
+        await this.request<AudioAttachResponse>('audio.attach')
       }
     } catch {
       this.ws?.close() // 下一轮重连再试
@@ -340,6 +359,23 @@ export class MixumClient {
 
   input(req: DisplayInputRequest): Promise<{ ok: boolean }> {
     return this.request('display.input', req)
+  }
+
+  async audioAttach(): Promise<AudioAttachResponse> {
+    const r = await this.request<AudioAttachResponse>('audio.attach')
+    this.audioFormat = { sampleRate: r.sampleRate, channels: r.channels }
+    this.audioWanted = true
+    return r
+  }
+
+  async audioDetach(): Promise<void> {
+    this.audioWanted = false
+    this.audioFormat = null
+    try {
+      await this.request('audio.detach')
+    } catch {
+      /* 连接已断时忽略 */
+    }
   }
 
   /** 把浏览器 File 分块上传到容器 work_root/transfers（file.put 协议）。 */

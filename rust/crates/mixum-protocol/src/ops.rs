@@ -45,6 +45,8 @@ pub mod op {
     pub const DISPLAY_INPUT: &str = "display.input";
     pub const DISPLAY_TAKEOVER: &str = "display.takeover";
     pub const DISPLAY_CLIPBOARD: &str = "display.clipboard";
+    pub const AUDIO_ATTACH: &str = "audio.attach";
+    pub const AUDIO_DETACH: &str = "audio.detach";
 
     pub const FILE_PUT: &str = "file.put";
     pub const FILE_PUT_COMMIT: &str = "file.put.commit";

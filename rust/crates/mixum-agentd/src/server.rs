@@ -92,6 +92,9 @@ pub struct Config {
     pub max_message_size: usize,
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+    /// 音频采集命令（输出 s16le 48k 双声道 PCM）；未配置时 audio.attach 返回 unsupported。
+    #[serde(default)]
+    pub audio_command: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -130,6 +133,7 @@ impl Default for Config {
             token_ttl_sec: default_token_ttl(),
             max_message_size: default_max_message(),
             agents: Vec::new(),
+            audio_command: None,
         }
     }
 }
@@ -338,6 +342,8 @@ pub struct Server {
     memory: Arc<MemoryStore>,
     /// 跨连接会话(session.resume 重放环)。
     sessions: Arc<SessionStore>,
+    /// 容器音频采集（audio.attach 的首个订阅者启动 capture 进程）。
+    audio: Arc<crate::audio::AudioHub>,
     /// 真实快照引擎就绪时提供跨节点同步;内存桩下为 None。
     #[cfg(feature = "real-snapshot")]
     pub sync: Option<Arc<crate::sync::SyncBackend>>,
@@ -354,6 +360,7 @@ impl Server {
         let memory = Arc::new(MemoryStore::open(
             std::path::Path::new(&config.data_dir).join("memory"),
         ));
+        let audio = crate::audio::AudioHub::new(config.audio_command.clone());
         Arc::new(Self {
             config,
             authorizer,
@@ -361,6 +368,7 @@ impl Server {
             broker,
             snapshots,
             memory,
+            audio,
             sessions: Arc::new(SessionStore::new(SESSION_RING_CAPACITY)),
             #[cfg(feature = "real-snapshot")]
             sync: None,
@@ -436,6 +444,8 @@ impl Server {
             conn_id: new_id(),
             bound: false,
             forwarders: Vec::new(),
+            audio_forwarder: None,
+            audio_guard: None,
             #[cfg(feature = "real-snapshot")]
             sync_stage: None,
             file_uploads: HashMap::new(),
@@ -487,6 +497,9 @@ impl Server {
         for forwarder in session.forwarders.drain(..) {
             forwarder.abort();
         }
+        if let Some(forwarder) = session.audio_forwarder.take() {
+            forwarder.abort();
+        }
         Ok(())
     }
 }
@@ -521,6 +534,9 @@ pub struct Session {
     bound: bool,
     /// display.attach 的帧转发任务:会话结束时统一 abort(队列关闭是常规路径)。
     forwarders: Vec<tokio::task::JoinHandle<()>>,
+    /// audio.attach 的转发任务与退订守卫（会话结束/重挂时清理）。
+    audio_forwarder: Option<tokio::task::JoinHandle<()>>,
+    audio_guard: Option<crate::audio::AudioGuard>,
     /// 远端导入暂存:一次 import 对账到 commit 之间有效(协议 §6)。
     #[cfg(feature = "real-snapshot")]
     sync_stage: Option<crate::sync::ImportStage>,
@@ -611,6 +627,8 @@ impl Session {
             ops::op::DISPLAY_TAKEOVER => self.display_takeover(&env).await,
             ops::op::DISPLAY_INPUT => self.display_input(&env).await,
             ops::op::DISPLAY_CLIPBOARD => self.display_clipboard(&env).await,
+            ops::op::AUDIO_ATTACH => self.audio_attach(&env).await,
+            ops::op::AUDIO_DETACH => self.audio_detach(&env).await,
             ops::op::FILE_PUT => self.file_put(&env).await,
             ops::op::FILE_PUT_COMMIT => self.file_put_commit(&env).await,
             ops::op::FILE_GET => self.file_get(&env).await,
@@ -1476,6 +1494,48 @@ impl Session {
             }
             Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
         }
+    }
+    async fn audio_attach(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::DisplayView).await {
+            return;
+        }
+        self.drop_audio();
+        match self.server.audio.subscribe() {
+            Ok(mut sub) => {
+                let tx = self.tx.clone();
+                let forwarder = tokio::spawn(async move {
+                    while let Ok(frame) = sub.rx.recv().await {
+                        let _ = tx.send(Message::Binary(frame.to_vec().into())).await;
+                    }
+                });
+                self.audio_forwarder = Some(forwarder);
+                self.audio_guard = Some(crate::audio::AudioGuard::new(self.server.audio.clone()));
+                self.reply(
+                    env,
+                    json!({
+                        "sampleRate": sub.sample_rate,
+                        "channels": sub.channels,
+                        "format": "s16le",
+                        "chunkMs": sub.chunk_ms
+                    }),
+                )
+                .await;
+            }
+            Err(e) => self.err(env, ErrCode::Unsupported, &e).await,
+        }
+    }
+    async fn audio_detach(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::DisplayView).await {
+            return;
+        }
+        self.drop_audio();
+        self.reply(env, json!({"ok": true})).await;
+    }
+    fn drop_audio(&mut self) {
+        if let Some(forwarder) = self.audio_forwarder.take() {
+            forwarder.abort();
+        }
+        self.audio_guard = None;
     }
     async fn display_clipboard(&mut self, env: &Envelope) {
         if !self.require(env, Cap::DisplayView).await {

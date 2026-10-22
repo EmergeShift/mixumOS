@@ -63,6 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(data) if !data.is_empty() => serde_json::from_slice::<Config>(&data)?,
         _ => Config::default(),
     };
+    if let Ok(command) = std::env::var("MIXUM_AUDIO_CMD") {
+        if !command.trim().is_empty() {
+            config.audio_command = Some(command);
+        }
+    }
     if config.hostname.is_empty() {
         config.hostname = nix::unistd::gethostname()
             .map(|h| h.to_string_lossy().into_owned())
