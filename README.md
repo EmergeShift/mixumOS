@@ -36,6 +36,54 @@
 - 动态链接优先:Rust 组件动态链接 glibc,mixcomp 链系统 wlroots 0.18
   (依赖库安全更新升一个 so 即可)。
 
+## macOS / Apple Container 内核
+
+Apple Container 的内核是**宿主级全局设置**，不支持按容器指定内核。mixumOS 在 macOS 上
+使用 `linux-mixum-micro`（基于 kata 6.18.35，开启 CRIU/Landlock/diag）。把它设为默认后，
+**新建容器会自动使用这个内核**；已经运行的容器保持启动时的内核，重启后才切换。因此
+“自动切换”只作用于之后启动的容器，不存在给单个容器换内核的开关。
+
+安装/升级内核（会提示确认，影响本机所有 Apple Container）：
+
+```bash
+container system kernel set --binary /path/to/Image   # 或 ./kernel/scripts/install-apple-container.sh <Image>
+container run --rm alpine:3.20 uname -r               # 期望 6.18.35-mixum-micro
+```
+
+### 切回原内核
+
+`container system kernel set` 拒绝目标目录同名文件覆盖，先备份并复制成唯一文件名：
+
+```bash
+K="$HOME/Library/Application Support/com.apple.container/kernels"
+# 安装 mixumOS 内核前先备份当前默认内核（如果还没备份，原 kata 内核通常是
+# vmlinux-6.18.35-197-debug）
+cp "$K/vmlinux-6.18.35-197-debug" /tmp/vmlinux-original
+container system kernel set --binary /tmp/vmlinux-original
+container system status
+container run --rm alpine:3.20 uname -r
+```
+
+> 切换后已运行容器不会自动换内核；需要旧内核的容器要 stop/start 一次。
+> Apple Container 服务若在切换后卡住，先清理卡住的 VM 再重启 `container system`。
+
+### 切回原内核会放弃什么
+
+| 能力 | 原 kata 内核（无 CRIU） | `linux-mixum-micro` |
+|---|---|---|
+| 磁盘快照 / 快照树 / fork / 回退 | ✅ | ✅ |
+| `.mart` 跨设备迁移（文件层） | ✅ | ✅ |
+| mixcomp GUI 流 / 窗口重放 | ✅ | ✅ |
+| **memory / hybrid 快照（CRIU dump）** | ❌ | ✅ |
+| **同机进程级回退（CRIU restore）** | ❌ | ✅ |
+| CRIU 的 UNIX/INET socket 收集（diag） | ❌ | ✅ |
+| Landlock / FUSE / cgroup freezer | 以原内核配置为准（kata 3.32 仍有 Landlock/FUSE） | ✅ |
+| 自定义内核补丁与 `-mixum-micro` 指纹 | ❌ | ✅ |
+
+**不依赖内核的能力不会丢**：文件快照、`.mart` 迁移、GUI 画面流、窗口重放仍可用；
+丢的是“进程内存/打开的文件与 socket”这一类 CRIU 能力。需要这些能力时再切回
+`linux-mixum-micro` 并重启容器即可。
+
 ## 架构总览
 
 ```

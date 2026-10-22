@@ -3,7 +3,7 @@
 # Rust 版从 rust/crates/mixum-ctl 原生构建;源码树由
 # dist/repo/container-build.sh 同步到 $startdir/rust。
 pkgname=mixum-ctl
-pkgver=0.1.4
+pkgver=0.1.5
 pkgrel=1
 pkgdesc="mixumOS 主机侧 CLI:文件传输/任务/快照/显示"
 arch=(aarch64 x86_64)
