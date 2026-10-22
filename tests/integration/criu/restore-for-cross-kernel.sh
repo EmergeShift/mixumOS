@@ -31,6 +31,7 @@ SRC_KERNEL=$(get kernel "$META")
 SRC_ARCH=$(get arch "$META")
 CTRL_KERNEL=$(get kernel "$CTRL")
 CTRL_ARCH=$(get arch "$CTRL")
+CTRL_TS=$(get generated_at "$CTRL")
 LOCAL_KERNEL=$(uname -r)
 LOCAL_ARCH=$(uname -m)
 
@@ -57,12 +58,30 @@ echo "目标: kernel=$LOCAL_KERNEL arch=$LOCAL_ARCH criu=$LOCAL_CRIU"
     echo "ABORT: 架构不一致——架构不是本实验的变量" >&2
     exit 1
 }
+# control-ok 必须是当前目标环境近期生成的:换内核/重启后的陈旧标记不可用。
+case "${CTRL_TS:-}" in
+    ""|*[!0-9]*)
+        echo "ABORT: control-ok 缺 generated_at(旧格式)——重跑 target-control.sh" >&2
+        exit 1
+        ;;
+esac
+CTRL_AGE=$(( $(date +%s) - CTRL_TS ))
+if [ "$CTRL_AGE" -lt 0 ] || [ "$CTRL_AGE" -gt 86400 ]; then
+    echo "ABORT: control-ok 生成于 ${CTRL_AGE}s 前(>24h),已过期——重跑 target-control.sh" >&2
+    exit 1
+fi
 if [ "$SRC_KERNEL" = "$LOCAL_KERNEL" ]; then
     echo "ABORT: 两端内核相同——这不是跨内核实验(请用 baseline-same-kernel.sh)" >&2
     exit 1
 fi
 
 echo "== 执行跨内核 restore(唯一变量:kernel)=="
+# 旧实验残留的被测进程会继续写 /tmp/criu-counter,造成假 PASS,先拒绝。
+if pgrep -f "/tmp/criu-static-counter" >/dev/null 2>&1; then
+    echo "ABORT: 仍有 criu-static-counter 进程在运行,计数自证可能被污染:" >&2
+    pgrep -af "/tmp/criu-static-counter" >&2 || true
+    exit 1
+fi
 # 恢复进程按路径重开计数器文件,CRIU 会校验文件大小——用源端 dump 后
 # 记录的值预建,保证字节数一致(环境准备,非实验变量)。
 SRC_AFTER_DUMP=$(get counter_after_dump "$META")
