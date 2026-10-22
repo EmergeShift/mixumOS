@@ -170,7 +170,7 @@ pub fn apply_spawn_isolation(
 
 /// 系统级目录白名单：只允许写工作区、/tmp、/dev、/run；其余只读。
 /// `/run` 是 Wayland/X11 socket 所在，`/dev` 是 /dev/null 等基础设备。
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn home_tool_dirs_from(home: &Path) -> Vec<PathBuf> {
     [
         ".cache", ".local", ".config", ".npm", ".cargo", ".rustup", ".mixum",
@@ -180,6 +180,7 @@ fn home_tool_dirs_from(home: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn home_tool_dirs() -> Vec<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -187,6 +188,7 @@ fn home_tool_dirs() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 fn extra_writable_dirs() -> Vec<PathBuf> {
     std::env::var_os("MIXUM_LANDLOCK_EXTRA_WRITABLE")
         .map(|raw| {
@@ -202,11 +204,13 @@ fn extra_writable_dirs() -> Vec<PathBuf> {
 /// 启动时预建 HOME 下的工具目录：Landlock 只能按已存在目录授权，
 /// 父目录 HOME 本身只读，任务无法自行创建这些目录。
 pub fn prepare_user_dirs() {
+    #[cfg(target_os = "linux")]
     for dir in home_tool_dirs() {
         let _ = fs::create_dir_all(dir);
     }
 }
 
+#[cfg(target_os = "linux")]
 fn build_ruleset(workspace: &Path) -> io::Result<landlock::RulesetCreated> {
     use landlock::{
         Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
