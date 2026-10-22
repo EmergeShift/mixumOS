@@ -80,6 +80,7 @@ make dist ARCHS="aarch64 x86_64"
 | [architecture.md](docs/architecture.md) | 组件、目录结构、数据流 |
 | [protocol.md](docs/protocol.md) | 线协议 v1:envelope、ops、能力令牌、二进制帧 |
 | [snapshots.md](docs/snapshots.md) | 快照引擎设计 + 基准数字(§9) |
+| [tests/poc/fuse-lazy](tests/poc/fuse-lazy) | FUSE 惰性挂载 PoC 脚本与判定标准 |
 | [console.md](docs/console.md) | Web 控制台(PWA)架构与对接 |
 | [wayland-magic.md](docs/wayland-magic.md) | mixcomp 合成器与窗口流实现 |
 | [backends.md](docs/backends.md) | 宿主后端形态:Docker/WSL2/nvx/k8s |
