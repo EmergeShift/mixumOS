@@ -15,8 +15,11 @@
 - 内容寻址块存储(CAS + zstd + 可选 AES-256-GCM),快照树是 DAG:
   原地回退自然分叉、显式 fork、回到任一未来快照,节点永不丢失;
 - **无感前置快照**:任务启动前自动打点,进程冻结窗口内打包,
-  未变更工作区热快照实测 **9.3 ms**(300 文件),大文件吞吐约 640 MB/s
-  (复现:`cargo run --release -p mixum-snapshot --example bench`);
+  未变更工作区热快照实测 **8.8 ms**(300 文件),大文件吞吐约 640 MB/s;
+  容器内 mixumd 启动到可连接中位 **102–107 ms**,端到端 `docker run` 中位
+  **226 ms**(2026-10-21 基准,见 [snapshots.md §9](docs/snapshots.md);
+  复现:`cargo run --release -p mixum-snapshot --example bench`、
+  `node tests/integration/startup-bench.mjs`);
 - 跨节点流转幂等去重:重推已同步快照零字节传输;
   盒盖→云端全链(快照→TLS 推送→远端 restore 物化→head 迁移续跑)
   由双节点 e2e 锁定([tests/integration/sync-e2e.mjs](tests/integration/sync-e2e.mjs))。
