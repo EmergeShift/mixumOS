@@ -3,8 +3,8 @@
 use crate::snapshot::SnapshotEngine;
 use crate::wire::TaskEvent;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use mixum_protocol::GuiSession;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,82 @@ pub use mixum_agent_driver::{
 /// 人机输入默认超时(tasks.md §The human-input channel:120 s)。
 pub const INPUT_TIMEOUT_MS: u64 = 120_000;
 
+/// 任务进程身份：默认 mixum，root 仅用于显式批准的 root 容器。
+#[derive(Debug, Clone)]
+pub struct TaskIdentity {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: PathBuf,
+}
+
+impl TaskIdentity {
+    /// 解析用户名；root 直接返回 0/0。找不到用户时返回当前进程身份，
+    /// 避免在开发机（没有 mixum 用户）上把测试跑挂。
+    pub fn resolve(name: &str) -> Self {
+        if name == "root" {
+            return Self {
+                name: "root".into(),
+                uid: 0,
+                gid: 0,
+                home: PathBuf::from("/root"),
+            };
+        }
+        if let Ok(Some(user)) = nix::unistd::User::from_name(name) {
+            return Self {
+                name: user.name,
+                uid: user.uid.as_raw(),
+                gid: user.gid.as_raw(),
+                home: user.dir,
+            };
+        }
+        Self::current()
+    }
+
+    pub fn current() -> Self {
+        let uid = nix::unistd::Uid::current().as_raw();
+        let gid = nix::unistd::Gid::current().as_raw();
+        let (name, home) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+            .ok()
+            .flatten()
+            .map(|user| (user.name, user.dir))
+            .unwrap_or_else(|| ("unknown".into(), PathBuf::from("/")));
+        Self {
+            name,
+            uid,
+            gid,
+            home,
+        }
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.uid == 0
+    }
+
+    fn credentials(&self) -> Option<(u32, u32)> {
+        (!self.is_root()).then_some((self.uid, self.gid))
+    }
+}
+
+/// 任务默认以 mixum 运行；root 容器的 entrypoint 显式设置 MIXUM_TASK_USER=root。
+pub fn task_identity_from_env() -> TaskIdentity {
+    let name = std::env::var("MIXUM_TASK_USER").unwrap_or_else(|_| "mixum".into());
+    TaskIdentity::resolve(name.trim())
+}
+
+/// 子进程 HOME/USER/LOGNAME 必须指向任务身份，而不是 agentd 的 root 环境。
+fn apply_task_env_std(cmd: &mut std::process::Command, identity: &TaskIdentity) {
+    cmd.env("HOME", &identity.home)
+        .env("USER", &identity.name)
+        .env("LOGNAME", &identity.name);
+}
+
+fn apply_task_env_tokio(cmd: &mut Command, identity: &TaskIdentity) {
+    cmd.env("HOME", &identity.home)
+        .env("USER", &identity.name)
+        .env("LOGNAME", &identity.name);
+}
+
 pub struct LocalSandbox {
     // std 锁:冻结钩子在同步上下文(FreezeFn)里也要读进程组,锁内无 await。
     pgids: Arc<std::sync::Mutex<Vec<i32>>>,
@@ -36,6 +112,7 @@ pub struct LocalSandbox {
     // 系统级隔离:启用后优先 cgroup v2 freezer,并在 spawn 时套 Landlock。
     cgroup: Option<crate::isolation::CgroupFreezer>,
     workspace: Option<PathBuf>,
+    identity: TaskIdentity,
 }
 
 impl Default for LocalSandbox {
@@ -51,7 +128,14 @@ impl LocalSandbox {
             gui: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cgroup: None,
             workspace: None,
+            identity: TaskIdentity::current(),
         }
+    }
+
+    /// 指定任务运行身份（默认当前用户，生产装配传 mixum）。
+    pub fn with_identity(mut self, identity: TaskIdentity) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// 绑定一个共享的 leader pid，供快照引擎读取当前任务树首领。
@@ -79,7 +163,11 @@ impl LocalSandbox {
     /// 目录白名单（Linux 5.13+）。不启用时保持旧行为（SIGSTOP + 无限制），
     /// 便于测试和不支持的环境。
     pub fn with_isolation(mut self, workspace: impl Into<PathBuf>) -> Self {
-        crate::isolation::prepare_user_dirs();
+        crate::isolation::prepare_user_dirs(
+            &self.identity.home,
+            self.identity.uid,
+            self.identity.gid,
+        );
         self.cgroup = crate::isolation::CgroupFreezer::create();
         self.workspace = Some(workspace.into());
         self
@@ -159,9 +247,12 @@ impl LocalSandbox {
         cmd.args(&session.args);
         if !session.cwd.is_empty() {
             cmd.current_dir(&session.cwd);
+        } else if let Some(workspace) = &self.workspace {
+            cmd.current_dir(workspace);
         }
         let env = replay_env(session);
         cmd.env_clear().envs(&env);
+        apply_task_env_std(&mut cmd, &self.identity);
         apply_x11_env_std(&mut cmd);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -175,6 +266,8 @@ impl LocalSandbox {
             &mut cmd,
             self.cgroup.clone(),
             self.workspace.clone(),
+            Some(&self.identity.home),
+            self.identity.credentials(),
         );
         let mut child = cmd.spawn()?;
         let pid = child.id() as i32;
@@ -197,8 +290,7 @@ impl LocalSandbox {
 }
 
 fn pid_alive(pid: i32) -> bool {
-    pid > 0
-        && nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+    pid > 0 && nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
 /// 终止重放前的旧进程：先 SIGTERM 并等待退出，超时再 SIGKILL，
@@ -280,6 +372,7 @@ impl Sandbox for LocalSandbox {
         on_line: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Result<i32, DriverError> {
         let mut cmd = Command::new(program);
+        apply_task_env_tokio(&mut cmd, &self.identity);
         apply_x11_env(&mut cmd);
         cmd.args(args)
             .kill_on_drop(true)
@@ -290,8 +383,13 @@ impl Sandbox for LocalSandbox {
             cmd.as_std_mut(),
             self.cgroup.clone(),
             self.workspace.clone(),
+            Some(&self.identity.home),
+            self.identity.credentials(),
         );
-        if let Some(path) = dir {
+        let cwd = dir
+            .map(Path::to_path_buf)
+            .or_else(|| self.workspace.clone());
+        if let Some(path) = cwd {
             cmd.current_dir(path);
         }
         let mut child = cmd.spawn()?;
@@ -339,6 +437,7 @@ impl Sandbox for LocalSandbox {
         let mut cmd = Command::new(program);
         cmd.env_clear();
         cmd.envs(&env);
+        apply_task_env_tokio(&mut cmd, &self.identity);
         apply_x11_env(&mut cmd);
         cmd.args(args)
             .kill_on_drop(true)
@@ -350,8 +449,13 @@ impl Sandbox for LocalSandbox {
             cmd.as_std_mut(),
             self.cgroup.clone(),
             self.workspace.clone(),
+            Some(&self.identity.home),
+            self.identity.credentials(),
         );
-        if let Some(path) = dir {
+        let cwd = dir
+            .map(Path::to_path_buf)
+            .or_else(|| self.workspace.clone());
+        if let Some(path) = cwd {
             cmd.current_dir(path);
         }
         let mut child = cmd.spawn()?;
@@ -1204,10 +1308,7 @@ printf '%s\n' '{"type":"done"}'
         let target = dir.path().join("replayed.txt");
         let session = GuiSession {
             command: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                format!("echo replayed > {}", target.display()),
-            ],
+            args: vec!["-c".into(), format!("echo replayed > {}", target.display())],
             cwd: dir.path().to_string_lossy().into_owned(),
             env: Default::default(),
             pid: 999_999,

@@ -73,7 +73,9 @@ impl CgroupFreezer {
     /// 把调用进程挂进该 cgroup。cgroup v2 约定写 "0" 表示当前进程。
     /// 父进程预开 cgroup.procs:pre_exec 里只做 write,不再 open/分配。
     pub fn open_procs(&self) -> io::Result<std::fs::File> {
-        std::fs::OpenOptions::new().write(true).open(&self.inner.procs)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.inner.procs)
     }
 
     pub fn attach_current(&self) -> io::Result<()> {
@@ -106,14 +108,14 @@ pub struct PreparedLandlock(landlock::RulesetCreated);
 pub struct PreparedLandlock;
 
 impl PreparedLandlock {
-    pub fn build(workspace: &Path) -> io::Result<Self> {
+    pub fn build(workspace: &Path, home: Option<&Path>) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
-            Ok(Self(build_ruleset(workspace)?))
+            Ok(Self(build_ruleset(workspace, home)?))
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = workspace;
+            let _ = (workspace, home);
             Ok(Self)
         }
     }
@@ -143,9 +145,11 @@ pub fn apply_spawn_isolation(
     cmd: &mut std::process::Command,
     cgroup: Option<CgroupFreezer>,
     workspace: Option<PathBuf>,
+    home: Option<&Path>,
+    credentials: Option<(u32, u32)>,
 ) {
     let prepared = match workspace.as_deref() {
-        Some(workspace) => PreparedLandlock::build(workspace).map(Some),
+        Some(workspace) => PreparedLandlock::build(workspace, home).map(Some),
         None => Ok(None),
     };
     let mut prepared = Some(prepared);
@@ -161,6 +165,21 @@ pub fn apply_spawn_isolation(
                     .map_err(|err| io::Error::from_raw_os_error(err.raw_os_error().unwrap_or(5)))?;
                 nix::unistd::write(file, b"0")?;
             }
+            // cgroup 写完后降权；root 容器传 None，保持 root。
+            if let Some((uid, gid)) = credentials {
+                let current = nix::unistd::Uid::current().as_raw();
+                if current != uid {
+                    if !nix::unistd::Uid::effective().is_root() {
+                        return Err(io::Error::from_raw_os_error(nix::libc::EPERM));
+                    }
+                    #[cfg(target_os = "linux")]
+                    nix::unistd::setgroups(&[]).map_err(io::Error::other)?;
+                    nix::unistd::setgid(nix::unistd::Gid::from_raw(gid))
+                        .map_err(io::Error::other)?;
+                    nix::unistd::setuid(nix::unistd::Uid::from_raw(uid))
+                        .map_err(io::Error::other)?;
+                }
+            }
             match prepared.take().expect("pre_exec 只调用一次") {
                 Ok(Some(landlock)) => landlock.enforce(),
                 Ok(None) => Ok(()),
@@ -175,6 +194,8 @@ pub fn apply_spawn_isolation(
     _cmd: &mut std::process::Command,
     _cgroup: Option<CgroupFreezer>,
     _workspace: Option<PathBuf>,
+    _home: Option<&Path>,
+    _credentials: Option<(u32, u32)>,
 ) {
 }
 
@@ -188,14 +209,6 @@ fn home_tool_dirs_from(home: &Path) -> Vec<PathBuf> {
     .iter()
     .map(|name| home.join(name))
     .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn home_tool_dirs() -> Vec<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home_tool_dirs_from(&home))
-        .unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
@@ -213,15 +226,29 @@ fn extra_writable_dirs() -> Vec<PathBuf> {
 
 /// 启动时预建 HOME 下的工具目录：Landlock 只能按已存在目录授权，
 /// 父目录 HOME 本身只读，任务无法自行创建这些目录。
-pub fn prepare_user_dirs() {
+pub fn prepare_user_dirs(home: &Path, uid: u32, gid: u32) {
     #[cfg(target_os = "linux")]
-    for dir in home_tool_dirs() {
-        let _ = fs::create_dir_all(dir);
+    {
+        let _ = fs::create_dir_all(home);
+        for dir in home_tool_dirs_from(home) {
+            let _ = fs::create_dir_all(dir);
+        }
+        if nix::unistd::Uid::effective().is_root() {
+            use std::os::unix::fs::chown;
+            let _ = chown(home, Some(uid), Some(gid));
+            for dir in home_tool_dirs_from(home) {
+                let _ = chown(&dir, Some(uid), Some(gid));
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (home, uid, gid);
     }
 }
 
 #[cfg(target_os = "linux")]
-fn build_ruleset(workspace: &Path) -> io::Result<landlock::RulesetCreated> {
+fn build_ruleset(workspace: &Path, home: Option<&Path>) -> io::Result<landlock::RulesetCreated> {
     use landlock::{
         Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
     };
@@ -244,7 +271,9 @@ fn build_ruleset(workspace: &Path) -> io::Result<landlock::RulesetCreated> {
         PathBuf::from("/dev"),
         PathBuf::from("/run"),
     ];
-    writable.extend(home_tool_dirs());
+    if let Some(home) = home {
+        writable.extend(home_tool_dirs_from(home));
+    }
     writable.extend(extra_writable_dirs());
     for path in writable {
         if !path.is_dir() {
@@ -332,10 +361,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         if cfg!(target_os = "linux") {
             // Linux 上真正 enforce 会限制当前测试进程，这里只验证 ruleset 可构建。
-            PreparedLandlock::build(dir.path()).unwrap();
+            PreparedLandlock::build(dir.path(), None).unwrap();
             return;
         }
-        PreparedLandlock::build(dir.path())
+        PreparedLandlock::build(dir.path(), None)
             .unwrap()
             .enforce()
             .unwrap();
@@ -365,7 +394,13 @@ mod tests {
             .arg("sh")
             .arg(allowed.path().join("allowed.txt"))
             .arg(denied.path().join("denied.txt"));
-        apply_spawn_isolation(&mut cmd, None, Some(allowed.path().to_path_buf()));
+        apply_spawn_isolation(
+            &mut cmd,
+            None,
+            Some(allowed.path().to_path_buf()),
+            None,
+            None,
+        );
         let status = cmd.status().unwrap();
         assert!(!status.success(), "工作区外写入应该失败");
         assert!(allowed.path().join("allowed.txt").exists());
@@ -384,7 +419,11 @@ mod tests {
             eprintln!("HOME 不存在，跳过");
             return;
         }
-        prepare_user_dirs();
+        prepare_user_dirs(
+            &home,
+            nix::unistd::Uid::current().as_raw(),
+            nix::unistd::Gid::current().as_raw(),
+        );
         let tag = std::process::id();
         let allowed = home.join(".cache").join(format!("mixum-landlock-{tag}"));
         let denied = home.join(format!("mixum-landlock-{tag}"));
@@ -395,7 +434,13 @@ mod tests {
             .arg("sh")
             .arg(&allowed)
             .arg(&denied);
-        apply_spawn_isolation(&mut cmd, None, Some(workspace.path().to_path_buf()));
+        apply_spawn_isolation(
+            &mut cmd,
+            None,
+            Some(workspace.path().to_path_buf()),
+            None,
+            None,
+        );
         let status = cmd.status().expect("spawn sh");
         let allowed_written = allowed.exists();
         let denied_written = denied.exists();

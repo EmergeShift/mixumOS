@@ -9,7 +9,8 @@ use mixum_agentd::display::Broker;
 use mixum_agentd::server::{Config, Server};
 use mixum_agentd::snapshot::SnapshotEngine;
 use mixum_agentd::task::{
-    Engine, ExternalDriver, LocalSandbox, NamedExternalDriver, Registry, ShellDriver,
+    task_identity_from_env, Engine, ExternalDriver, LocalSandbox, NamedExternalDriver, Registry,
+    ShellDriver,
 };
 use mixum_protocol::ops::Cap;
 use mixum_protocol::token::Claims;
@@ -100,8 +101,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
     // 系统级隔离：cgroup freezer 可用时优先，Landlock 限制文件系统写入。
+    let task_identity = task_identity_from_env();
+    eprintln!(
+        "task identity: {} (uid={} gid={})",
+        task_identity.name, task_identity.uid, task_identity.gid
+    );
     let sandbox = Arc::new(
         LocalSandbox::new()
+            .with_identity(task_identity)
             .with_leader(Arc::clone(&leader))
             .with_isolation(config.work_root.clone()),
     );
@@ -213,6 +220,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 windows: vec![],
             })?;
             std::fs::write(&token_path, &token)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+            }
             token
         }
     };
