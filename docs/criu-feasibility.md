@@ -184,6 +184,14 @@ sudo tests/integration/criu/target-control.sh /tmp/criu-imgs-cross
 sudo tests/integration/criu/restore-for-cross-kernel.sh /tmp/criu-imgs-cross
 ```
 
+### 8.1 复现状态(2026-10-22)
+
+- #26 受控重跑使用的目标 VM(6.1.0-47 + CRIU 4.2.1 initramfs)是临时产物,
+  未入库;WSL /tmp 清理后不能直接复用。
+- 重新复跑需按 README 重建目标 VM;仓库只保留可移植脚本,不提交内核/rootfs。
+- #68 的 control-ok 时效/残留进程校验已用合成负向测试验证(3/3 ABORT);
+  完整 VM 复跑待目标环境重建后执行。
+
 第二内核 VM 的组装(initramfs、模块、loopback、QEMU 启动)见
 `tests/integration/criu/README.md`。脚本只包含可移植的测试逻辑;
 内核、rootfs、CRIU 包不入库。
