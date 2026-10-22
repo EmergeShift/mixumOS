@@ -103,6 +103,9 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const [frozen, setFrozen] = useState(false)
   const frozenRef = useRef(false)
   const [dragging, setDragging] = useState(false)
+  const [audioOn, setAudioOn] = useState(false)
+  const [audioFrames, setAudioFrames] = useState(0)
+  const audioRef = useRef<{ ctx: AudioContext; next: number; frames: number } | null>(null)
 
   modeRef.current = win.mode
 
@@ -186,6 +189,46 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   useEffect(() => {
     const t = setInterval(() => setStats({ ...statsRef.current }), 500)
     return () => clearInterval(t)
+  }, [])
+
+  // 音频:audio.attach 后按 20ms 块播放 s16le;落后时重置调度点。
+  useEffect(() => {
+    const prev = client.onAudio
+    client.onAudio = (chunk) => {
+      const a = audioRef.current
+      if (!a) return
+      const frames = chunk.pcm.length / chunk.channels
+      const buf = a.ctx.createBuffer(chunk.channels, frames, chunk.sampleRate)
+      for (let ch = 0; ch < chunk.channels; ch++) {
+        const out = buf.getChannelData(ch)
+        for (let i = 0; i < frames; i++) {
+          out[i] = chunk.pcm[i * chunk.channels + ch] / 32768
+        }
+      }
+      const src = a.ctx.createBufferSource()
+      src.buffer = buf
+      src.connect(a.ctx.destination)
+      const now = a.ctx.currentTime
+      if (a.next < now + 0.02 || a.next > now + 0.5) a.next = now + 0.05
+      src.start(a.next)
+      a.next += buf.duration
+      a.frames += 1
+      if (a.frames % 25 === 0) setAudioFrames(a.frames)
+    }
+    return () => {
+      client.onAudio = prev
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      const a = audioRef.current
+      audioRef.current = null
+      if (a) {
+        void a.ctx.close()
+        void client.audioDetach()
+      }
+    }
   }, [])
 
   function scheduleDraw() {
@@ -376,6 +419,29 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
       .catch((err) => showToast(`上传失败: ${msg(err)}`, 'error'))
   }
 
+  async function toggleAudio() {
+    if (audioOn) {
+      setAudioOn(false)
+      setAudioFrames(0)
+      const a = audioRef.current
+      audioRef.current = null
+      await client.audioDetach()
+      void a?.ctx.close()
+      return
+    }
+    try {
+      const fmt = await client.audioAttach()
+      const ctx = new AudioContext({ sampleRate: fmt.sampleRate })
+      await ctx.resume()
+      audioRef.current = { ctx, next: 0, frames: 0 }
+      setAudioOn(true)
+      setAudioFrames(0)
+      showToast(`音频已开启 ${fmt.sampleRate}Hz / ${fmt.channels}ch`)
+    } catch (err) {
+      showToast(`音频开启失败: ${msg(err)}`, 'error')
+    }
+  }
+
   async function takeover(action: 'claim' | 'release', force = false) {
     try {
       if (force && !window.confirm('agent 正持有输入,强制接管会让 agent 失去输入。继续?')) return
@@ -402,11 +468,15 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
         <span className="canvas-meta">
           {info ? `${info.width}×${info.height} · ${info.codec} · ${info.fps}fps` : ''}
           {stats.frames > 0 ? ` · ${stats.frames} 帧 · 最近 ${fmtTime(stats.lastTs)}` : ''}
+          {audioOn ? ` · 音频 ${audioFrames}` : ''}
         </span>
         <span className={`mode-badge mode-${win.mode}`}>
           {win.mode === 'agent' ? 'agent 持有' : win.mode === 'user' ? '已接管' : '空闲'}
         </span>
         {frozen && <span className="mode-badge mode-frozen">快照冻结</span>}
+        <button className="btn btn-small" onClick={() => void toggleAudio()}>
+          {audioOn ? '静音' : '音频'}
+        </button>
         {win.mode === 'user' ? (
           <button className="btn btn-small" onClick={() => void takeover('release')}>
             释放
