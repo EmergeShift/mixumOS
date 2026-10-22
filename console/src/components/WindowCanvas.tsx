@@ -102,6 +102,7 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const [forceJpeg, setForceJpeg] = useState(false)
   const [frozen, setFrozen] = useState(false)
   const frozenRef = useRef(false)
+  const [dragging, setDragging] = useState(false)
 
   modeRef.current = win.mode
 
@@ -363,6 +364,18 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
     sendText(text)
   }
 
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault()
+    setDragging(false)
+    const file = e.dataTransfer.files?.[0]
+    if (!file) return
+    showToast(`上传 ${file.name}…`)
+    void client
+      .putFile(file)
+      .then((r) => showToast(`已上传到 ${r.path}`))
+      .catch((err) => showToast(`上传失败: ${msg(err)}`, 'error'))
+  }
+
   async function takeover(action: 'claim' | 'release', force = false) {
     try {
       if (force && !window.confirm('agent 正持有输入,强制接管会让 agent 失去输入。继续?')) return
@@ -417,6 +430,12 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
         onContextMenu={(e) => canInput && e.preventDefault()}
         onKeyDown={(e) => onKey(e, 'press')}
         onKeyUp={(e) => onKey(e, 'release')}
+        onDragOver={(e) => {
+          e.preventDefault()
+          if (!dragging) setDragging(true)
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={onDrop}
       >
         <canvas
           ref={canvasRef}
@@ -443,6 +462,7 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
         {info && !canInput && (
           <div className="canvas-hint">观看模式。点「接管」获得输入控制权。</div>
         )}
+        {dragging && <div className="canvas-drop">松开上传到容器 transfers/</div>}
       </div>
     </div>
   )
