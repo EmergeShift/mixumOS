@@ -23,6 +23,16 @@ for i in $(seq 1 50); do
 	sleep 0.2
 done
 
+# 2. PulseAudio（可选）：null sink + 本机 socket；Apple Container 无 systemd，
+#    由入口直接拉起。没有 pulseaudio 的旧镜像/精简环境自动跳过。
+if command -v pulseaudio >/dev/null 2>&1; then
+	mkdir -p /run/mixum/pulse
+	chown mixum:mixum /run/mixum/pulse 2>/dev/null || true
+	if id mixum >/dev/null 2>&1; then
+		su -s /bin/sh mixum -c 'HOME=/tmp XDG_RUNTIME_DIR=/run/mixum PULSE_RUNTIME_PATH=/run/mixum/pulse exec pulseaudio --daemonize=no --exit-idle-time=-1 -n --file=/etc/mixum/pulse.pa' >/tmp/pulse.log 2>&1 &
+	fi
+fi
+
 # 2. mixcomp（连接 mixumd 控制通道）。e2eclient（gorilla 默认读缓冲 4096）
 # 扛不住大帧， JPEG 质量压低以保单帧 <4KiB。
 mixcomp --sock /run/mixum/display.sock --quality "${MIXUM_JPEG_QUALITY:-90}" &
