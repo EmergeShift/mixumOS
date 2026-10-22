@@ -376,7 +376,7 @@ void input_handle_json(struct mixcomp_server *s, const char *json, size_t len) {
 		return;
 	}
 	json_object *jx = NULL, *jy = NULL, *jbtn = NULL, *jact = NULL;
-	json_object *jkey = NULL, *jksym = NULL, *jmods = NULL;
+	json_object *jkey = NULL, *jksym = NULL, *jmods = NULL, *jtext = NULL;
 	json_object_object_get_ex(root, "x", &jx);
 	json_object_object_get_ex(root, "y", &jy);
 	json_object_object_get_ex(root, "button", &jbtn);
@@ -384,6 +384,7 @@ void input_handle_json(struct mixcomp_server *s, const char *json, size_t len) {
 	json_object_object_get_ex(root, "key", &jkey);
 	json_object_object_get_ex(root, "keysym", &jksym);
 	json_object_object_get_ex(root, "mods", &jmods);
+	json_object_object_get_ex(root, "text", &jtext);
 
 	if (strcmp(kind, "pointer_motion") == 0) {
 		inject_motion(s, w, jx ? json_object_get_double(jx) : 0,
@@ -397,6 +398,11 @@ void input_handle_json(struct mixcomp_server *s, const char *json, size_t len) {
 		uint32_t key = jkey ? (uint32_t)json_object_get_int(jkey) : 0;
 		inject_key(s, w, jksym ? json_object_get_string(jksym) : NULL, key,
 				jmods, jact ? json_object_get_string(jact) : "click");
+	} else if (strcmp(kind, "text") == 0) {
+		// 宿主输入法已组合完成；直接交给客户端 text-input。
+		if (jtext != NULL && json_object_is_type(jtext, json_type_string)) {
+			text_input_commit(s, w, json_object_get_string(jtext));
+		}
 	}
 	json_object_put(root);
 }

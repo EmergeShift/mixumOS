@@ -74,6 +74,10 @@ static void unmap_cb(struct wl_listener *listener, void *data) {
 static void destroy_cb(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct mixcomp_window *w = wl_container_of(listener, w, destroy);
+	if (w->server->focus_window == w) {
+		w->server->focus_window = NULL;
+	}
+	text_input_forget_window(w->server, w);
 	if (w->timer != NULL) {
 		wl_event_source_remove(w->timer);
 	}
