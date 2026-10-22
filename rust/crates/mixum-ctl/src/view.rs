@@ -81,7 +81,7 @@ c.addEventListener('pointermove',e=>{
 });
 c.addEventListener('pointerdown',e=>{c.focus();sendInput({type:'pointer_button',button:e.button===2?'right':e.button===1?'middle':'left',action:'press'});e.preventDefault();});
 c.addEventListener('pointerup',e=>sendInput({type:'pointer_button',button:e.button===2?'right':e.button===1?'middle':'left',action:'release'}));
-c.addEventListener('wheel',e=>sendInput({type:'pointer_axis',action:e.deltaY<0?'scroll_up':'scroll_down'})&&e.preventDefault());
+c.addEventListener('wheel',e=>{sendInput({type:'pointer_axis',action:e.deltaY<0?'scroll_up':'scroll_down'});e.preventDefault();});
 c.addEventListener('contextmenu',e=>e.preventDefault());
 document.addEventListener('keydown',e=>{
   if(e.key==='F5'||e.key==='F11'||e.key==='F12')return;
@@ -199,6 +199,28 @@ fn http_404() -> Vec<u8> {
     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
 }
 
+fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// 浏览器发起的 WS 必须与页面同源，避免任意网页连到本地视图服务注入输入。
+/// 非浏览器客户端（e2e/CLI）通常不带 Origin，保持兼容。
+fn websocket_origin_allowed(head: &str) -> bool {
+    let Some(origin) = header_value(head, "origin") else {
+        return true;
+    };
+    let Some(host) = header_value(head, "host") else {
+        return false;
+    };
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|origin_host| origin_host.eq_ignore_ascii_case(host))
+}
+
 pub async fn serve(client: Client, bind: &str) -> Result<(), Error> {
     let listener = TcpListener::bind(bind).await?;
     println!("本地视图: http://{bind}(每个容器窗口一个独立视图页)");
@@ -218,6 +240,14 @@ pub async fn serve(client: Client, bind: &str) -> Result<(), Error> {
             if request_head.contains("Upgrade: websocket")
                 || request_head.contains("upgrade: websocket")
             {
+                if !websocket_origin_allowed(&request_head) {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
                 if let Some(Route::Stream(window)) = route(&path) {
                     stream_window(client, stream, window).await;
                 }
@@ -378,7 +408,7 @@ pub async fn record(
 
 #[cfg(test)]
 mod tests {
-    use super::{control_allowed, parse_control, route, Route};
+    use super::{control_allowed, parse_control, route, websocket_origin_allowed, Route};
 
     #[test]
     fn routes_cover_viewer_pages_and_strip_query() {
@@ -415,5 +445,19 @@ mod tests {
             "缺 id 拒绝"
         );
         assert!(parse_control("not json").is_none());
+    }
+
+    #[test]
+    fn websocket_origin_must_match_host() {
+        let same = "GET /api/stream/1 HTTP/1.1\r\nHost: 127.0.0.1:7602\r\nOrigin: http://127.0.0.1:7602\r\nUpgrade: websocket\r\n";
+        assert!(websocket_origin_allowed(same));
+        let evil = "GET /api/stream/1 HTTP/1.1\r\nHost: 127.0.0.1:7602\r\nOrigin: http://evil.example\r\nUpgrade: websocket\r\n";
+        assert!(!websocket_origin_allowed(evil));
+        let no_origin =
+            "GET /api/stream/1 HTTP/1.1\r\nHost: 127.0.0.1:7602\r\nUpgrade: websocket\r\n";
+        assert!(websocket_origin_allowed(no_origin));
+        let null_origin =
+            "GET /api/stream/1 HTTP/1.1\r\nHost: 127.0.0.1:7602\r\nOrigin: null\r\nUpgrade: websocket\r\n";
+        assert!(!websocket_origin_allowed(null_origin));
     }
 }
