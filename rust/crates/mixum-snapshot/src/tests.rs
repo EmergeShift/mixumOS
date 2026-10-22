@@ -387,3 +387,66 @@ fn restore_freeze_failure_leaves_workspace_untouched() {
         "v2"
     );
 }
+
+#[test]
+fn hybrid_restore_runs_criu_and_prepare_hook() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tools = TempDir::new().unwrap();
+    let log = tools.path().join("criu.log");
+    let script = tools.path().join("criu");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (mut e, _data, _root) = engine(false);
+    e.criu = Some(Criu::from_binary(script));
+    e.set_task_pid(1234);
+
+    let node = e.snapshot(KIND_HYBRID, "hybrid", false).unwrap();
+    assert!(node.memory.is_some(), "hybrid 应带 memory 清单");
+
+    let prepare_called = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&prepare_called);
+    e.restore_prepare = Some(Box::new(move || {
+        flag.store(true, Ordering::SeqCst);
+        Ok(())
+    }));
+
+    e.restore(&node.id, "inplace", "").unwrap();
+    assert!(
+        prepare_called.load(Ordering::SeqCst),
+        "restore 前必须调用 prepare"
+    );
+
+    let log = std::fs::read_to_string(log).unwrap();
+    assert!(log.contains("dump"), "缺少 CRIU dump: {log}");
+    assert!(log.contains("restore"), "缺少 CRIU restore: {log}");
+}
+
+#[test]
+fn multi_root_dump_passes_every_tree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tools = TempDir::new().unwrap();
+    let log = tools.path().join("criu.log");
+    let script = tools.path().join("criu");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho \"$@\" >> \"{}\"\nexit 0\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (mut e, _data, _root) = engine(false);
+    e.criu = Some(Criu::from_binary(script));
+    e.set_dump_roots([111, 222]);
+    e.snapshot(KIND_HYBRID, "multi", false).unwrap();
+
+    let log = std::fs::read_to_string(log).unwrap();
+    assert!(log.contains("--tree 111"), "缺少任务根: {log}");
+    assert!(log.contains("--tree 222"), "缺少合成器根: {log}");
+}
