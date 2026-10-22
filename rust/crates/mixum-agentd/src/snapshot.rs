@@ -256,6 +256,8 @@ impl SnapshotEngine for MemorySnapshotEngine {
 /// 真实 mixum-snapshot 引擎的线程共享句柄:适配器与同步后端共用同一实例。
 #[cfg(feature = "real-snapshot")]
 pub type SharedEngine = Arc<std::sync::Mutex<mixum_snapshot::Engine>>;
+#[cfg(feature = "real-snapshot")]
+type RestoreHook = Arc<dyn Fn(String, Vec<GuiSession>) + Send + Sync>;
 
 /// mixum-snapshot crate 的异步适配器:trait 语义与 Go reference 的
 /// snap.Engine 调用面逐项对齐(create 的 branch 参数同 Go 一并忽略)。
@@ -264,7 +266,7 @@ pub struct RealSnapshotEngine {
     engine: SharedEngine,
     /// 当前任务树首领 pid（由 LocalSandbox 写入，CRIU dump 用）。
     leader: Option<Arc<AtomicI32>>,
-    restore_hook: Option<Arc<dyn Fn(Vec<GuiSession>) + Send + Sync>>,
+    restore_hook: Option<RestoreHook>,
 }
 
 #[cfg(feature = "real-snapshot")]
@@ -282,7 +284,8 @@ impl RealSnapshotEngine {
     }
 
     /// restore 完成（锁已释放）后回调，用于按 gui_sessions 重放窗口。
-    pub fn set_restore_hook(&mut self, hook: Arc<dyn Fn(Vec<GuiSession>) + Send + Sync>) {
+    /// 回调参数：节点 origin 与 GUI 会话清单。origin 非空表示 sync/import 来源。
+    pub fn set_restore_hook(&mut self, hook: RestoreHook) {
         self.restore_hook = Some(hook);
     }
 
@@ -402,9 +405,10 @@ impl SnapshotEngine for RealSnapshotEngine {
                 .restore(node, strategy, label.unwrap_or_default())
                 .map_err(Self::map_error)?
         };
+        let origin = selected.origin.clone();
         let sessions = selected.gui_sessions;
         if let Some(hook) = &self.restore_hook {
-            hook(sessions.clone());
+            hook(origin, sessions.clone());
         }
         Ok(RestoreResult {
             restored_to: node.to_owned(),
@@ -646,7 +650,8 @@ mod tests {
         let mut adapter = RealSnapshotEngine::from_engine(engine);
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let hook_seen = seen.clone();
-        adapter.set_restore_hook(Arc::new(move |sessions| {
+        adapter.set_restore_hook(Arc::new(move |origin, sessions| {
+            assert!(origin.is_empty(), "本地快照 origin 应为空");
             hook_seen.lock().unwrap().extend(sessions);
         }));
 

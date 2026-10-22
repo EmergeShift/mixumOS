@@ -12,13 +12,22 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 /// cgroup v2 冻结器。`create` 失败（只读挂载 / 无委托）就退回信号路径。
+///
+/// 句柄可克隆：克隆共享同一目录，只有最后一个句柄释放时才尝试删除，
+/// 避免 spawn 时的临时克隆在任务退出后把共享 cgroup 清掉。
 #[derive(Debug, Clone)]
 pub struct CgroupFreezer {
+    inner: Arc<CgroupInner>,
+}
+
+#[derive(Debug)]
+struct CgroupInner {
     dir: PathBuf,
     procs: PathBuf,
     freeze: PathBuf,
@@ -42,9 +51,9 @@ impl CgroupFreezer {
             return None;
         }
         let freezer = Self::at(dir);
-        if !freezer.freeze.exists() {
+        if !freezer.inner.freeze.exists() {
             // 不是 cgroupfs（或没有 freezer 支持）：清掉刚建的目录。
-            let _ = fs::remove_dir(&freezer.dir);
+            let _ = fs::remove_dir(&freezer.inner.dir);
             return None;
         }
         Some(freezer)
@@ -53,30 +62,32 @@ impl CgroupFreezer {
     /// 指定目录（测试或自定义挂载点使用）。
     pub fn at(dir: PathBuf) -> Self {
         Self {
-            procs: dir.join("cgroup.procs"),
-            freeze: dir.join("cgroup.freeze"),
-            dir,
+            inner: Arc::new(CgroupInner {
+                procs: dir.join("cgroup.procs"),
+                freeze: dir.join("cgroup.freeze"),
+                dir,
+            }),
         }
     }
 
     /// 把调用进程挂进该 cgroup。cgroup v2 约定写 "0" 表示当前进程。
     pub fn attach_current(&self) -> io::Result<()> {
-        fs::write(&self.procs, b"0")
+        fs::write(&self.inner.procs, b"0")
     }
 
     /// 原子冻结/解冻整棵子树。
     pub fn set_frozen(&self, frozen: bool) -> io::Result<()> {
-        fs::write(&self.freeze, if frozen { b"1" } else { b"0" })
+        fs::write(&self.inner.freeze, if frozen { b"1" } else { b"0" })
     }
 
     pub fn dir(&self) -> &Path {
-        &self.dir
+        &self.inner.dir
     }
 }
 
-impl Drop for CgroupFreezer {
+impl Drop for CgroupInner {
     fn drop(&mut self) {
-        // 进程退出后 cgroup 变空，remove_dir 才可能成功；失败不影响主流程。
+        // 所有句柄都释放后才走到这里；cgroup 仍非空时 remove_dir 失败，留给内核/下次启动。
         let _ = fs::remove_dir(&self.dir);
     }
 }
@@ -242,6 +253,17 @@ mod tests {
         let created = CgroupFreezer::create();
         std::env::remove_var("MIXUM_CGROUP_ROOT");
         assert!(created.is_none());
+    }
+
+    #[test]
+    fn clone_drop_does_not_remove_shared_cgroup_dir() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let owner = CgroupFreezer::at(path.clone());
+        let temporary = owner.clone();
+        drop(temporary);
+        assert!(path.exists(), "临时句柄释放不应删除共享 cgroup 目录");
+        drop(owner);
     }
 
     #[test]
