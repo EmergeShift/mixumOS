@@ -237,7 +237,9 @@ mod tests {
         let spec = find("claude-code").unwrap();
         let script = install_script_with(spec, None);
         assert!(script.starts_with("set -e\n"));
-        assert!(script.contains("npm install -g --prefix \"$HOME/.local\" @anthropic-ai/claude-code"));
+        assert!(
+            script.contains("npm install -g --prefix \"$HOME/.local\" @anthropic-ai/claude-code")
+        );
         assert!(script.contains("$HOME/.mixum/agents/claude-code/PROMPT.md"));
         assert!(script.contains("MIXUM_PROMPT_EOF"));
         let opencode = install_script_with(find("opencode").unwrap(), None);
