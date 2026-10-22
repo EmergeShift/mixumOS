@@ -322,3 +322,37 @@ fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_tags_merges_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = Tree::open(dir.path()).unwrap();
+        let node = tree.add(TreeNode::new("n1", "", "main", "disk")).unwrap();
+        let mut tags = BTreeMap::new();
+        tags.insert("base".into(), "node22:v1".into());
+        tags.insert("baseDigest".into(), "sha256:abc".into());
+        tree.set_tags(&node.id, &tags).unwrap();
+        let loaded = tree.get(&node.id).unwrap();
+        assert_eq!(
+            loaded.tags.get("base").map(String::as_str),
+            Some("node22:v1")
+        );
+        assert_eq!(
+            loaded.tags.get("baseDigest").map(String::as_str),
+            Some("sha256:abc")
+        );
+        let mut more = BTreeMap::new();
+        more.insert("origin".into(), "host-a".into());
+        tree.set_tags(&node.id, &more).unwrap();
+        let loaded = tree.get(&node.id).unwrap();
+        assert_eq!(loaded.tags.len(), 3);
+        assert_eq!(
+            loaded.tags.get("origin").map(String::as_str),
+            Some("host-a")
+        );
+    }
+}
