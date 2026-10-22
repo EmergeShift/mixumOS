@@ -37,3 +37,7 @@ required-features = ["real-snapshot"]
 default = ["real-snapshot"]
 # 接入真实快照引擎(mixum-snapshot crate);内存桩保留,--no-default-features 可用。
 real-snapshot = ["dep:mixum-snapshot", "dep:mixum-mart"]
+
+# Linux 专用：Landlock 无特权目录白名单（5.13+）。其它平台不编译该依赖。
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
