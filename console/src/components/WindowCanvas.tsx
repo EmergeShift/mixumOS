@@ -84,6 +84,7 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const openWindow = useStore((s) => s.openWindow)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const imeRef = useRef<HTMLTextAreaElement>(null)
   const latestRef = useRef<ProtocolVideoFrame | null>(null)
   const decodedRef = useRef<VideoFrame | null>(null)
   const decoderRef = useRef<H264Decoder | null>(null)
@@ -289,6 +290,16 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
     if (modeRef.current !== 'user') return
     const p = toPhys(e)
     if (!p) return
+    // 把隐藏输入框放到点击处:系统输入法候选窗跟随指针,组合结果
+    // 通过 compositionend/input 以 text 事件发给远端。
+    const ime = imeRef.current
+    const canvas = canvasRef.current
+    if (action === 'press' && ime && canvas) {
+      const r = canvas.getBoundingClientRect()
+      ime.style.left = `${e.clientX - r.left}px`
+      ime.style.top = `${e.clientY - r.top}px`
+      ime.focus({ preventScroll: true })
+    }
     const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left'
     void client
       .input({ window: win.id, type: 'pointer_button', button, action })
@@ -312,6 +323,8 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
     if (modeRef.current !== 'user') return
     // 浏览器保留键放行
     if (e.key === 'F5' || e.key === 'F11' || e.key === 'F12') return
+    // 输入法组合中:按键交给 IME,不发给远端
+    if (e.nativeEvent.isComposing || e.key === 'Process') return
     const keysym = toKeysym(e.nativeEvent)
     if (!keysym) return
     if (action === 'press' && e.repeat) return
@@ -327,13 +340,36 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
     e.preventDefault()
   }
 
+  function sendText(text: string) {
+    if (!text || modeRef.current !== 'user') return
+    void client.input({ window: win.id, type: 'text', text }).catch(() => {})
+  }
+
+  function onImeCompositionEnd(e: React.CompositionEvent<HTMLTextAreaElement>) {
+    const text = e.data
+    e.currentTarget.value = ''
+    sendText(text)
+  }
+
+  function onImeInput(e: React.FormEvent<HTMLTextAreaElement>) {
+    const el = e.currentTarget
+    const text = el.value
+    el.value = ''
+    const composing = (e.nativeEvent as InputEvent).isComposing
+    // ASCII 单字符已由 keydown 以按键形式发送,这里只补非 ASCII/多字符
+    // (输入法提交、粘贴、语音输入等)。
+    if (composing || !text) return
+    if (text.length === 1 && text.charCodeAt(0) < 0x7f) return
+    sendText(text)
+  }
+
   async function takeover(action: 'claim' | 'release', force = false) {
     try {
       if (force && !window.confirm('agent 正持有输入,强制接管会让 agent 失去输入。继续?')) return
       await client.takeover(win.id, action, force)
       await refreshWindows()
       showToast(action === 'claim' ? '已接管,点击画布聚焦后可打字' : '已释放')
-      canvasRef.current?.focus()
+      if (action === 'claim') imeRef.current?.focus()
     } catch (err) {
       showToast(`接管操作失败:${msg(err)}`, 'error')
     }
@@ -376,7 +412,12 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
         )}
       </div>
       {error && <div className="canvas-error">附流失败:{error}</div>}
-      <div className="canvas-wrap" onContextMenu={(e) => canInput && e.preventDefault()}>
+      <div
+        className="canvas-wrap"
+        onContextMenu={(e) => canInput && e.preventDefault()}
+        onKeyDown={(e) => onKey(e, 'press')}
+        onKeyUp={(e) => onKey(e, 'release')}
+      >
         <canvas
           ref={canvasRef}
           tabIndex={0}
@@ -385,8 +426,18 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
           onPointerDown={(e) => onPointerButton(e, 'press')}
           onPointerUp={(e) => onPointerButton(e, 'release')}
           onWheel={onWheel}
-          onKeyDown={(e) => onKey(e, 'press')}
-          onKeyUp={(e) => onKey(e, 'release')}
+        />
+        <textarea
+          ref={imeRef}
+          className="ime-input"
+          aria-label="输入法输入"
+          tabIndex={-1}
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          onCompositionEnd={onImeCompositionEnd}
+          onInput={onImeInput}
+          onPaste={(e) => e.preventDefault()}
         />
         {!info && !error && <div className="canvas-hint">等待第一帧…</div>}
         {info && !canInput && (

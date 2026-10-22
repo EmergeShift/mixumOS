@@ -1522,6 +1522,17 @@ impl Session {
         }
         let p = payload_value(env);
         let id = p.get("window").and_then(Value::as_u64).unwrap_or_default() as u32;
+        if p.get("type").and_then(Value::as_str) == Some("text") {
+            let ok = p
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty() && t.len() <= 8192);
+            if !ok {
+                self.err(env, ErrCode::BadRequest, "text 为空或超长(上限 8192 字节)")
+                    .await;
+                return;
+            }
+        }
         if !self
             .server
             .authorizer

@@ -803,3 +803,17 @@ textarea {
     height: 46%;
   }
 }
+
+/* 隐藏的输入法接收框:定位到画布点击处,让系统候选窗跟随指针。
+   组合结果经 compositionend/input 以 display.input text 发给远端。 */
+.canvas-wrap .ime-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  pointer-events: none;
+}

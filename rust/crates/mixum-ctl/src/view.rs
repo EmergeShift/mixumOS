@@ -31,11 +31,11 @@ load();setInterval(load,2000);
 </script>"#;
 
 const VIEW_HTML: &str = r#"<!doctype html><meta charset=utf-8><title>mixum 视图</title>
-<style>body{font:13px system-ui;margin:0;background:#111;color:#eee;display:flex;flex-direction:column;height:100vh}#bar{padding:.3rem .6rem;background:#1a1a1a;border-bottom:1px solid #333;white-space:nowrap;overflow:hidden;display:flex;gap:.5rem;align-items:center}#title{flex:1;overflow:hidden;text-overflow:ellipsis}.badge{font-size:11px;padding:.1rem .4rem;border-radius:3px;background:#444}.badge.user{background:#2a6e2a}.badge.agent{background:#7a2a2a}#tk{padding:.2rem .6rem}#stage{position:relative;display:inline-block;align-self:center;max-width:100%;background:#222;line-height:0;overflow:auto}#c{display:block;max-width:100%;background:#222;outline:none}#o{position:absolute;left:0;top:0;pointer-events:none}</style>
+<style>body{font:13px system-ui;margin:0;background:#111;color:#eee;display:flex;flex-direction:column;height:100vh}#bar{padding:.3rem .6rem;background:#1a1a1a;border-bottom:1px solid #333;white-space:nowrap;overflow:hidden;display:flex;gap:.5rem;align-items:center}#title{flex:1;overflow:hidden;text-overflow:ellipsis}.badge{font-size:11px;padding:.1rem .4rem;border-radius:3px;background:#444}.badge.user{background:#2a6e2a}.badge.agent{background:#7a2a2a}#tk{padding:.2rem .6rem}#stage{position:relative;display:inline-block;align-self:center;max-width:100%;background:#222;line-height:0;overflow:auto}#c{display:block;max-width:100%;background:#222;outline:none}#o{position:absolute;left:0;top:0;pointer-events:none}#i{position:absolute;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none;overflow:hidden;pointer-events:none}</style>
 <div id=bar><span id=title>窗口 __ID__ 连接中…</span><span id=mode class=badge>free</span><button id=tk>接管</button></div>
-<div id=stage><canvas id=c tabindex=0></canvas><canvas id=o></canvas></div>
+<div id=stage><canvas id=c tabindex=0></canvas><canvas id=o></canvas><textarea id=i aria-label="输入法输入" autocomplete=off autocorrect=off spellcheck=false></textarea></div>
 <script>
-const id=__ID__, c=document.querySelector('#c'), x=c.getContext('2d'), o=document.querySelector('#o'), ox=o.getContext('2d'),
+const id=__ID__, c=document.querySelector('#c'), x=c.getContext('2d'), o=document.querySelector('#o'), ox=o.getContext('2d'), ime=document.querySelector('#i'),
       bar=document.querySelector('#bar'), modeEl=document.querySelector('#mode'), tk=document.querySelector('#tk');
 let mode='free', stream=null, haveFull=false;
 const pending=new Map();
@@ -55,6 +55,7 @@ tk.onclick=async()=>{
     const force=mode==='agent'?confirm('agent 正持有输入,强制接管会让 agent 失去输入。继续?'):false;
     if(mode==='agent'&&!force)return;
     setMode((await ctl('display.takeover',{window:id,action:'claim',...(force?{force:true}:{})})).mode??'user');
+    ime.focus({preventScroll:true});
   }catch(e){bar.textContent=`${id}: ${e.message}`;}
 };
 async function pollMode(){
@@ -79,18 +80,25 @@ c.addEventListener('pointermove',e=>{
   const p=toPhys(e);motion=p;
   if(!motionRaf){motionRaf=true;requestAnimationFrame(flushMotion);setTimeout(flushMotion,120);}
 });
-c.addEventListener('pointerdown',e=>{c.focus();sendInput({type:'pointer_button',button:e.button===2?'right':e.button===1?'middle':'left',action:'press'});e.preventDefault();});
+c.addEventListener('pointerdown',e=>{const r=c.getBoundingClientRect();ime.style.left=(e.clientX-r.left)+'px';ime.style.top=(e.clientY-r.top)+'px';ime.focus({preventScroll:true});sendInput({type:'pointer_button',button:e.button===2?'right':e.button===1?'middle':'left',action:'press'});e.preventDefault();});
 c.addEventListener('pointerup',e=>sendInput({type:'pointer_button',button:e.button===2?'right':e.button===1?'middle':'left',action:'release'}));
 c.addEventListener('wheel',e=>{sendInput({type:'pointer_axis',action:e.deltaY<0?'scroll_up':'scroll_down'});e.preventDefault();});
 c.addEventListener('contextmenu',e=>e.preventDefault());
+function sendText(t){if(!t||mode!=='user')return;ctl('display.input',{window:id,type:'text',text:t}).catch(()=>{});}
+ime.addEventListener('compositionend',e=>{const t=e.data;ime.value='';sendText(t);});
+ime.addEventListener('input',e=>{const t=ime.value;ime.value='';if(e.isComposing||!t)return;
+  if(t.length===1&&t.charCodeAt(0)<0x7f)return;
+  sendText(t);});
 document.addEventListener('keydown',e=>{
   if(e.key==='F5'||e.key==='F11'||e.key==='F12')return;
+  if(e.isComposing||e.key==='Process')return;
   const k=keysym(e);if(!k||mode!=='user')return;
   if(!e.repeat)sendInput({type:'key',keysym:k,action:'press',mods:mods(e)});
   e.preventDefault();
 });
 document.addEventListener('keyup',e=>{
   if(e.key==='F5'||e.key==='F11'||e.key==='F12')return;
+  if(e.isComposing||e.key==='Process')return;
   const k=keysym(e);if(!k||mode!=='user')return;
   sendInput({type:'key',keysym:k,action:'release',mods:mods(e)});
   e.preventDefault();

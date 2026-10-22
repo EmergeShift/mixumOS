@@ -168,7 +168,7 @@ snapshots.md §4。`guiSessions` 是 OS 侧扩展（restore 后重放窗口）�
 | display.list | — | `{ windows: [Window] }` |
 | display.attach | `{ window, fps?, codec?: "jpeg"\|"h264"\|"png", quality?: 1-100 }` | `{ window, codec, width, height, fps }`(codec = 实际编码,此后二进制 video 帧) |
 | display.detach | `{ window }` | `{ window }` |
-| display.input | `{ window, type, … }` | `{ ok: true }` |
+| display.input | `{ window, type, … }`;type = `pointer_motion`/`pointer_button`/`pointer_axis`/`key`/`text`;`text` 为宿主输入法已提交的字符串(≤8192 字节),经服务端 text-input-v3 交给焦点窗口 | `{ ok: true }` |
 | display.takeover | `{ window, action: claim\|release, force? }` | `{ mode }` |
 | display.windows | — | `{ subscribed }`(此后推送窗口增删/改名) |
 
