@@ -1161,6 +1161,23 @@ impl Session {
         }
         let p = payload_value(env);
         let kind = p.get("kind").and_then(Value::as_str).unwrap_or("disk");
+        let mut tags = std::collections::BTreeMap::new();
+        if let Some(base) = std::env::var("MIXUM_BASE").ok().filter(|v| !v.is_empty()) {
+            tags.insert("base".into(), base);
+        }
+        if let Some(digest) = std::env::var("MIXUM_BASE_DIGEST")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            tags.insert("baseDigest".into(), digest);
+        }
+        if let Some(extra) = p.get("tags").and_then(Value::as_object) {
+            for (key, value) in extra {
+                if let Some(value) = value.as_str() {
+                    tags.insert(key.clone(), value.to_owned());
+                }
+            }
+        }
         match self
             .server
             .snapshots
@@ -1173,7 +1190,16 @@ impl Session {
             )
             .await
         {
-            Ok(node) => self.reply(env, serde_json::to_value(node).unwrap()).await,
+            Ok(mut node) => {
+                if !tags.is_empty() {
+                    if let Err(error) = self.server.snapshots.annotate(&node.id, &tags).await {
+                        self.err(env, ErrCode::Internal, &error.to_string()).await;
+                        return;
+                    }
+                    node.tags = tags;
+                }
+                self.reply(env, serde_json::to_value(node).unwrap()).await
+            }
             Err(e) => self.err(env, ErrCode::Internal, &e.to_string()).await,
         }
     }
@@ -1191,7 +1217,34 @@ impl Session {
             return;
         }
         let p = payload_value(env);
-        match self.server.snapshots.restore(p.get("node").and_then(Value::as_str).unwrap_or_default(), p.get("strategy").and_then(Value::as_str).unwrap_or("inplace"), p.get("label").and_then(Value::as_str)).await { Ok(r) => self.reply(env, json!({"restoredTo":r.restored_to,"newBranch":r.new_branch,"newNode":r.new_node})).await, Err(e) => self.err(env, ErrCode::SnapshotInvalid, &e.to_string()).await }
+        let node = p.get("node").and_then(Value::as_str).unwrap_or_default();
+        // A base image is part of the filesystem contract: refuse to restore a
+        // snapshot recorded against a different base instead of silently mixing
+        // package trees.
+        if let (Ok(current), Ok(tree)) = (
+            std::env::var("MIXUM_BASE_DIGEST"),
+            self.server.snapshots.tree().await,
+        ) {
+            if let Some(required) = tree
+                .nodes
+                .iter()
+                .find(|item| item.id == node)
+                .and_then(|item| item.tags.get("baseDigest"))
+            {
+                if !current.is_empty() && required != &current {
+                    self.err(
+                        env,
+                        ErrCode::SnapshotInvalid,
+                        &format!(
+                            "快照属于 base {required}，当前 base 是 {current}；请先切回同一 base"
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+        match self.server.snapshots.restore(node, p.get("strategy").and_then(Value::as_str).unwrap_or("inplace"), p.get("label").and_then(Value::as_str)).await { Ok(r) => self.reply(env, json!({"restoredTo":r.restored_to,"newBranch":r.new_branch,"newNode":r.new_node})).await, Err(e) => self.err(env, ErrCode::SnapshotInvalid, &e.to_string()).await }
     }
     /// 导出节点为 `.mart`，文件落在 work_root/transfers，客户端用 file.get 下载。
     async fn snap_export(&mut self, env: &Envelope) {

@@ -161,6 +161,24 @@ impl Tree {
         Ok(node)
     }
 
+    /// Merge tags into an existing node (base digest, provenance, ...).
+    pub fn set_tags(
+        &self,
+        id: &str,
+        tags: &BTreeMap<String, String>,
+    ) -> Result<TreeNode, TreeError> {
+        let raw = self
+            .nodes
+            .get(id.as_bytes())?
+            .ok_or_else(|| TreeError::NotFound(id.to_owned()))?;
+        let mut node: TreeNode = serde_json::from_slice(&raw)?;
+        node.tags.extend(tags.clone());
+        self.nodes
+            .insert(node.id.as_bytes(), serde_json::to_vec(&node)?)?;
+        self.db.flush()?;
+        Ok(node)
+    }
+
     pub fn get(&self, id: &str) -> Result<TreeNode, TreeError> {
         self.nodes
             .get(id.as_bytes())?

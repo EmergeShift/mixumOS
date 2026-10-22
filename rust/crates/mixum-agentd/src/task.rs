@@ -895,6 +895,20 @@ impl Engine {
                         )
                         .await
                     {
+                        let mut tags = std::collections::BTreeMap::new();
+                        if let Ok(base) = std::env::var("MIXUM_BASE") {
+                            if !base.is_empty() {
+                                tags.insert("base".into(), base);
+                            }
+                        }
+                        if let Ok(digest) = std::env::var("MIXUM_BASE_DIGEST") {
+                            if !digest.is_empty() {
+                                tags.insert("baseDigest".into(), digest);
+                            }
+                        }
+                        if !tags.is_empty() {
+                            let _ = snap.annotate(&node.id, &tags).await;
+                        }
                         task.set_pre_snap(node.id).await;
                     }
                 }
