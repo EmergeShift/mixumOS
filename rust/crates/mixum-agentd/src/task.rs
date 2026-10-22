@@ -877,8 +877,22 @@ impl Engine {
                     } else {
                         policy.kind.as_str()
                     };
+                    let label = std::env::var("MIXUM_BASE").map(|base| {
+                        let digest = std::env::var("MIXUM_BASE_DIGEST").unwrap_or_default();
+                        if digest.is_empty() {
+                            format!("任务前置无感快照 base={base}")
+                        } else {
+                            format!("任务前置无感快照 base={base}@{digest}")
+                        }
+                    });
                     if let Ok(node) = snap
-                        .create(kind, Some("任务前置无感快照"), None, None, true)
+                        .create(
+                            kind,
+                            Some(label.as_deref().unwrap_or("任务前置无感快照")),
+                            None,
+                            None,
+                            true,
+                        )
                         .await
                     {
                         task.set_pre_snap(node.id).await;
