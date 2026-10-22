@@ -21,7 +21,7 @@ systemd 与包管理,一键导入:
 bash dist/os/wsl-import.sh            # 或按上文手工四步
 ```
 
-**已验证(2026-10-17,本机实测)**:rootfs 直导 → systemd 激活 →
+**历史验证(2026-10-17,本机实测;本次 PR 未重新跑完整导入流程)**:rootfs 直导 → systemd 激活 →
 mixumd 服务化(User=mixum,StateDirectory)→ Windows 直连
 wss://127.0.0.1:7601(WSL2 localhost 转发)→ 真实快照引擎建快照 →
 改动 → 原地回退 → 文件物化逐字一致;kernel 字段如实记录为
