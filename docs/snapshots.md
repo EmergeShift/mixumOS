@@ -94,6 +94,10 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
   仍为默认,按场景扩展后再评估放宽;
 - v1 限制:纯 memory 快照不允许恢复(必须配合 disk);
   进程持有的外部 fd(unix socket 到 mixumd)由任务引擎在快照前规范化。
+- 同机回退:restore 先调用宿主的 `restore_prepare`(agentd 终止当前任务进程树),
+  再落地文件并执行 `criu restore`;跨设备仍拒绝 memory/hybrid。
+- 任务 leader pid 由 `LocalSandbox` 写入共享 AtomicI32,快照引擎在
+  memory/hybrid 创建前读取;没有运行中的任务时 memory 快照直接报错。
 
 ## 7. 跨设备流转
 

@@ -93,7 +93,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             })
             .map_err(std::io::Error::other)?;
     }
-    let sandbox = Arc::new(LocalSandbox::new());
+    let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let sandbox = Arc::new(LocalSandbox::new().with_leader(Arc::clone(&leader)));
     // broker 提前创建：快照冻结钩子需要同步通知 comp 暂停捕获。
     let broker = Broker::new("/run/mixum/display.sock");
 
@@ -124,7 +125,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             freeze_broker.try_notify_comps(serde_json::json!({"type": "snapshot.thaw"}));
             result
         }));
-        let adapter = mixum_agentd::snapshot::RealSnapshotEngine::from_engine(engine);
+        // 同机回退：CRIU restore 之前先终止当前任务树，避免恢复出重复进程。
+        let kill_sandbox = Arc::clone(&sandbox);
+        engine.restore_prepare = Some(Box::new(move || {
+            kill_sandbox.kill_all();
+            Ok(())
+        }));
+        let mut adapter = mixum_agentd::snapshot::RealSnapshotEngine::from_engine(engine);
+        adapter.set_leader(Arc::clone(&leader));
         let backend = Arc::new(mixum_agentd::sync::SyncBackend::new(adapter.shared()));
         (Arc::new(adapter) as Arc<dyn SnapshotEngine>, Some(backend))
     };

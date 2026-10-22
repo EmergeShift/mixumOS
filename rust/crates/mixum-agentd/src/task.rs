@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,6 +27,8 @@ pub const INPUT_TIMEOUT_MS: u64 = 120_000;
 pub struct LocalSandbox {
     // std 锁:冻结钩子在同步上下文(FreezeFn)里也要读进程组,锁内无 await。
     pgids: Arc<std::sync::Mutex<Vec<i32>>>,
+    // 当前任务树的首领 pid（快照引擎 CRIU dump 用）。
+    leader: Option<Arc<AtomicI32>>,
 }
 
 impl Default for LocalSandbox {
@@ -38,6 +40,28 @@ impl LocalSandbox {
     pub fn new() -> Self {
         Self {
             pgids: Arc::new(std::sync::Mutex::new(Vec::new())),
+            leader: None,
+        }
+    }
+
+    /// 绑定一个共享的 leader pid，供快照引擎读取当前任务树首领。
+    pub fn with_leader(mut self, leader: Arc<AtomicI32>) -> Self {
+        self.leader = Some(leader);
+        self
+    }
+
+    /// 终止全部任务进程组（同机 CRIU 恢复前调用）。
+    pub fn kill_all(&self) {
+        let pgids = self.pgids.lock().expect("sandbox 进程组锁").clone();
+        for pgid in pgids {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-pgid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        self.pgids.lock().expect("sandbox 进程组锁").clear();
+        if let Some(leader) = &self.leader {
+            leader.store(0, Ordering::SeqCst);
         }
     }
 
@@ -164,6 +188,9 @@ impl Sandbox for LocalSandbox {
     async fn set_task_pid(&self, task: &Task, pid: i32) {
         self.pgids.lock().expect("sandbox 进程组锁").push(pid);
         task.push_pgid(pid).await;
+        if let Some(leader) = &self.leader {
+            leader.store(pid, Ordering::SeqCst);
+        }
     }
 
     async fn release_task_pid(&self, task: &Task, pid: i32) {
@@ -172,6 +199,11 @@ impl Sandbox for LocalSandbox {
             .expect("sandbox 进程组锁")
             .retain(|current| *current != pid);
         task.release_pgid(pid).await;
+        if let Some(leader) = &self.leader {
+            if leader.load(Ordering::SeqCst) == pid {
+                leader.store(0, Ordering::SeqCst);
+            }
+        }
     }
 }
 

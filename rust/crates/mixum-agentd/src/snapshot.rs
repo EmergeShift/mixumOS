@@ -7,6 +7,7 @@ use crate::wire::{SnapNode, SnapTreeResponse};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -255,6 +256,8 @@ pub type SharedEngine = Arc<std::sync::Mutex<mixum_snapshot::Engine>>;
 #[cfg(feature = "real-snapshot")]
 pub struct RealSnapshotEngine {
     engine: SharedEngine,
+    /// 当前任务树首领 pid（由 LocalSandbox 写入，CRIU dump 用）。
+    leader: Option<Arc<AtomicI32>>,
 }
 
 #[cfg(feature = "real-snapshot")]
@@ -266,16 +269,25 @@ impl RealSnapshotEngine {
     pub fn from_engine(engine: mixum_snapshot::Engine) -> Self {
         Self {
             engine: Arc::new(std::sync::Mutex::new(engine)),
+            leader: None,
         }
     }
 
     /// 包住既有共享句柄(与 SyncBackend 共用同一引擎实例)。
     pub fn from_shared(engine: SharedEngine) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            leader: None,
+        }
     }
 
     pub fn shared(&self) -> SharedEngine {
         self.engine.clone()
+    }
+
+    /// 绑定任务 leader pid 来源。
+    pub fn set_leader(&mut self, leader: Arc<AtomicI32>) {
+        self.leader = Some(leader);
     }
 
     /// 快照冻结回调(冻结全部任务进程组,快照点即冻结点)。
@@ -342,6 +354,19 @@ impl SnapshotEngine for RealSnapshotEngine {
         auto: bool,
     ) -> Result<SnapNode, SnapshotError> {
         let mut engine = self.engine.lock().expect("快照引擎锁");
+        if kind == "memory" || kind == "hybrid" {
+            let pid = self
+                .leader
+                .as_ref()
+                .map(|leader| leader.load(Ordering::SeqCst))
+                .unwrap_or(0);
+            engine.set_task_pid(pid);
+            if pid > 0 {
+                engine.set_dump_roots(std::iter::once(pid).chain(compositor_pids()));
+            } else {
+                engine.set_dump_roots(Vec::<i32>::new());
+            }
+        }
         let label = label.unwrap_or_default();
         let node = match parent.filter(|p| !p.is_empty()) {
             Some(parent) => engine.snapshot_on_branch(kind, label, auto, parent),
@@ -443,6 +468,34 @@ impl SnapshotEngine for RealSnapshotEngine {
     }
 }
 
+fn compositor_pids() -> Vec<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(pid) = name.to_str().and_then(|value| value.parse::<i32>().ok()) else {
+                continue;
+            };
+            let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
+                continue;
+            };
+            if comm.trim() == "mixcomp" {
+                out.push(pid);
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,5 +564,39 @@ mod tests {
             engine.delete(&second.id).await.unwrap();
             assert_eq!(engine.tree().await.unwrap().nodes.len(), 1);
         }
+    }
+
+    #[cfg(feature = "real-snapshot")]
+    #[tokio::test]
+    async fn real_engine_uses_shared_leader_for_memory_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicI32;
+
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let script = tools.path().join("criu");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut engine = mixum_snapshot::Engine::open(mixum_snapshot::EngineOptions {
+            data_dir: data.path().into(),
+            root: root.path().into(),
+            skip: vec![],
+            encrypt: false,
+        })
+        .unwrap();
+        engine.criu = Some(mixum_snapshot::Criu::from_binary(script));
+        let mut adapter = RealSnapshotEngine::from_engine(engine);
+        let shared = adapter.shared();
+        let leader = Arc::new(AtomicI32::new(4321));
+        adapter.set_leader(Arc::clone(&leader));
+
+        let node = adapter
+            .create("memory", Some("mem"), None, None, false)
+            .await
+            .unwrap();
+        let stored = shared.lock().unwrap().tree.get(&node.id).unwrap();
+        assert!(stored.memory.is_some(), "memory 快照应带 memory 清单");
     }
 }

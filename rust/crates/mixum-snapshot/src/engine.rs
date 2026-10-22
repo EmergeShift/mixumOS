@@ -8,11 +8,14 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 
 pub type FreezeFn =
     Box<dyn FnMut(&mut dyn FnMut() -> Result<(), EngineError>) -> Result<(), EngineError> + Send>;
+/// restore 前的准备动作（终止/清理当前任务进程）。
+pub type PrepareFn = Box<dyn FnMut() -> Result<(), EngineError> + Send>;
 pub type DiffResult = (Vec<String>, Vec<String>, Vec<String>, usize);
 
 /// GC 保护窗口:窗口内写入的块即使未被树引用也不清(sweep 按 mtime 跳过),
@@ -58,7 +61,11 @@ pub struct Engine {
     pub root: PathBuf,
     pub skip: Vec<String>,
     pub freeze: Option<FreezeFn>,
+    /// restore 前调用：同机回退要先把当前任务树停掉，避免 CRIU 恢复出重复进程。
+    pub restore_prepare: Option<PrepareFn>,
     task_pid: Option<i32>,
+    /// 显式 dump 根（任务 + 合成器等）；为空时退回 task_pid。
+    dump_roots: Vec<i32>,
     operation_lock: Arc<Mutex<()>>,
 }
 
@@ -87,7 +94,9 @@ impl Engine {
             root: opts.root,
             skip: opts.skip,
             freeze: None,
+            restore_prepare: None,
             task_pid: None,
+            dump_roots: Vec::new(),
             operation_lock: Arc::new(Mutex::new(())),
         };
         if engine.tree.head()?.1.is_none() {
@@ -96,7 +105,23 @@ impl Engine {
         Ok(engine)
     }
     pub fn set_task_pid(&mut self, pid: i32) {
-        self.task_pid = Some(pid);
+        self.task_pid = (pid > 0).then_some(pid);
+    }
+
+    /// 显式指定 dump 根；GUI 快照应同时包含任务树与合成器。
+    pub fn set_dump_roots(&mut self, pids: impl IntoIterator<Item = i32>) {
+        let mut roots: Vec<i32> = pids.into_iter().filter(|pid| *pid > 0).collect();
+        roots.sort_unstable();
+        roots.dedup();
+        self.dump_roots = roots;
+    }
+
+    fn effective_dump_roots(&self) -> Vec<i32> {
+        if self.dump_roots.is_empty() {
+            self.task_pid.into_iter().collect()
+        } else {
+            self.dump_roots.clone()
+        }
     }
     pub fn snapshot(
         &mut self,
@@ -149,7 +174,8 @@ impl Engine {
         let do_mem = kind == KIND_MEMORY || kind == KIND_HYBRID;
         // pid=0(无任务运行或驱动未注册首领进程)时退化为 disk:
         // CRIU 不接受 --tree 0;纯 memory 快照仍要求 CRIU 与 pid 就绪。
-        if kind == KIND_MEMORY && (self.criu.is_none() || self.task_pid.is_none()) {
+        let dump_roots = self.effective_dump_roots();
+        if kind == KIND_MEMORY && (self.criu.is_none() || dump_roots.is_empty()) {
             return Err(CriuError::Unavailable.into());
         }
         let mut action = || {
@@ -159,13 +185,19 @@ impl Engine {
                 node.chunks += m.chunks().len();
                 node.disk = Some(m);
             }
-            if do_mem && self.criu.is_some() && self.task_pid.map(|p| p > 0) == Some(true) {
-                let dir = std::env::temp_dir().join(format!("mixum-criu-{}", node.id));
-                self.criu.as_ref().ok_or(CriuError::Unavailable)?.dump(
-                    self.task_pid.unwrap_or(0),
-                    &dir,
-                    false,
-                )?;
+            if do_mem && self.criu.is_some() && !dump_roots.is_empty() {
+                let dir = std::env::temp_dir().join(format!(
+                    "mixum-criu-{}-{}",
+                    std::process::id(),
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or_default()
+                ));
+                self.criu
+                    .as_ref()
+                    .ok_or(CriuError::Unavailable)?
+                    .dump_roots(&dump_roots, &dir, false)?;
                 let (m, stats) = Manifest::pack_directory(&dir, &self.store, &[])?;
                 node.size_bytes += stats.bytes_logical;
                 node.chunks += m.chunks().len();
@@ -212,9 +244,14 @@ impl Engine {
                 current: std::env::consts::ARCH.into(),
             });
         }
+        if let Some(prepare) = self.restore_prepare.as_mut() {
+            prepare()?;
+        }
         // 恢复期间必须先让任务进程组停住：clear_root 会删除工作区，
         // 若有进程仍在读写就是数据竞争。freeze 回调由宿主注入
         // （agentd 里是 Sandbox::freeze_all → SIGSTOP/SIGCONT）。
+        let memory = node.memory.clone();
+        let criu = self.criu.as_ref();
         let manifest = node.disk.as_ref().expect("checked above");
         let root = &self.root;
         let store = &self.store;
@@ -222,6 +259,22 @@ impl Engine {
         let mut action = || -> Result<(), EngineError> {
             clear_root(root, skip)?;
             manifest.materialize(store, root)?;
+            if let Some(memory) = &memory {
+                let dir = std::env::temp_dir().join(format!(
+                    "mixum-restore-{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or_default()
+                ));
+                fs::create_dir_all(&dir)?;
+                memory.materialize(store, &dir)?;
+                let result = criu
+                    .ok_or(EngineError::Criu(CriuError::Unavailable))?
+                    .restore(&dir);
+                let _ = fs::remove_dir_all(&dir);
+                result?;
+            }
             Ok(())
         };
         if let Some(freeze) = self.freeze.as_mut() {
