@@ -45,7 +45,10 @@ static void enable_cb(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct mixcomp_text_input *ti = wl_container_of(listener, ti, enable);
 	ti->enabled = true;
-	ti->window = ti->server->focus_window;
+	// 只有焦点窗口属于同一个 Wayland client 才能 enter；否则会把别的
+	// client 的 surface 塞进这个 text-input 对象，协议上是非法的。
+	ti->window = same_client(ti, ti->server->focus_window)
+		? ti->server->focus_window : NULL;
 	wlr_log(WLR_DEBUG, "text-input enable(焦点窗口 %u)",
 			ti->window != NULL ? ti->window->id : 0);
 	enter_if_focused(ti);
@@ -132,7 +135,7 @@ void text_input_commit(struct mixcomp_server *s, struct mixcomp_window *w,
 	}
 	struct mixcomp_text_input *ti;
 	wl_list_for_each(ti, &s->text_inputs, link) {
-		if (!ti->enabled || ti->window != w) {
+		if (!ti->enabled || ti->window != w || !same_client(ti, w)) {
 			continue;
 		}
 		wlr_log(WLR_DEBUG, "text-input commit 窗口 %u: %u 字节", w->id,
