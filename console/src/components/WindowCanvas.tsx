@@ -104,8 +104,18 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const frozenRef = useRef(false)
   const [dragging, setDragging] = useState(false)
   const [audioOn, setAudioOn] = useState(false)
-  const [audioFrames, setAudioFrames] = useState(0)
-  const audioRef = useRef<{ ctx: AudioContext; next: number; frames: number } | null>(null)
+  const [volume, setVolume] = useState(0.8)
+  const [audioStats, setAudioStats] = useState({ frames: 0, drops: 0, lead: 0 })
+  const audioRef = useRef<{
+    ctx: AudioContext
+    gain: GainNode
+    next: number
+    frames: number
+    lastSeq: number
+    drops: number
+  } | null>(null)
+  const volumeRef = useRef(volume)
+  volumeRef.current = volume
 
   modeRef.current = win.mode
 
@@ -205,15 +215,23 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
           out[i] = chunk.pcm[i * chunk.channels + ch] / 32768
         }
       }
+      if (a.lastSeq >= 0 && chunk.seq !== a.lastSeq + 1) a.drops += 1
+      a.lastSeq = chunk.seq
       const src = a.ctx.createBufferSource()
       src.buffer = buf
-      src.connect(a.ctx.destination)
+      src.connect(a.gain)
       const now = a.ctx.currentTime
       if (a.next < now + 0.02 || a.next > now + 0.5) a.next = now + 0.05
       src.start(a.next)
       a.next += buf.duration
       a.frames += 1
-      if (a.frames % 25 === 0) setAudioFrames(a.frames)
+      if (a.frames % 25 === 0) {
+        setAudioStats({
+          frames: a.frames,
+          drops: a.drops,
+          lead: Math.round((a.next - a.ctx.currentTime) * 1000),
+        })
+      }
     }
     return () => {
       client.onAudio = prev
@@ -422,7 +440,7 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   async function toggleAudio() {
     if (audioOn) {
       setAudioOn(false)
-      setAudioFrames(0)
+      setAudioStats({ frames: 0, drops: 0, lead: 0 })
       const a = audioRef.current
       audioRef.current = null
       await client.audioDetach()
@@ -433,9 +451,12 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
       const fmt = await client.audioAttach()
       const ctx = new AudioContext({ sampleRate: fmt.sampleRate })
       await ctx.resume()
-      audioRef.current = { ctx, next: 0, frames: 0 }
+      const gain = ctx.createGain()
+      gain.gain.value = volumeRef.current
+      gain.connect(ctx.destination)
+      audioRef.current = { ctx, gain, next: 0, frames: 0, lastSeq: -1, drops: 0 }
       setAudioOn(true)
-      setAudioFrames(0)
+      setAudioStats({ frames: 0, drops: 0, lead: 0 })
       showToast(`音频已开启 ${fmt.sampleRate}Hz / ${fmt.channels}ch`)
     } catch (err) {
       showToast(`音频开启失败: ${msg(err)}`, 'error')
@@ -468,7 +489,9 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
         <span className="canvas-meta">
           {info ? `${info.width}×${info.height} · ${info.codec} · ${info.fps}fps` : ''}
           {stats.frames > 0 ? ` · ${stats.frames} 帧 · 最近 ${fmtTime(stats.lastTs)}` : ''}
-          {audioOn ? ` · 音频 ${audioFrames}` : ''}
+          {audioOn
+            ? ` · 音频 ${audioStats.frames} · ${audioStats.lead}ms${audioStats.drops ? ` · 丢 ${audioStats.drops}` : ''}`
+            : ''}
         </span>
         <span className={`mode-badge mode-${win.mode}`}>
           {win.mode === 'agent' ? 'agent 持有' : win.mode === 'user' ? '已接管' : '空闲'}
@@ -477,6 +500,21 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
         <button className="btn btn-small" onClick={() => void toggleAudio()}>
           {audioOn ? '静音' : '音频'}
         </button>
+        {audioOn && (
+          <input
+            className="audio-vol"
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(volume * 100)}
+            title="音量"
+            onChange={(e) => {
+              const v = Number(e.target.value) / 100
+              setVolume(v)
+              if (audioRef.current) audioRef.current.gain.gain.value = v
+            }}
+          />
+        )}
         {win.mode === 'user' ? (
           <button className="btn btn-small" onClick={() => void takeover('release')}>
             释放

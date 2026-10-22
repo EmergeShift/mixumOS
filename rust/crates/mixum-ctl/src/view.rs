@@ -31,13 +31,14 @@ load();setInterval(load,2000);
 </script>"#;
 
 const VIEW_HTML: &str = r#"<!doctype html><meta charset=utf-8><title>mixum 视图</title>
-<style>body{font:13px system-ui;margin:0;background:#111;color:#eee;display:flex;flex-direction:column;height:100vh}#bar{padding:.3rem .6rem;background:#1a1a1a;border-bottom:1px solid #333;white-space:nowrap;overflow:hidden;display:flex;gap:.5rem;align-items:center}#title{flex:1;overflow:hidden;text-overflow:ellipsis}.badge{font-size:11px;padding:.1rem .4rem;border-radius:3px;background:#444}.badge.user{background:#2a6e2a}.badge.agent{background:#7a2a2a}#tk{padding:.2rem .6rem}#stage{position:relative;display:inline-block;align-self:center;max-width:100%;background:#222;line-height:0;overflow:auto}#c{display:block;max-width:100%;background:#222;outline:none}#o{position:absolute;left:0;top:0;pointer-events:none}#i{position:absolute;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none;overflow:hidden;pointer-events:none}</style>
-<div id=bar><span id=title>窗口 __ID__ 连接中…</span><span id=mode class=badge>free</span><button id=tk>接管</button></div>
+<style>body{font:13px system-ui;margin:0;background:#111;color:#eee;display:flex;flex-direction:column;height:100vh}#bar{padding:.3rem .6rem;background:#1a1a1a;border-bottom:1px solid #333;white-space:nowrap;overflow:hidden;display:flex;gap:.5rem;align-items:center}#title{flex:1;overflow:hidden;text-overflow:ellipsis}.badge{font-size:11px;padding:.1rem .4rem;border-radius:3px;background:#444}.badge.user{background:#2a6e2a}.badge.agent{background:#7a2a2a}#tk{padding:.2rem .6rem}#au{padding:.2rem .6rem}#vol{width:90px}#stage{position:relative;display:inline-block;align-self:center;max-width:100%;background:#222;line-height:0;overflow:auto}#c{display:block;max-width:100%;background:#222;outline:none}#o{position:absolute;left:0;top:0;pointer-events:none}#i{position:absolute;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none;overflow:hidden;pointer-events:none}</style>
+<div id=bar><span id=title>窗口 __ID__ 连接中…</span><span id=mode class=badge>free</span><button id=tk>接管</button><button id=au>音频</button><input id=vol type=range min=0 max=100 value=80 title=音量><span id=af class=badge></span></div>
 <div id=stage><canvas id=c tabindex=0></canvas><canvas id=o></canvas><textarea id=i aria-label="输入法输入" autocomplete=off autocorrect=off spellcheck=false></textarea></div>
 <script>
 const id=__ID__, c=document.querySelector('#c'), x=c.getContext('2d'), o=document.querySelector('#o'), ox=o.getContext('2d'), ime=document.querySelector('#i'),
-      bar=document.querySelector('#bar'), modeEl=document.querySelector('#mode'), tk=document.querySelector('#tk');
-let mode='free', stream=null, haveFull=false;
+      bar=document.querySelector('#bar'), modeEl=document.querySelector('#mode'), tk=document.querySelector('#tk'),
+      au=document.querySelector('#au'), vol=document.querySelector('#vol'), af=document.querySelector('#af');
+let mode='free', stream=null, haveFull=false, audio=null;
 const pending=new Map();
 function title(t){document.title=`${t} — mixum`;document.querySelector('#title').textContent=`${id}: ${t}`;}
 function setMode(m){mode=m;modeEl.textContent=m;modeEl.className='badge '+m;tk.textContent=m==='user'?'释放':'接管';}
@@ -48,6 +49,39 @@ function ctl(op,payload){
     pending.set(rid,e=>{clearTimeout(t);e.op&&e.op.endsWith('.err')?rej(new Error(e.payload?.message||op+' 失败')):res(e.payload);});
     stream.send(JSON.stringify({v:1,id:rid,op,payload}));
   });
+}
+function stopAudio(sendDetach){
+  if(audio){const a=audio;audio=null;try{a.ctx.close();}catch(e){}}
+  au.textContent='音频';af.textContent='';
+  if(sendDetach)ctl('audio.detach',{}).catch(()=>{});
+}
+au.onclick=async()=>{
+  if(audio){stopAudio(true);return;}
+  try{
+    const fmt=await ctl('audio.attach',{});
+    const ctx=new AudioContext({sampleRate:fmt.sampleRate});
+    await ctx.resume();
+    const gain=ctx.createGain();gain.gain.value=vol.value/100;gain.connect(ctx.destination);
+    audio={ctx,gain,next:0,frames:0,lastSeq:-1,drops:0,sampleRate:fmt.sampleRate,channels:fmt.channels};
+    au.textContent='静音';
+  }catch(e){bar.textContent=`${id}: 音频 ${e.message}`;}
+};
+vol.oninput=()=>{if(audio)audio.gain.gain.value=vol.value/100;};
+function playAudio(buf){
+  const a=audio;if(!a)return;
+  const b=new Uint8Array(buf);if(b.length<7)return;
+  const seq=new DataView(buf,1,4).getUint32(0,true);
+  const bytes=b.subarray(5);const pcm=new Int16Array(bytes.length>>1);new Uint8Array(pcm.buffer).set(bytes);
+  const frames=pcm.length/a.channels;
+  if(a.lastSeq>=0&&seq!==a.lastSeq+1)a.drops++;
+  a.lastSeq=seq;
+  const ab=a.ctx.createBuffer(a.channels,frames,a.sampleRate);
+  for(let ch=0;ch<a.channels;ch++){const out=ab.getChannelData(ch);for(let i=0;i<frames;i++)out[i]=pcm[i*a.channels+ch]/32768;}
+  const src=a.ctx.createBufferSource();src.buffer=ab;src.connect(a.gain);
+  const now=a.ctx.currentTime;
+  if(a.next<now+0.02||a.next>now+0.5)a.next=now+0.05;
+  src.start(a.next);a.next+=ab.duration;a.frames++;
+  if(a.frames%25===0)af.textContent=`${a.frames}${a.drops?` / 丢${a.drops}`:''}`;
 }
 tk.onclick=async()=>{
   try{
@@ -135,11 +169,13 @@ function stream2(){
   let chain=Promise.resolve();
   s.onopen=()=>{stream=s;};
   s.onmessage=ev=>{
-    const b=new Uint8Array(ev.data);
-    if(b[0]!==1){
-      try{const env=JSON.parse(new TextDecoder().decode(b));const cb=env.replyTo&&pending.get(env.replyTo);if(cb){pending.delete(env.replyTo);cb(env);}}catch(e){}
+    if(typeof ev.data==='string'){
+      try{const env=JSON.parse(ev.data);const cb=env.replyTo&&pending.get(env.replyTo);if(cb){pending.delete(env.replyTo);cb(env);}}catch(e){}
       return;
     }
+    const b=new Uint8Array(ev.data);
+    if(b[0]===2){playAudio(ev.data);return;}
+    if(b[0]!==1)return;
     if(b.length<27)return;
     const dv=new DataView(ev.data);
     const flags=dv.getUint16(17,true), size=dv.getUint32(13,true);
@@ -156,7 +192,7 @@ function stream2(){
     const bytes=b.slice(start,27+size);
     chain=chain.then(()=>draw({fullW,fullH,x:x0,y:y0,w,h,format,cursor,cx,cy,cw,ch,bytes,patch})).catch(()=>{});
   };
-  s.onclose=()=>{pending.forEach(cb=>cb({op:'error.err',payload:{message:'连接断开'}}));pending.clear();stream=null;bar.textContent=`${id}: 断线,1s 后重连`;setTimeout(stream2,1000);};
+  s.onclose=()=>{stopAudio(false);pending.forEach(cb=>cb({op:'error.err',payload:{message:'连接断开'}}));pending.clear();stream=null;bar.textContent=`${id}: 断线,1s 后重连`;setTimeout(stream2,1000);};
 }
 fetch('/api/windows').then(r=>r.json()).then(d=>{
   const w=(d.windows||[]).find(w=>w.id===id);
@@ -293,7 +329,10 @@ pub async fn serve(client: Client, bind: &str) -> Result<(), Error> {
 /// 流 WS 允许转发的控制 op(白名单:视图页只需要输入与接管;服务端持完整
 /// 客户端凭据,快照等高权限 op 不放行)。
 fn control_allowed(op: &str) -> bool {
-    matches!(op, "display.input" | "display.takeover" | "display.list")
+    matches!(
+        op,
+        "display.input" | "display.takeover" | "display.list" | "audio.attach" | "audio.detach"
+    )
 }
 
 /// 解析视图页控制信封 → (id, op, payload);缺 id/op 视为非控制信封。
@@ -367,16 +406,22 @@ async fn stream_window(client: Client, stream: tokio::net::TcpStream, window: u3
         }
     });
     while let Ok(frame) = frames.recv().await {
-        let matches = unmarshal_video(&frame.0)
-            .map(|video| video.window_id == window)
-            .unwrap_or(false);
-        if matches && bin_tx.send(frame.0).await.is_err() {
+        // 音频是容器级帧（0x02），不按窗口过滤；video 帧只转发本窗口。
+        let forward = if frame.0.first() == Some(&mixum_protocol::frames::chan::AUDIO) {
+            true
+        } else {
+            unmarshal_video(&frame.0)
+                .map(|video| video.window_id == window)
+                .unwrap_or(false)
+        };
+        if forward && bin_tx.send(frame.0).await.is_err() {
             break;
         }
     }
     let _ = client
         .call("display.detach", serde_json::json!({ "window": window }))
         .await;
+    let _ = client.call("audio.detach", serde_json::json!({})).await;
     writer.abort();
 }
 
@@ -433,6 +478,8 @@ mod tests {
     #[test]
     fn control_channel_is_whitelisted_and_envelopes_strict() {
         assert!(control_allowed("display.input"));
+        assert!(control_allowed("audio.attach"));
+        assert!(control_allowed("audio.detach"));
         assert!(control_allowed("display.takeover"));
         assert!(control_allowed("display.list"));
         // 服务端持完整凭据,高权限 op 绝不经视图 WS 放行。
