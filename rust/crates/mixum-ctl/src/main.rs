@@ -44,13 +44,23 @@ async fn run() -> Result<(), Error> {
         return Ok(());
     }
     if let Command::Power(args) = &cli.command {
+        if args.install || args.remove || args.print {
+            return power::systemd_manage(args.install, args.remove, args.print);
+        }
+        let configured_remote = power::load()?.remote;
+        let options = connection_options(&cli, None, None, None)?;
+        let watch_deadline = if args.deadline_secs == 0 {
+            power::WATCH_DEADLINE
+        } else {
+            std::time::Duration::from_secs(args.deadline_secs)
+        };
+        let run_deadline = std::time::Duration::from_secs(args.deadline_secs);
         if args.watch {
-            let configured_remote = power::load()?.remote;
-            let options = connection_options(&cli, None, None, None)?;
             return power::watch_sleep(
                 options,
                 args.remote.clone().or(configured_remote),
                 args.remote_token.clone(),
+                watch_deadline,
             )
             .await;
         }
@@ -58,12 +68,11 @@ async fn run() -> Result<(), Error> {
             println!("{}", power::PLATFORM_NOTES);
             return Ok(());
         }
-        let configured_remote = power::load()?.remote;
-        let options = connection_options(&cli, None, None, None)?;
         return power::simulate_sleep(
             options,
             args.remote.clone().or(configured_remote),
             args.remote_token.clone(),
+            run_deadline,
         )
         .await;
     }

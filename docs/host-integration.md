@@ -14,7 +14,7 @@
 
 模拟合盖同样支持 `power --simulate-sleep --remote <addr> --remote-token <token>`；省略目标令牌时才回退使用源连接令牌。
 
-macOS 的正式集成点是 IOKit 的 `IOPMSleepInterestCallback`（通过 `IORegisterForSystemPower` 注册），该回调不要求 root。`power --watch` 注册 CoreFoundation run loop，并在 `kIOMessageCanSystemSleep`/`kIOMessageSystemWillSleep` 事件中投递迁移任务；回调只做短事务。Linux 使用 systemd `sleep.target` 的 prepare/stop 单元；v1 只记录安装方式，不在客户端进程内监听 systemd。
+macOS 的正式集成点是 IOKit 的 `IORegisterForSystemPower`，该回调不要求 root。`power --watch` 的语义：`kIOMessageCanSystemSleep`（闲置倒计时）仅放行不迁移；`kIOMessageSystemWillSleep` 触发盒盖迁移（与 `--simulate-sleep` 同一链路），系统保持唤醒等待迁移完成或超时（`--deadline-secs`，默认 30s）后才归还 `IOAllowPowerChange` 确认——迁移失败或超时也照常放行，不会挂死睡眠。Linux 使用 systemd `sleep.target` 的 system-sleep 钩子：`power --install` 生成 `/usr/lib/systemd/system-sleep/mixum-ctl`（pre 阶段同步执行迁移，deadline 20s，日志 `/var/log/mixum-power.log`），`power --print` 预览、`power --remove` 卸载；钩子以 root 运行，配置目录经 `MIXUM_CONFIG_DIR` 指向用户 `~/.mixum`，安装前需先 `connect` 配置 remote 与 token_path。
 
 文件传输给 agent 的推荐用法：
 
