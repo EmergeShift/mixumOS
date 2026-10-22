@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url)).replace(/\\/g, "/");
-const CTL = join(ROOT, "build", "mixum-ctl-x64");
+const CTL = process.env.MIXUM_CTL_BIN ?? join(ROOT, "build", "mixum-ctl-x64");
 const IMAGE = process.env.MIXUM_E2E_IMAGE ?? "mixumos-e2e-rust";
 const NAME = "mixum-agent-e2e";
 const PORT = Number(process.argv[2] ?? 17681);
@@ -72,10 +72,10 @@ try {
 
   const template = ctl(["agent", "template", "codex"]);
   expect(template.out.includes("{{instruction}}"), "模板含 {{instruction}} 占位符");
-  expect(template.out.includes("/root/work"), "模板含工作区约定");
+  expect(template.out.includes("/var/lib/mixum/work"), "模板含工作区约定");
 
   const dry = ctl(["agent", "install", "claude-code", "--dry-run"]);
-  expect(dry.code === 0 && dry.out.includes("npm install -g @anthropic-ai/claude-code"),
+  expect(dry.code === 0 && dry.out.includes("npm install -g --prefix"),
     "dry-run 打印安装命令");
   expect(dry.out.includes("$HOME/.mixum/agents/claude-code/PROMPT.md"), "dry-run 含提示词落盘");
 

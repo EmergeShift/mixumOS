@@ -79,8 +79,14 @@ mixum-ctl agent install claude-code  # 补 npm → 官方包安装 → 验证可
 mixum-ctl agent template codex       # 打印可复制到任意 agent 的提示词
 ```
 
-- 安装脚本按 `pacman`/`apk`/`apt-get` 自动补依赖，再把提示词模板写到
-  `~/.mixum/agents/<name>/PROMPT.md`；
+- 默认以**任务用户**（通常是 `mixum`，非 root）运行：npm 包安装到
+  `$HOME/.local`，并把 `$HOME/.local/bin`、`$HOME/.opencode/bin` 加入 PATH；
+  不会写系统目录；
+- 若容器缺少 `npm`/`curl` 且当前不是 root，安装会明确报错并提示管理员预装，
+  不再尝试 `pacman -Sy` / `apt-get install`；
+- opencode 使用官方远程安装脚本（`curl -fsSL https://opencode.ai/install | bash`），
+  会在容器内执行上游脚本，属于信任上游发布的行为；
+- 提示词模板写到 `~/.mixum/agents/<name>/PROMPT.md`；
 - `--dry-run` 只打印将执行的脚本；`--cmd '<命令>'` 可替换安装命令
   （私有镜像源或测试），提示词仍会写入；
 - 安装失败以非零退出码返回，容器内日志实时回显（`task.event` 的 log）。
