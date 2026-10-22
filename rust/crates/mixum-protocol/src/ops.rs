@@ -33,6 +33,10 @@ pub mod op {
     pub const SNAP_FORK: &str = "snap.fork";
     pub const SNAP_DELETE: &str = "snap.delete";
     pub const SNAP_DIFF: &str = "snap.diff";
+    /// 导出节点为 MAP `.mart`（迁移用）。
+    pub const SNAP_EXPORT: &str = "snap.export";
+    /// 从 `.mart` 导入节点（迁移用）。
+    pub const SNAP_IMPORT: &str = "snap.import";
     pub const SNAP_PUSH: &str = "snap.push";
     pub const SNAP_PULL: &str = "snap.pull";
     pub const SNAP_GC: &str = "snap.gc";
