@@ -601,6 +601,8 @@ impl Session {
             ops::op::SNAP_FORK => self.snap_fork(&env).await,
             ops::op::SNAP_DELETE => self.snap_delete(&env).await,
             ops::op::SNAP_GC => self.snap_gc(&env).await,
+            ops::op::SNAP_EXPORT => self.snap_export(&env).await,
+            ops::op::SNAP_IMPORT => self.snap_import(&env).await,
             ops::op::SNAP_PUSH => self.snap_push(&env).await,
             "snap.push.import" => self.snap_push_import(&env).await,
             "snap.push.commit" => self.snap_push_commit(&env).await,
@@ -1134,6 +1136,77 @@ impl Session {
         let p = payload_value(env);
         match self.server.snapshots.restore(p.get("node").and_then(Value::as_str).unwrap_or_default(), p.get("strategy").and_then(Value::as_str).unwrap_or("inplace"), p.get("label").and_then(Value::as_str)).await { Ok(r) => self.reply(env, json!({"restoredTo":r.restored_to,"newBranch":r.new_branch,"newNode":r.new_node})).await, Err(e) => self.err(env, ErrCode::SnapshotInvalid, &e.to_string()).await }
     }
+    /// 导出节点为 `.mart`，文件落在 work_root/transfers，客户端用 file.get 下载。
+    async fn snap_export(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::SnapManage).await {
+            return;
+        }
+        let p = payload_value(env);
+        let node = p.get("node").and_then(Value::as_str).unwrap_or_default();
+        if node.is_empty() {
+            self.err(env, ErrCode::BadRequest, "node 为空").await;
+            return;
+        }
+        let safe: String = node
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect();
+        if safe.is_empty() {
+            self.err(env, ErrCode::BadRequest, "node 含非法字符").await;
+            return;
+        }
+        let name = format!("mixum-{safe}.mart");
+        let Some(path) = transfer_path(&self.server.config.work_root, &name) else {
+            self.err(env, ErrCode::Internal, "无法定位 transfers 目录").await;
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            if let Err(error) = tokio::fs::create_dir_all(dir).await {
+                self.err(env, ErrCode::Internal, &format!("创建传输目录: {error}")).await;
+                return;
+            }
+        }
+        match self.server.snapshots.export_mart(node, &path).await {
+            Ok(size) => {
+                let sha256 = sha256_file(&path).await.unwrap_or_default();
+                self.reply(env, json!({"file": name, "size": size, "sha256": sha256}))
+                    .await;
+            }
+            Err(error) => {
+                self.err(env, ErrCode::SnapshotInvalid, &error.to_string())
+                    .await
+            }
+        }
+    }
+
+    /// 从 transfers 里的 `.mart` 导入节点，挂到当前 head。
+    async fn snap_import(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::SnapManage).await {
+            return;
+        }
+        let p = payload_value(env);
+        let name = p.get("file").and_then(Value::as_str).unwrap_or_default();
+        let Some(path) = transfer_path(&self.server.config.work_root, name) else {
+            self.err(env, ErrCode::BadRequest, "文件名无效").await;
+            return;
+        };
+        if !path.is_file() {
+            self.err(env, ErrCode::NotFound, "迁移文件不存在").await;
+            return;
+        }
+        let origin = p
+            .get("origin")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        match self.server.snapshots.import_mart(&path, origin).await {
+            Ok(node) => self.reply(env, json!({"node": node})).await,
+            Err(error) => {
+                self.err(env, ErrCode::SnapshotInvalid, &error.to_string())
+                    .await
+            }
+        }
+    }
+
     async fn snap_fork(&mut self, env: &Envelope) {
         if !self.require(env, Cap::SnapManage).await {
             return;
@@ -1768,6 +1841,29 @@ pub enum ServerError {
 fn payload<T: serde::de::DeserializeOwned>(env: &Envelope) -> Result<T, String> {
     serde_json::from_value(env.payload.clone().unwrap_or(Value::Null)).map_err(|e| e.to_string())
 }
+/// 把迁移文件名限制在 `work_root/transfers/` 下，拒绝路径穿越。
+fn transfer_path(work_root: &str, name: &str) -> Option<PathBuf> {
+    let file = Path::new(name).file_name()?.to_str()?;
+    if file.is_empty() {
+        return None;
+    }
+    Some(Path::new(work_root).join("transfers").join(file))
+}
+
+async fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 fn payload_value(env: &Envelope) -> Value {
     env.payload.clone().unwrap_or_else(|| json!({}))
 }
@@ -1888,5 +1984,15 @@ mod tests {
             store.touch(&disconnected).await.is_none(),
             "断开的会话应按 TTL 过期"
         );
+    }
+
+    #[test]
+    fn transfer_path_stays_inside_transfers() {
+        let path = transfer_path("/var/lib/mixum/work", "../../etc/passwd").unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/var/lib/mixum/work/transfers/passwd")
+        );
+        assert!(transfer_path("/var/lib/mixum/work", "").is_none());
     }
 }

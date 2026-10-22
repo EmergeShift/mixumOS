@@ -1,0 +1,15 @@
+[package]
+name = "mixum-mart"
+description = "mixumOS ↔ MAP .mart 迁移桥：CAS/树与单文件快照互转"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mixum-protocol = { path = "../mixum-protocol" }
+mixum-snapshot = { path = "../mixum-snapshot" }
+map-snapshot = { git = "ssh://git@github.com/EmergeShift/Mixum-Agent-Protocol", rev = "3d3ec030f997641102143378ca59abbf8e6ba786" }
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+walkdir = "2"
