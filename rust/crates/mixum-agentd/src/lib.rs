@@ -9,6 +9,7 @@ pub mod display;
 pub mod gateway;
 pub mod isolation;
 pub mod memory;
+pub mod privilege;
 pub mod server;
 pub mod snapshot;
 pub mod task;
