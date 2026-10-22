@@ -373,6 +373,7 @@ impl Sandbox for LocalSandbox {
     ) -> Result<i32, DriverError> {
         let mut cmd = Command::new(program);
         apply_task_env_tokio(&mut cmd, &self.identity);
+        cmd.env("MIXUM_TASK_ID", &task.id);
         apply_x11_env(&mut cmd);
         cmd.args(args)
             .kill_on_drop(true)
@@ -438,6 +439,7 @@ impl Sandbox for LocalSandbox {
         cmd.env_clear();
         cmd.envs(&env);
         apply_task_env_tokio(&mut cmd, &self.identity);
+        cmd.env("MIXUM_TASK_ID", &task.id);
         apply_x11_env(&mut cmd);
         cmd.args(args)
             .kill_on_drop(true)

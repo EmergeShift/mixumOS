@@ -102,6 +102,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
     // 系统级隔离：cgroup freezer 可用时优先，Landlock 限制文件系统写入。
     let task_identity = task_identity_from_env();
+    let task_uid = task_identity.uid;
+    let task_gid = task_identity.gid;
     eprintln!(
         "task identity: {} (uid={} gid={})",
         task_identity.name, task_identity.uid, task_identity.gid
@@ -201,6 +203,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let assembled = Arc::get_mut(&mut server).expect("server 刚构造,无共享引用");
         assembled.sync = sync_backend;
     }
+
+    let privilege = server.privilege();
+    tokio::spawn(async move {
+        if let Err(error) = privilege
+            .serve_socket("/run/mixum/sudo.sock", task_uid, task_gid)
+            .await
+        {
+            eprintln!("sudo socket 启动失败: {error}");
+        }
+    });
     let token_path = std::path::Path::new(&config.data_dir).join("admin-token");
     let token = match std::fs::read_to_string(&token_path) {
         Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),
