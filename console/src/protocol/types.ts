@@ -148,6 +148,20 @@ export interface DisplayInputRequest {
   text?: string
 }
 
+export interface AudioAttachResponse {
+  sampleRate: number
+  channels: number
+  format: 's16le'
+  chunkMs: number
+}
+
+export interface AudioChunk {
+  seq: number
+  sampleRate: number
+  channels: number
+  pcm: Int16Array
+}
+
 export interface DisplayTakeoverRequest {
   window: number
   action: 'claim' | 'release'

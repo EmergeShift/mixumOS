@@ -13,6 +13,27 @@ pub mod chan {
 /// 文件帧头:通道标签(1) + transfer id(4) + offset(8)。
 pub const FILE_HEADER_SIZE: usize = 13;
 
+/// 音频帧头:通道标签(1) + 序号(4,u32 小端) + s16le 交织 PCM。
+pub const AUDIO_HEADER_SIZE: usize = 5;
+
+pub fn marshal_audio(seq: u32, pcm: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(AUDIO_HEADER_SIZE + pcm.len());
+    out.push(chan::AUDIO);
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(pcm);
+    out
+}
+
+pub fn unmarshal_audio(buf: &[u8]) -> Result<(u32, &[u8]), TruncatedFrame> {
+    if buf.len() < AUDIO_HEADER_SIZE || buf[0] != chan::AUDIO {
+        return Err(TruncatedFrame);
+    }
+    Ok((
+        u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]),
+        &buf[AUDIO_HEADER_SIZE..],
+    ))
+}
+
 /// 打包文件块。`transfer` 是 `file.put` / `file.get` 返回的 id。
 pub fn marshal_file(transfer: u32, offset: u64, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(FILE_HEADER_SIZE + data.len());
