@@ -18,6 +18,8 @@ pub enum MartError {
     Snapshot(#[from] EngineError),
     #[error(transparent)]
     Mart(#[from] map_snapshot::MartError),
+    #[error("{0}")]
+    Invalid(String),
     #[error(transparent)]
     Tree(#[from] mixum_snapshot::TreeError),
     #[error(transparent)]
@@ -58,6 +60,11 @@ pub fn import_mart(
     file: impl AsRef<Path>,
     origin: &str,
 ) -> Result<ImportReport, MartError> {
+    // origin 会进入节点标签/同步元数据;空白值没有可信来源,直接拒绝。
+    let origin = origin.trim();
+    if origin.is_empty() {
+        return Err(MartError::Invalid("origin 不能为空或纯空白".into()));
+    }
     let archive = MartArchive::open(file.as_ref())?;
     let verify = archive.verify()?;
     if !verify.ok {
@@ -116,6 +123,15 @@ mod tests {
             encrypt: false,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn import_rejects_blank_origin() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path(), data.path());
+        let err = import_mart(&mut engine, root.path().join("missing.mart"), "   ").unwrap_err();
+        assert!(matches!(err, MartError::Invalid(_)), "{err}");
     }
 
     #[test]
