@@ -66,3 +66,21 @@ agent 独立成进程，按 `docs/agent-bridge.md` 的桥协议读写 stdio
 - 驱动跑在 mixumd 进程内（Linux 容器环境）；`Sandbox` 实现决定隔离级别。
 - SPI crate 自身平台无关；内建 `LocalSandbox`（进程组/nix）在 mixum-agentd。
 - 版本策略：SPI 以 0.x 演进，破坏性变更随 minor 版本公告。
+
+## 一键接入：`mixum-ctl agent`
+
+`mixum-ctl` 内置四个常见 CLI agent 的安装配方（claude-code / codex /
+gemini-cli / opencode），安装通过容器内 shell 任务执行，不需要在宿主
+装任何东西：
+
+```bash
+mixum-ctl agent list                 # 目录 + 容器内是否已安装
+mixum-ctl agent install claude-code  # 补 npm → 官方包安装 → 验证可执行
+mixum-ctl agent template codex       # 打印可复制到任意 agent 的提示词
+```
+
+- 安装脚本按 `pacman`/`apk`/`apt-get` 自动补依赖，再把提示词模板写到
+  `~/.mixum/agents/<name>/PROMPT.md`；
+- `--dry-run` 只打印将执行的脚本；`--cmd '<命令>'` 可替换安装命令
+  （私有镜像源或测试），提示词仍会写入；
+- 安装失败以非零退出码返回，容器内日志实时回显（`task.event` 的 log）。
