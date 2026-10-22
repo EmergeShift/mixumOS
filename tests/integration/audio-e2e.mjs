@@ -53,9 +53,11 @@ class Client {
         if (typeof ev.data !== "string") {
           const b = new Uint8Array(ev.data);
           if (b[0] === 0x02) {
+            const dv = new DataView(ev.data, 1, 12);
             this.audio.push({
-              seq: new DataView(ev.data, 1, 4).getUint32(0, true),
-              pcm: new Uint8Array(ev.data, 5),
+              seq: dv.getUint32(0, true),
+              ptsUs: Number(dv.getBigUint64(4, true)),
+              pcm: new Uint8Array(ev.data, 13),
               at: Date.now(),
             });
           }
@@ -111,6 +113,9 @@ try {
   expect(frames.every((f) => f.pcm.length === CHUNK), `帧负载 ${CHUNK} 字节`);
   expect(frames[1].seq === frames[0].seq + 1, "序号连续");
   expect(frames.some((f) => f.pcm.some((v) => v !== 0)), "PCM 非空");
+  const steps = frames.slice(1).map((f, i) => (f.ptsUs - frames[i].ptsUs) / 1000);
+  expect(steps.every((ms) => ms > 5 && ms < 200), `采集时间戳步长 ${steps.map((m) => m.toFixed(0)).join("/")}ms`);
+  expect(frames[4].ptsUs > frames[0].ptsUs, "PTS 单调");
   const gap = frames[4].at - frames[0].at;
   expect(gap > 30 && gap < 2000, `5 帧耗时 ${gap}ms`);
 

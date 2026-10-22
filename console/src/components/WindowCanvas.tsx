@@ -105,13 +105,16 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
   const [dragging, setDragging] = useState(false)
   const [audioOn, setAudioOn] = useState(false)
   const [volume, setVolume] = useState(0.8)
+  const [avOffset, setAvOffset] = useState(0)
   const [audioStats, setAudioStats] = useState({ frames: 0, drops: 0, lead: 0 })
   const audioRef = useRef<{
     ctx: AudioContext
     gain: GainNode
     next: number
+    lead: number
     frames: number
     lastSeq: number
+    lastPts: number
     drops: number
   } | null>(null)
   const volumeRef = useRef(volume)
@@ -221,9 +224,14 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
       src.buffer = buf
       src.connect(a.gain)
       const now = a.ctx.currentTime
-      if (a.next < now + 0.02 || a.next > now + 0.5) a.next = now + 0.05
-      src.start(a.next)
-      a.next += buf.duration
+      // 按采集时间戳推进播放时钟；下一块的起点 = 本块起点 + 采集步长，
+      // 不能叠加缓冲区时长（否则提前量会持续增长）。
+      const delta = a.lastPts >= 0 ? (chunk.ptsUs - a.lastPts) / 1e6 : 0
+      a.lastPts = chunk.ptsUs
+      let start = a.next
+      if (start < now + 0.01 || start > now + 0.5) start = now + a.lead
+      src.start(start)
+      a.next = start + (delta > 0 && delta <= 0.5 ? delta : buf.duration)
       a.frames += 1
       if (a.frames % 25 === 0) {
         setAudioStats({
@@ -454,7 +462,16 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
       const gain = ctx.createGain()
       gain.gain.value = volumeRef.current
       gain.connect(ctx.destination)
-      audioRef.current = { ctx, gain, next: 0, frames: 0, lastSeq: -1, drops: 0 }
+      audioRef.current = {
+        ctx,
+        gain,
+        next: 0,
+        lead: 0.06 + avOffset / 1000,
+        frames: 0,
+        lastSeq: -1,
+        lastPts: -1,
+        drops: 0,
+      }
       setAudioOn(true)
       setAudioStats({ frames: 0, drops: 0, lead: 0 })
       showToast(`音频已开启 ${fmt.sampleRate}Hz / ${fmt.channels}ch`)
@@ -490,7 +507,7 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
           {info ? `${info.width}×${info.height} · ${info.codec} · ${info.fps}fps` : ''}
           {stats.frames > 0 ? ` · ${stats.frames} 帧 · 最近 ${fmtTime(stats.lastTs)}` : ''}
           {audioOn
-            ? ` · 音频 ${audioStats.frames} · ${audioStats.lead}ms${audioStats.drops ? ` · 丢 ${audioStats.drops}` : ''}`
+            ? ` · 音频 ${audioStats.frames} · ${audioStats.lead}ms · 偏移 ${avOffset}ms${audioStats.drops ? ` · 丢 ${audioStats.drops}` : ''}`
             : ''}
         </span>
         <span className={`mode-badge mode-${win.mode}`}>
@@ -501,19 +518,35 @@ export function WindowCanvas({ win }: { win: WindowInfo }) {
           {audioOn ? '静音' : '音频'}
         </button>
         {audioOn && (
-          <input
-            className="audio-vol"
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(volume * 100)}
-            title="音量"
-            onChange={(e) => {
-              const v = Number(e.target.value) / 100
-              setVolume(v)
-              if (audioRef.current) audioRef.current.gain.gain.value = v
-            }}
-          />
+          <>
+            <input
+              className="audio-vol"
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(volume * 100)}
+              title="音量"
+              onChange={(e) => {
+                const v = Number(e.target.value) / 100
+                setVolume(v)
+                if (audioRef.current) audioRef.current.gain.gain.value = v
+              }}
+            />
+            <input
+              className="audio-off"
+              type="range"
+              min={-200}
+              max={200}
+              step={10}
+              value={avOffset}
+              title="A/V 偏移(ms)"
+              onChange={(e) => {
+                const v = Number(e.target.value)
+                setAvOffset(v)
+                if (audioRef.current) audioRef.current.lead = Math.max(0.01, 0.06 + v / 1000)
+              }}
+            />
+          </>
         )}
         {win.mode === 'user' ? (
           <button className="btn btn-small" onClick={() => void takeover('release')}>

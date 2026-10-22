@@ -838,3 +838,8 @@ textarea {
   width: 70px;
   accent-color: #6aa9ff;
 }
+
+.canvas-head .audio-off {
+  width: 70px;
+  accent-color: #e0b050;
+}

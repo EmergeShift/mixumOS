@@ -157,6 +157,7 @@ export interface AudioAttachResponse {
 
 export interface AudioChunk {
   seq: number
+  ptsUs: number
   sampleRate: number
   channels: number
   pcm: Int16Array

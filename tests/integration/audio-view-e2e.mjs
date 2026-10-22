@@ -123,6 +123,12 @@ try {
     v.dispatchEvent(new Event("input"));
   });
   expect((await page.$eval("#vol", (el) => el.value)) === "30", "音量滑杆可调");
+  await page.evaluate(() => {
+    const v = document.querySelector("#off");
+    v.value = 40;
+    v.dispatchEvent(new Event("input"));
+  });
+  expect((await page.$eval("#off", (el) => el.value)) === "40", "A/V 偏移滑杆可调");
 
   await page.click("#au");
   await sleep(300);

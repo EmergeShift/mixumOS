@@ -205,9 +205,10 @@ mixum-ctl file get /var/lib/mixum/work/transfers/out.bin --out ./out.bin
   `parec --format=s16le --rate=48000 --channels=2 --latency-msec=20`。
 - 第一个订阅者启动采集进程，最后一个 `detach`/断连后终止；采集进程输出
   定长 PCM，服务端切成 20ms 块广播。
-- audio 帧：`[0][1..4]` 为通道标签 `0x02` 与 u32 序号（小端），其后是
-  `3840` 字节 s16le 交织 PCM（48kHz 双声道 20ms）。接收端按序号容忍丢帧；
-  订阅者积压时服务端丢弃最旧块（broadcast 容量 32）。
+- audio 帧：`[0]` 通道标签 `0x02`，`[1..5]` u32 序号，`[5..13]` u64 采集
+  时刻（微秒，采集进程内单调时钟），其后是 `3840` 字节 s16le 交织 PCM
+  （48kHz 双声道 20ms）。接收端用序号检测丢块、用时间戳步长推进播放
+  时钟（异常时重新对齐）；订阅者积压时服务端丢弃最旧块（broadcast 容量 32）。
 
 Window:`{ id, appId, title, width, height, focused, mode: agent|user|free,
 codec? }`。codec = 窗口流的实际编码,由 mixcomp 能力回告(如请求 h264

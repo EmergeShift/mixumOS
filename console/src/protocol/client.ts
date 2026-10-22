@@ -173,13 +173,15 @@ export class MixumClient {
         this.onText(ev.data)
       } else {
         const bytes = new Uint8Array(ev.data)
-        if (bytes[0] === 0x02 && bytes.length >= 5) {
+        if (bytes[0] === 0x02 && bytes.length >= 13) {
           if (this.audioFormat) {
-            const seq = new DataView(bytes.buffer, bytes.byteOffset + 1, 4).getUint32(0, true)
-            const pcmBytes = bytes.subarray(5)
+            const dv = new DataView(bytes.buffer, bytes.byteOffset)
+            const seq = dv.getUint32(1, true)
+            const ptsUs = Number(dv.getBigUint64(5, true))
+            const pcmBytes = bytes.subarray(13)
             const pcm = new Int16Array(pcmBytes.length >> 1)
             new Uint8Array(pcm.buffer).set(pcmBytes)
-            this.onAudio({ seq, ...this.audioFormat, pcm })
+            this.onAudio({ seq, ptsUs, ...this.audioFormat, pcm })
           }
           return
         }
