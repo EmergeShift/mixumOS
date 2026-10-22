@@ -205,23 +205,30 @@ impl Engine {
         if node.kind == KIND_MEMORY || node.disk.is_none() {
             return Err(EngineError::MemoryOnly);
         }
-        if !node.kernel.is_empty() && node.kernel != kernel_release() {
-            return Err(EngineError::KernelMismatch {
-                snapshot: node.kernel.clone(),
-                current: kernel_release(),
-            });
-        }
+        Self::check_kernel_compat(&node, &kernel_release())?;
         if !node.arch.is_empty() && node.arch != std::env::consts::ARCH {
             return Err(EngineError::ArchMismatch {
                 snapshot: node.arch.clone(),
                 current: std::env::consts::ARCH.into(),
             });
         }
-        self.clear_root()?;
-        node.disk
-            .as_ref()
-            .expect("checked above")
-            .materialize(&self.store, &self.root)?;
+        // 恢复期间必须先让任务进程组停住：clear_root 会删除工作区，
+        // 若有进程仍在读写就是数据竞争。freeze 回调由宿主注入
+        // （agentd 里是 Sandbox::freeze_all → SIGSTOP/SIGCONT）。
+        let manifest = node.disk.as_ref().expect("checked above");
+        let root = &self.root;
+        let store = &self.store;
+        let skip = &self.skip;
+        let mut action = || -> Result<(), EngineError> {
+            clear_root(root, skip)?;
+            manifest.materialize(store, root)?;
+            Ok(())
+        };
+        if let Some(freeze) = self.freeze.as_mut() {
+            freeze(&mut action)?;
+        } else {
+            action()?;
+        }
         if strategy == "fork" {
             let default_label = format!("{}-fork", node.branch);
             let want = if label.is_empty() {
@@ -275,25 +282,45 @@ impl Engine {
         }
         Ok(self.store.sweep(GC_PROTECT_WINDOW)?)
     }
-    fn clear_root(&self) -> Result<(), EngineError> {
-        for item in fs::read_dir(&self.root)? {
-            let e = item?;
-            let name = e.file_name().to_string_lossy().into_owned();
-            if self
-                .skip
-                .iter()
-                .any(|s| name == *s || name.starts_with(&format!("{s}/")))
-            {
-                continue;
-            }
-            if e.file_type()?.is_dir() {
-                fs::remove_dir_all(e.path())?;
-            } else {
-                fs::remove_file(e.path())?;
-            }
+    /// 恢复兼容性：只有真正带 CRIU 内存镜像的节点才强校验内核。
+    /// 纯磁盘节点跨内核恢复只丢进程状态、不丢文件语义，记 warn 放行。
+    pub(crate) fn check_kernel_compat(node: &TreeNode, current: &str) -> Result<(), EngineError> {
+        if node.kernel.is_empty() || node.kernel == current {
+            return Ok(());
         }
+        if node.memory.is_some() {
+            return Err(EngineError::KernelMismatch {
+                snapshot: node.kernel.clone(),
+                current: current.to_string(),
+            });
+        }
+        tracing::warn!(
+            snapshot = %node.id,
+            snapshot_kernel = %node.kernel,
+            current_kernel = %current,
+            "disk 快照跨内核恢复：仅文件状态可迁移，进程状态不会恢复"
+        );
         Ok(())
     }
+}
+
+fn clear_root(root: &Path, skip: &[String]) -> Result<(), EngineError> {
+    for item in fs::read_dir(root)? {
+        let e = item?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if skip
+            .iter()
+            .any(|s| name == *s || name.starts_with(&format!("{s}/")))
+        {
+            continue;
+        }
+        if e.file_type()?.is_dir() {
+            fs::remove_dir_all(e.path())?;
+        } else {
+            fs::remove_file(e.path())?;
+        }
+    }
+    Ok(())
 }
 
 fn load_or_create_key(dir: &Path) -> Result<Vec<u8>, io::Error> {
