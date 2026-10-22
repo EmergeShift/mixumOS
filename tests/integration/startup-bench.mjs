@@ -21,7 +21,7 @@ const arg = (name, fallback) => {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : fallback;
 };
-const IMAGE = arg("--image", "mixumos:0.1.0-x86_64");
+const IMAGE = arg("--image", "mixumos:0.1.4-x86_64");
 const RUNS = Number(arg("--runs", "10"));
 const MODE = arg("--mode", "both");
 const NAME = "mixum-startup-bench";

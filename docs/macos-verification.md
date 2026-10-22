@@ -16,9 +16,9 @@ MixumART 的 Metal 原生窗口壳。本文给出在一台真实 Mac 上逐项�
 ## 1. IOKit 电力钩子（合盖迁移）
 
 ```sh
-cargo build --release -p mixum-ctl
-./target/release/mixum-ctl connect --addr wss://<host>:7601 --token <token> --fingerprint <fp>
-./target/release/mixum-ctl --token <token> \
+cargo build --manifest-path rust/Cargo.toml --release -p mixum-ctl
+./rust/target/release/mixum-ctl connect --addr wss://<host>:7601 --token <token> --fingerprint <fp>
+./rust/target/release/mixum-ctl --token <token> \
   power --watch --remote wss://<host>:7601 --deadline-secs 30
 ```
 
@@ -35,7 +35,7 @@ cargo build --release -p mixum-ctl
 ## 2. 本地窗口视图（浏览器）
 
 ```sh
-./target/release/mixum-ctl serve --bind 127.0.0.1:7602 \
+./rust/target/release/mixum-ctl serve --bind 127.0.0.1:7602 \
   --addr wss://<host>:7601 --token <token> --fingerprint <fp>
 ```
 
