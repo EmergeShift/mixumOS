@@ -5,9 +5,12 @@
 //! 二进制帧头。任何不兼容变更必须递增 [`PROTOCOL_VERSION`] 并更新文档。
 
 pub mod envelope;
+pub mod gui;
 pub mod frames;
 pub mod ops;
 pub mod token;
+
+pub use gui::GuiSession;
 
 /// 协议主版本。不兼容变更必须递增(见 docs/protocol.md §7)。
 pub const PROTOCOL_VERSION: u32 = 1;

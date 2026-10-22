@@ -12,6 +12,7 @@ use std::{
 };
 use thiserror::Error;
 
+pub type MetadataFn = Box<dyn FnMut(&mut TreeNode) + Send>;
 pub type FreezeFn =
     Box<dyn FnMut(&mut dyn FnMut() -> Result<(), EngineError>) -> Result<(), EngineError> + Send>;
 /// restore 前的准备动作（终止/清理当前任务进程）。
@@ -63,6 +64,8 @@ pub struct Engine {
     pub freeze: Option<FreezeFn>,
     /// restore 前调用：同机回退要先把当前任务树停掉，避免 CRIU 恢复出重复进程。
     pub restore_prepare: Option<PrepareFn>,
+    /// 快照落树前最后一次修改节点（GUI 会话、扩展元数据）。
+    pub metadata: Option<MetadataFn>,
     task_pid: Option<i32>,
     /// 显式 dump 根（任务 + 合成器等）；为空时退回 task_pid。
     dump_roots: Vec<i32>,
@@ -95,6 +98,7 @@ impl Engine {
             skip: opts.skip,
             freeze: None,
             restore_prepare: None,
+            metadata: None,
             task_pid: None,
             dump_roots: Vec::new(),
             operation_lock: Arc::new(Mutex::new(())),
@@ -220,6 +224,9 @@ impl Engine {
             for h in m.chunks() {
                 self.store.mark(h);
             }
+        }
+        if let Some(metadata) = self.metadata.as_mut() {
+            metadata(&mut node);
         }
         self.tree.add(node).map_err(Into::into)
     }

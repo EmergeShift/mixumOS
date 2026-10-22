@@ -59,6 +59,10 @@ FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
   纯 disk 节点跨内核只记 warn 并放行(文件语义不依赖内核)。`arch` 仍强校验。
 - 恢复期间由宿主冻结全部任务进程组,`materialize` 完成后再解冻,
   避免 `clear_root` 与运行中的进程读写打架。
+- **GUI 会话清单（OS 扩展）**：节点元数据可带 `guiSessions`，由 `spawn_gui`
+  路径记录（命令、参数、cwd、最小环境、pid），快照时与 mixcomp 窗口表按 pid
+  合并出 app_id/title/几何。restore 完成后 agentd 终止本地旧进程并按清单重拉；
+  外部驱动自己拉起的 GUI 进程不在清单内。
 
 ### 用户视角的例子
 

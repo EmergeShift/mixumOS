@@ -95,7 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
     let sandbox = Arc::new(LocalSandbox::new().with_leader(Arc::clone(&leader)));
-    // broker 提前创建：快照冻结钩子需要同步通知 comp 暂停捕获。
+    // broker 提前创建：快照冻结钩子需要同步通知 comp 暂停捕获；
+    // 快照 metadata 需要同步读取窗口表，restore 后还要重放 GUI。
     let broker = Broker::new("/run/mixum/display.sock");
 
     // 快照引擎:git 式树 + 内容寻址块存储 + CRIU 探测。
@@ -112,6 +113,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             engine.backend_name(),
             engine.criu.as_ref().is_some_and(|criu| criu.available())
         );
+        // 快照落树前把当前 GUI 会话写进节点元数据（spawn_gui 记录 + 窗口表按 pid 合并）。
+        let metadata_broker = broker.clone();
+        let metadata_sandbox = Arc::clone(&sandbox);
+        engine.metadata = Some(Box::new(move |node| {
+            let windows = metadata_broker.try_windows();
+            let pids = metadata_broker.try_window_pids();
+            node.gui_sessions = mixum_agentd::display::merge_gui_sessions(
+                metadata_sandbox.gui_launches(),
+                &windows,
+                &pids,
+            );
+        }));
         // 快照冻结回调:先通知 comp 暂停捕获并推冻结状态帧,再冻结任务进程组。
         // 通知是同步尽力而为(try_send),不阻塞快照路径;comp 晚一个节拍收到
         // 也不影响正确性——SIGSTOP 已经生效,只是少发几帧旧画面。
@@ -133,6 +146,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }));
         let mut adapter = mixum_agentd::snapshot::RealSnapshotEngine::from_engine(engine);
         adapter.set_leader(Arc::clone(&leader));
+        // restore 写回文件后按节点里的 gui_sessions 重放窗口（旧进程会被替换）。
+        let replay_sandbox = Arc::clone(&sandbox);
+        adapter.set_restore_hook(Arc::new(move |sessions| {
+            let started = replay_sandbox.replay_gui_sessions(&sessions);
+            eprintln!("GUI 会话重放：{started} 个");
+        }));
         let backend = Arc::new(mixum_agentd::sync::SyncBackend::new(adapter.shared()));
         (Arc::new(adapter) as Arc<dyn SnapshotEngine>, Some(backend))
     };
