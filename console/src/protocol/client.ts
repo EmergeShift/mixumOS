@@ -342,6 +342,47 @@ export class MixumClient {
     return this.request('display.input', req)
   }
 
+  /** 把浏览器 File 分块上传到容器 work_root/transfers（file.put 协议）。 */
+  async putFile(file: File): Promise<{ path: string; bytes: number }> {
+    const start = await this.request<{ transfer: number; path: string }>(
+      'file.put',
+      { name: file.name, size: file.size },
+      30_000,
+    )
+    // WebCrypto 不支持增量哈希：≤64MiB 算整文件 sha256，超大文件省略校验。
+    const sha256 =
+      file.size <= 64 * 1024 * 1024
+        ? [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))]
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join('')
+        : undefined
+    const chunkSize = 256 * 1024
+    for (let offset = 0; offset < file.size; offset += chunkSize) {
+      const chunk = await file.slice(offset, offset + chunkSize).arrayBuffer()
+      if (!this.sendFileChunk(start.transfer, offset, chunk)) {
+        throw new ProtocolError('internal', '连接已关闭')
+      }
+    }
+    await this.request(
+      'file.put.commit',
+      { transfer: start.transfer, ...(sha256 ? { sha256 } : {}) },
+      30_000,
+    )
+    return { path: start.path, bytes: file.size }
+  }
+
+  private sendFileChunk(transfer: number, offset: number, data: ArrayBuffer): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false
+    const frame = new ArrayBuffer(13 + data.byteLength)
+    const view = new DataView(frame)
+    view.setUint8(0, 0x05) // chan::FILE
+    view.setUint32(1, transfer, true)
+    view.setBigUint64(5, BigInt(offset), true)
+    new Uint8Array(frame, 13).set(new Uint8Array(data))
+    this.ws.send(frame)
+    return true
+  }
+
   takeover(windowId: number, action: 'claim' | 'release', force = false): Promise<{ mode: string }> {
     return this.request<{ mode: string }>('display.takeover', { window: windowId, action, force })
   }
