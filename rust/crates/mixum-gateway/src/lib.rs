@@ -192,9 +192,9 @@ fn err_envelope(env: Option<&Value>, code: ErrCode, message: &str) -> String {
         .unwrap_or_default()
         .to_owned();
     let reply = if id.is_empty() {
-        json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"error.err","payload":{"code":code,"message":message}})
+        json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),"op":"error.err","payload":{"code":code,"message":message}})
     } else {
-        json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":format!("{op}.err"),"replyTo":id,"payload":{"code":code,"message":message}})
+        json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),"op":format!("{op}.err"),"replyTo":id,"payload":{"code":code,"message":message}})
     };
     reply.to_string()
 }
@@ -499,7 +499,7 @@ impl Gateway {
             "gateway.node.list" => {
                 let nodes = self.node_offline().await;
                 vec![Outbound::Text(
-                    json!({"v":1,"id":env.get("id").cloned().unwrap_or_default(),"op":"gateway.node.list.ok","replyTo":env.get("id").cloned().unwrap_or_default(),"payload":{"nodes":nodes}})
+                    json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":env.get("id").cloned().unwrap_or_default(),"op":"gateway.node.list.ok","replyTo":env.get("id").cloned().unwrap_or_default(),"payload":{"nodes":nodes}})
                         .to_string(),
                 )]
             }
@@ -862,7 +862,7 @@ impl Gateway {
             }
         };
         Outbound::Text(
-            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.pair.create.ok","replyTo":id,"payload":{"code":code,"expiresIn":300}})
+            json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),"op":"gateway.pair.create.ok","replyTo":id,"payload":{"code":code,"expiresIn":300}})
                 .to_string(),
         )
     }
@@ -961,7 +961,7 @@ impl Gateway {
             .map(|(jti, d)| json!({"jti": jti, "name": d.name, "sub": d.sub, "owner": d.owner, "iat": d.iat}))
             .collect();
         Outbound::Text(
-            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.device.list.ok","replyTo":id,"payload":{"devices":list}})
+            json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),"op":"gateway.device.list.ok","replyTo":id,"payload":{"devices":list}})
                 .to_string(),
         )
     }
@@ -1005,7 +1005,7 @@ impl Gateway {
         eprintln!("gateway 设备吊销: jti={jti} by={caller_sub}");
         self.persist().await;
         Outbound::Text(
-            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.device.revoke.ok","replyTo":id,"payload":{"revoked":removed}})
+            json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),"op":"gateway.device.revoke.ok","replyTo":id,"payload":{"revoked":removed}})
                 .to_string(),
         )
     }
@@ -1030,7 +1030,7 @@ impl Gateway {
         eprintln!("gateway 令牌吊销: jti={jti} by={sub}");
         self.persist().await;
         Outbound::Text(
-            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.token.revoke.ok","replyTo":id,"payload":{"revoked":true}})
+            json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),"op":"gateway.token.revoke.ok","replyTo":id,"payload":{"revoked":true}})
                 .to_string(),
         )
     }
@@ -1088,7 +1088,7 @@ impl Gateway {
             Err(e) => return fail(ErrCode::Internal, &format!("签发失败: {e}")),
         };
         Outbound::Text(
-            json!({"v":1,"id":mixum_protocol::envelope::new_id(),"op":"gateway.token.issue.ok","replyTo":id,"payload":{"token":token}})
+            json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":mixum_protocol::envelope::new_id(),"op":"gateway.token.issue.ok","replyTo":id,"payload":{"token":token}})
                 .to_string(),
         )
     }
@@ -1102,7 +1102,7 @@ mod tests {
         let gw = Gateway::new(Signer::generate());
         let (ctx, _rx) = mpsc_pair();
         let session = gw.client_connected("user:alice", ctx).await;
-        let req = json!({"v":1,"id":"t1","op":"gateway.token.issue","payload":{"kind":"node","name":"victim"}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"t1","op":"gateway.token.issue","payload":{"kind":"node","name":"victim"}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert!(
             matches!(&out[0], Outbound::Text(t) if t.contains("forbidden")),
@@ -1134,7 +1134,7 @@ mod tests {
         let out = gw
             .on_client_text(
                 &alice,
-                &json!({"v":1,"id":"p1","op":"gateway.pair.create","payload":{}}).to_string(),
+                &json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"p1","op":"gateway.pair.create","payload":{}}).to_string(),
             )
             .await;
         let text = match &out[0] {
@@ -1165,7 +1165,7 @@ mod tests {
         let gw = Gateway::new(Signer::generate());
         let (ctx, _rx) = mpsc_pair();
         let alice = gw.client_connected("user:alice", ctx).await;
-        let create = json!({"v":1,"id":"p1","op":"gateway.pair.create","payload":{}});
+        let create = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"p1","op":"gateway.pair.create","payload":{}});
         let out = gw.on_client_text(&alice, &create.to_string()).await;
         let text = match &out[0] {
             Outbound::Text(t) => t.clone(),
@@ -1181,7 +1181,7 @@ mod tests {
         let list = gw
             .on_client_text(
                 &bob,
-                &json!({"v":1,"id":"p2","op":"gateway.device.list"}).to_string(),
+                &json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"p2","op":"gateway.device.list"}).to_string(),
             )
             .await;
         let text = match &list[0] {
@@ -1277,7 +1277,7 @@ mod tests {
         let session = gw.client_connected("user:u1", ctx).await;
 
         // 客户端请求(带 node)→ 到节点,且带 gatewaySession
-        let req = json!({"v":1,"id":"r1","op":"task.list","node":"a","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r1","op":"task.list","node":"a","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert!(out.is_empty(), "路由本身不直接回客户端");
         // 首条是 gateway.session.open,次条才是带标记的信封
@@ -1299,7 +1299,7 @@ mod tests {
         }
 
         // 节点应答(带 gatewaySession)→ 直投客户端通道
-        let reply = json!({"v":1,"id":"r1","op":"task.list.ok","replyTo":"r1","gatewaySession":session,"payload":{"tasks":[]}});
+        let reply = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r1","op":"task.list.ok","replyTo":"r1","gatewaySession":session,"payload":{"tasks":[]}});
         gw.on_node_text("a", &reply.to_string()).await;
         match crx.recv().await.unwrap() {
             Outbound::Text(t) => assert!(t.contains("task.list.ok")),
@@ -1314,7 +1314,7 @@ mod tests {
         gw.node_connected("only", "0.1.0", ntx).await.unwrap();
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
-        let req = json!({"v":1,"id":"r2","op":"sys.ping","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r2","op":"sys.ping","payload":{}});
         gw.on_client_text(&session, &req.to_string()).await;
         match nrx.recv().await.unwrap() {
             Outbound::Text(t) => {
@@ -1335,7 +1335,7 @@ mod tests {
             .unwrap();
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
-        let req = json!({"v":1,"id":"r3","op":"sys.ping","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r3","op":"sys.ping","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert!(matches!(&out[0], Outbound::Text(t) if t.contains("bad_request")));
     }
@@ -1345,7 +1345,7 @@ mod tests {
         let gw = Gateway::new(Signer::generate());
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
-        let req = json!({"v":1,"id":"r4","op":"task.list","node":"ghost","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r4","op":"task.list","node":"ghost","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert!(matches!(&out[0], Outbound::Text(t) if t.contains("not_found")));
     }
@@ -1406,7 +1406,7 @@ mod tests {
         let gw = Gateway::with_registry(Signer::generate(), registry);
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
-        let req = json!({"v":1,"id":"r5","op":"task.list","node":"remote","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r5","op":"task.list","node":"remote","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert_eq!(error_code(&out[0]), "internal");
     }
@@ -1433,7 +1433,7 @@ mod tests {
         );
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
-        let req = json!({"v":1,"id":"r6","op":"task.list","node":"remote","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r6","op":"task.list","node":"remote","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert_eq!(error_code(&out[0]), "internal");
     }
@@ -1455,7 +1455,7 @@ mod tests {
         let gw = Gateway::with_registry(Signer::generate(), registry);
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
-        let req = json!({"v":1,"id":"r7","op":"task.list","node":"stale","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"r7","op":"task.list","node":"stale","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert_eq!(error_code(&out[0]), "internal");
     }
@@ -1486,15 +1486,15 @@ mod tests {
         for (session, req) in [
             (
                 "ms-1",
-                json!({"v":1,"id":"m1","op":"task.list","node":"remote","payload":{}}),
+                json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"m1","op":"task.list","node":"remote","payload":{}}),
             ),
             (
                 "ms-2",
-                json!({"v":1,"id":"m2","op":"task.list","node":"stale","payload":{}}),
+                json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"m2","op":"task.list","node":"stale","payload":{}}),
             ),
             (
                 "ms-3",
-                json!({"v":1,"id":"m3","op":"task.list","payload":{}}),
+                json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"m3","op":"task.list","payload":{}}),
             ),
         ] {
             gw.on_mesh_text(session, &req.to_string()).await;
@@ -1519,7 +1519,7 @@ mod tests {
         let (ctx, crx) = mpsc_pair();
         // 非用户会话不能签发
         let anon = gw.client_connected("device:x", ctx.clone()).await;
-        let req = json!({"v":1,"id":"t0","op":"gateway.token.issue","payload":{"kind":"node","name":"n1"}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"t0","op":"gateway.token.issue","payload":{"kind":"node","name":"n1"}});
         let out = gw.on_client_text(&anon, &req.to_string()).await;
         assert!(matches!(&out[0], Outbound::Text(t) if t.contains("forbidden")));
 
@@ -1562,7 +1562,7 @@ mod tests {
         let gw = Gateway::new(Signer::generate());
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
-        let req = json!({"v":1,"id":"n1","op":"task.list","node":"bad:name","payload":{}});
+        let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"n1","op":"task.list","node":"bad:name","payload":{}});
         let out = gw.on_client_text(&session, &req.to_string()).await;
         assert!(
             matches!(&out[0], Outbound::Text(t) if t.contains("bad_request") && t.contains("node 非法")),
@@ -1579,7 +1579,7 @@ mod tests {
         let (ctx, _crx) = mpsc_pair();
         let session = gw.client_connected("user:u1", ctx).await;
         for node in [json!(""), json!(123), Value::Null] {
-            let req = json!({"v":1,"id":"n2","op":"sys.ping","node":node,"payload":{}});
+            let req = json!({"v":1,"ts":mixum_protocol::envelope::now_ms(),"id":"n2","op":"sys.ping","node":node,"payload":{}});
             let out = gw.on_client_text(&session, &req.to_string()).await;
             assert_eq!(error_code(&out[0]), "bad_request", "node={node}");
         }
