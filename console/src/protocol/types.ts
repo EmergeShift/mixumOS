@@ -137,7 +137,7 @@ export interface DisplayAttachResponse {
 
 export interface DisplayInputRequest {
   window: number
-  type: 'pointer_motion' | 'pointer_button' | 'pointer_axis' | 'key'
+  type: 'pointer_motion' | 'pointer_button' | 'pointer_axis' | 'key' | 'text'
   x?: number
   y?: number
   button?: 'left' | 'right' | 'middle'
@@ -145,6 +145,22 @@ export interface DisplayInputRequest {
   key?: number
   keysym?: string
   mods?: string[]
+  text?: string
+}
+
+export interface AudioAttachResponse {
+  sampleRate: number
+  channels: number
+  format: 's16le'
+  chunkMs: number
+}
+
+export interface AudioChunk {
+  seq: number
+  ptsUs: number
+  sampleRate: number
+  channels: number
+  pcm: Int16Array
 }
 
 export interface DisplayTakeoverRequest {

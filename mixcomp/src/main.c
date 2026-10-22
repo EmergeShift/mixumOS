@@ -43,6 +43,7 @@ static void focus_keyboard(struct mixcomp_server *s, struct mixcomp_window *w) {
 	} else {
 		wlr_seat_keyboard_notify_enter(s->seat, w->surface, NULL, 0, NULL);
 	}
+	text_input_focus(s, w);
 }
 
 static void route_motion_absolute(struct wl_listener *l, void *data) {
@@ -263,6 +264,9 @@ int main(int argc, char **argv) {
 
 	// 数据设备（剪贴板转发的基础，v1 仅挂载）。
 	wlr_data_device_manager_create(server.display);
+
+	// text-input-v3：宿主输入法提交成串文本（中文等）到焦点窗口。
+	text_input_init(&server);
 
 	// 控制通道轮询。
 	struct itimerspec its = {

@@ -1,7 +1,32 @@
 # e2e 测试镜像（Rust 守护进程变体）：mixum-agentd + mixcomp + foot。
 # 与 Dockerfile.e2e 唯一区别：mixumd 为 Rust 实现（mixum-agentd，
-# real-snapshot 特性的 musl arm64 产物）。
+# real-snapshot 特性的 musl 产物）。
 # 仅用于本地集成测试；正式镜像见 os/image/Dockerfile。
+#
+# 构建（x86_64 宿主）：
+#   cargo build --release --target x86_64-unknown-linux-musl -p mixum-agentd
+#   docker build -f tests/integration/Dockerfile.e2e-rust \
+#     --build-arg AGENTD_BIN=build/mixum-agentd-x64 -t mixumos-e2e-rust .
+FROM alpine:3.21 AS imeclient
+
+RUN apk add --no-cache gcc musl-dev wayland-dev wayland-protocols
+WORKDIR /ime
+COPY tests/integration/ime-client.c .
+RUN wayland-scanner client-header \
+		/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+		xdg-shell-client-protocol.h && \
+	wayland-scanner private-code \
+		/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+		xdg-shell-protocol.c && \
+	wayland-scanner client-header \
+		/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml \
+		text-input-v3-client-protocol.h && \
+	wayland-scanner private-code \
+		/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml \
+		text-input-v3-protocol.c && \
+	cc -O2 -Wall ime-client.c xdg-shell-protocol.c \
+		text-input-v3-protocol.c -lwayland-client -o ime-client
+
 FROM alpine:3.21
 
 RUN apk add --no-cache \
@@ -15,7 +40,9 @@ WORKDIR /opt/mixcomp
 COPY mixcomp/ /opt/mixcomp/
 RUN make && cp mixcomp /usr/local/bin/
 
-COPY build/mixum-agentd-arm64 /usr/local/bin/mixumd
+ARG AGENTD_BIN=build/mixum-agentd-arm64
+COPY ${AGENTD_BIN} /usr/local/bin/mixumd
+COPY --from=imeclient /ime/ime-client /usr/local/bin/ime-client
 COPY tests/integration/entrypoint-rust.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
