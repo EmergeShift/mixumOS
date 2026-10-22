@@ -1,7 +1,7 @@
 //! mixcomp 控制通道和窗口流 broker。
 
 use crate::wire::Window;
-use mixum_protocol::frames;
+use mixum_protocol::{frames, GuiSession};
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -154,6 +154,8 @@ pub struct Broker {
     socket_path: PathBuf,
     /// 任务引擎是否活跃:活跃时新窗口归 agent 模式(用户接管需 claim)。
     tasks_active: Arc<std::sync::atomic::AtomicBool>,
+    /// 窗口 id → 客户端 pid（mixcomp 在 window.open 里带上，仅用于会话元数据）。
+    pids: Arc<Mutex<HashMap<u32, i32>>>,
     /// 未知记录类型 / 校验错误的观测计数。
     unknown_records: Arc<std::sync::atomic::AtomicU64>,
     protocol_errors: Arc<std::sync::atomic::AtomicU64>,
@@ -177,6 +179,7 @@ impl Broker {
             comp: Arc::new(Mutex::new(HashMap::new())),
             comp_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             window_events,
+            pids: Arc::new(Mutex::new(HashMap::new())),
             socket_path: path.into(),
             tasks_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unknown_records: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -213,6 +216,22 @@ impl Broker {
     }
     pub async fn online(&self) -> bool {
         !self.comp.lock().await.is_empty()
+    }
+
+    /// 同步取窗口快照（快照 metadata 钩子用）。锁忙时返回空，下一次快照再收。
+    pub fn try_windows(&self) -> Vec<Window> {
+        self.windows
+            .try_lock()
+            .map(|all| all.values().map(|state| state.window.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// 同步取窗口 → pid 映射（仅用于会话元数据匹配）。
+    pub fn try_window_pids(&self) -> HashMap<u32, i32> {
+        self.pids
+            .try_lock()
+            .map(|pids| pids.clone())
+            .unwrap_or_default()
     }
     pub fn subscribe_windows(&self) -> broadcast::Receiver<Window> {
         self.window_events.subscribe()
@@ -294,6 +313,7 @@ impl Broker {
                 sub.sender.close();
             }
         }
+        self.pids.lock().await.remove(&id);
         let _ = self.window_events.send(Window {
             id,
             app_id: String::new(),
@@ -545,6 +565,7 @@ impl Broker {
                 .map(|(id, _)| *id)
                 .collect();
             for id in ids {
+                self.pids.lock().await.remove(&id);
                 if let Some(state) = all.remove(&id) {
                     for sub in state.subscribers.values() {
                         sub.sender.close();
@@ -671,6 +692,9 @@ impl Broker {
                         comp_id,
                     )
                     .await;
+                    if let Some(pid) = message.pid {
+                        self.pids.lock().await.insert(message.id, pid);
+                    }
                 }
                 "window.close" => {
                     if self.window_owner(message.id).await == Some(comp_id) {
@@ -730,7 +754,33 @@ struct CompMessageWire {
     #[serde(default)]
     focused: bool,
     #[serde(default)]
+    pid: Option<i32>,
+    #[serde(default)]
     codec: Option<String>,
+}
+
+/// 把 spawn_gui 记录的启动信息与 broker 当前窗口按 pid 合并成快照元数据。
+/// 找不到窗口的 launch 仍保留（restore 时至少能重放命令）。
+pub fn merge_gui_sessions(
+    launches: Vec<GuiSession>,
+    windows: &[Window],
+    pids: &HashMap<u32, i32>,
+) -> Vec<GuiSession> {
+    launches
+        .into_iter()
+        .map(|mut session| {
+            if let Some(window) = windows
+                .iter()
+                .find(|window| pids.get(&window.id) == Some(&session.pid))
+            {
+                session.app_id = window.app_id.clone();
+                session.title = window.title.clone();
+                session.width = window.width;
+                session.height = window.height;
+            }
+            session
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1155,5 +1205,49 @@ mod tests {
         let mut payload = vec![0u8; len];
         client.read_exact(&mut payload).await.unwrap();
         (header[4], serde_json::from_slice(&payload).unwrap())
+    }
+}
+
+#[cfg(test)]
+mod gui_session_tests {
+    use super::*;
+
+    #[test]
+    fn merge_gui_sessions_matches_pid() {
+        let launches = vec![GuiSession {
+            pid: 7,
+            command: "/usr/bin/foot".into(),
+            ..Default::default()
+        }];
+        let windows = vec![Window {
+            id: 1,
+            app_id: "foot".into(),
+            title: "term".into(),
+            width: 640,
+            height: 400,
+            focused: true,
+            mode: MODE_FREE.into(),
+            codec: None,
+        }];
+        let pids = HashMap::from([(1, 7)]);
+        let merged = merge_gui_sessions(launches, &windows, &pids);
+        assert_eq!(merged[0].app_id, "foot");
+        assert_eq!(merged[0].width, 640);
+    }
+
+    #[tokio::test]
+    async fn window_pid_map_tracks_open_and_close() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-pid.sock");
+        let open = serde_json::to_vec(&serde_json::json!({
+            "type":"window.open","id":3,"app_id":"a","title":"A",
+            "width":10,"height":20,"focused":false,"pid":4242
+        }))
+        .unwrap();
+        broker.handle_comp(&open, 1).await;
+        assert_eq!(broker.try_window_pids().get(&3), Some(&4242));
+
+        let close = serde_json::to_vec(&serde_json::json!({"type":"window.close","id":3})).unwrap();
+        broker.handle_comp(&close, 1).await;
+        assert!(broker.try_window_pids().is_empty());
     }
 }

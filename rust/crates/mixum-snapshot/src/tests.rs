@@ -452,3 +452,29 @@ fn multi_root_dump_passes_every_tree() {
     assert!(log.contains("--tree 111"), "缺少任务根: {log}");
     assert!(log.contains("--tree 222"), "缺少合成器根: {log}");
 }
+
+#[test]
+fn metadata_hook_attaches_gui_sessions() {
+    let (mut e, _data, _root) = engine(false);
+    e.metadata = Some(Box::new(|node| {
+        node.gui_sessions.push(mixum_protocol::GuiSession {
+            app_id: "foot".into(),
+            title: "shell".into(),
+            width: 640,
+            height: 400,
+            command: "/usr/bin/foot".into(),
+            args: vec!["--hold".into()],
+            cwd: "/var/lib/mixum/work".into(),
+            env: Default::default(),
+            pid: 42,
+        });
+    }));
+    let node = e.snapshot(KIND_DISK, "gui", false).unwrap();
+    assert_eq!(node.gui_sessions.len(), 1);
+    let raw = serde_json::to_value(&node).unwrap();
+    assert_eq!(raw["guiSessions"][0]["appId"], "foot");
+    assert_eq!(raw["guiSessions"][0]["command"], "/usr/bin/foot");
+
+    let stored = e.tree.get(&node.id).unwrap();
+    assert_eq!(stored.gui_sessions[0].args, vec!["--hold"]);
+}
