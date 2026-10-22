@@ -27,7 +27,8 @@ wsl --terminate "$NAME"
 sleep 2
 echo "==> 启动 mixumd(开机自启)"
 wsl -d "$NAME" -u root -- sh -c \
-	'systemctl enable --now mixumd 2>&1; sleep 2; systemctl is-active mixumd'
+	'systemctl enable --now pulseaudio-mixum 2>/dev/null || true
+	 systemctl enable --now mixumd 2>&1; sleep 2; systemctl is-active mixumd'
 echo "==> (可选)窗口流:安装测试应用与字体,并启用 mixcomp"
 wsl -d "$NAME" -u root -- sh -c \
 	'pacman -Sy --noconfirm --needed foot ttf-dejavu >/dev/null 2>&1 || echo "foot 安装失败(不影响 mixumd)"
