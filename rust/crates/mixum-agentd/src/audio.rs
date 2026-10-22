@@ -5,7 +5,7 @@
 //! 第一个订阅者启动采集进程，最后一个离开时终止。
 
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mixum_protocol::frames;
@@ -28,6 +28,9 @@ pub struct AudioHub {
     command: Option<String>,
     subscribers: AtomicUsize,
     child: Mutex<Option<Child>>,
+    /// 每次 start/stop 递增；旧 reader 线程看到代数变化后退出，避免
+    /// kill 慢一拍时把上一轮音频混进新订阅。
+    generation: AtomicU64,
     tx: broadcast::Sender<Arc<[u8]>>,
 }
 
@@ -38,6 +41,7 @@ impl AudioHub {
             command,
             subscribers: AtomicUsize::new(0),
             child: Mutex::new(None),
+            generation: AtomicU64::new(0),
             tx,
         })
     }
@@ -69,12 +73,22 @@ impl AudioHub {
     }
 
     fn start(self: &Arc<Self>, command: &str) -> Result<(), String> {
-        let mut child = Command::new("sh")
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut command_builder = Command::new("sh");
+        command_builder
             .arg("-c")
             .arg(command)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        // 采集命令通常是 `parec ...`；让 sh 与 parec 同属一个新进程组，
+        // stop 时整组杀，避免只杀 sh 留下 parec 孤儿。
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command_builder.process_group(0);
+        }
+        let mut child = command_builder
             .spawn()
             .map_err(|e| format!("启动音频采集失败: {e}"))?;
         let mut stdout = child
@@ -82,12 +96,15 @@ impl AudioHub {
             .take()
             .ok_or_else(|| "音频采集无 stdout".to_owned())?;
         let tx = self.tx.clone();
+        let hub = Arc::clone(self);
         std::thread::spawn(move || {
             use std::io::Read;
             let mut pcm = vec![0u8; CHUNK_BYTES];
             let mut seq: u32 = 0;
             let start = std::time::Instant::now();
-            while stdout.read_exact(&mut pcm).is_ok() {
+            while hub.generation.load(Ordering::SeqCst) == generation
+                && stdout.read_exact(&mut pcm).is_ok()
+            {
                 let pts_us = start.elapsed().as_micros() as u64;
                 let frame = frames::marshal_audio(seq, pts_us, &pcm);
                 seq = seq.wrapping_add(1);
@@ -100,8 +117,19 @@ impl AudioHub {
     }
 
     fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         if let Some(mut child) = self.child.lock().expect("音频子进程锁").take() {
-            let _ = child.kill();
+            #[cfg(unix)]
+            {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-(child.id() as i32)),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill();
+            }
             let _ = child.wait();
         }
     }
