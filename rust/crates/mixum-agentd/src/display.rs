@@ -494,6 +494,18 @@ impl Broker {
             let _ = conn.tx.send(CompMessage::Json(value)).await;
         }
     }
+
+    /// 从同步上下文（快照 freeze 钩子）尽力通知所有 comp。
+    /// 不等待、不阻塞：拿不到连接表或队列满就跳过。冻结本身仍生效，
+    /// comp 最坏晚一个轮询节拍收到 pause，不会出现无限堆积。
+    pub fn try_notify_comps(&self, value: serde_json::Value) {
+        let Ok(comps) = self.comp.try_lock() else {
+            return;
+        };
+        for conn in comps.values() {
+            let _ = conn.tx.try_send(CompMessage::Json(value.clone()));
+        }
+    }
     async fn serve_comp(&self, stream: UnixStream) -> Result<(), DisplayError> {
         let (mut read, mut write) = stream.into_split();
         let id = self
@@ -1122,6 +1134,17 @@ mod tests {
         let (kind, payload) = read_record(&mut client).await;
         assert_eq!(kind, 0x01);
         assert_eq!(payload["type"], "stream.stop");
+    }
+
+    #[tokio::test]
+    async fn sync_notify_reaches_comp_queue() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-notify.sock");
+        let (tx, mut rx) = mpsc::channel(4);
+        broker.comp.lock().await.insert(7, CompConn { tx });
+        broker.try_notify_comps(serde_json::json!({"type": "snapshot.freeze"}));
+        match rx.recv().await.expect("应收到冻结通知") {
+            CompMessage::Json(value) => assert_eq!(value["type"], "snapshot.freeze"),
+        }
     }
 
     #[cfg(unix)]

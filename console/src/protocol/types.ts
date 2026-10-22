@@ -162,6 +162,8 @@ export interface VideoFrameHeader {
   size: number
   keyframe: boolean
   hasCursor: boolean
+  /** 快照冻结状态帧：payload 为空，客户端保留最后一帧画面。 */
+  frozen: boolean
   cursorX: number
   cursorY: number
   cursorW: number
