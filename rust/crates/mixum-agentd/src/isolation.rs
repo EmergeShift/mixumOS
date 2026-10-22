@@ -71,6 +71,11 @@ impl CgroupFreezer {
     }
 
     /// 把调用进程挂进该 cgroup。cgroup v2 约定写 "0" 表示当前进程。
+    /// 父进程预开 cgroup.procs:pre_exec 里只做 write,不再 open/分配。
+    pub fn open_procs(&self) -> io::Result<std::fs::File> {
+        std::fs::OpenOptions::new().write(true).open(&self.inner.procs)
+    }
+
     pub fn attach_current(&self) -> io::Result<()> {
         fs::write(&self.inner.procs, b"0")
     }
@@ -144,12 +149,17 @@ pub fn apply_spawn_isolation(
         None => Ok(None),
     };
     let mut prepared = Some(prepared);
+    // cgroup 句柄在父进程打开;fork 后只 write,避免 open/分配。
+    let cgroup_procs = cgroup.as_ref().map(CgroupFreezer::open_procs);
     // SAFETY: pre_exec 在 fork 后、exec 前的单线程上下文中运行；
     // 这里只做 write 与 Landlock 系统调用，不跨线程访问共享状态。
     unsafe {
         cmd.pre_exec(move || {
-            if let Some(cgroup) = cgroup.as_ref() {
-                cgroup.attach_current()?;
+            if let Some(procs) = cgroup_procs.as_ref() {
+                let file = procs
+                    .as_ref()
+                    .map_err(|err| io::Error::from_raw_os_error(err.raw_os_error().unwrap_or(5)))?;
+                nix::unistd::write(file, b"0")?;
             }
             match prepared.take().expect("pre_exec 只调用一次") {
                 Ok(Some(landlock)) => landlock.enforce(),
