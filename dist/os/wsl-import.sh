@@ -31,8 +31,7 @@ wsl -d "$NAME" -u root -- sh -c \
 echo "==> (可选)窗口流:安装测试应用与字体,并启用 mixcomp"
 wsl -d "$NAME" -u root -- sh -c \
 	'pacman -Sy --noconfirm --needed foot ttf-dejavu >/dev/null 2>&1 || echo "foot 安装失败(不影响 mixumd)"
-	 systemctl enable --now mixcomp 2>&1 >/dev/null
-	 systemctl enable foot-test 2>/dev/null || true' || true
+	 systemctl enable --now mixcomp 2>&1 >/dev/null' || true
 
 TOKEN="$(wsl -d "$NAME" -u root -- cat /var/lib/mixum/admin-token 2>/dev/null | tr -d '\r\n')"
 echo "==> 完成。Windows 直连: wss://127.0.0.1:7601"
