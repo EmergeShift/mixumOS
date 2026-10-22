@@ -1,10 +1,11 @@
+mod agent;
 mod cmd;
 mod power;
 mod transport;
 mod view;
 
 use clap::Parser;
-use cmd::{Cli, Command, FileSubcommand, SnapSubcommand, TaskSubcommand};
+use cmd::{AgentSubcommand, Cli, Command, FileSubcommand, SnapSubcommand, TaskSubcommand};
 use mixum_protocol::frames::{marshal_file, unmarshal_file};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -98,6 +99,7 @@ async fn run() -> Result<(), Error> {
         },
         Command::File(file) => file_command(&client, file.command).await?,
         Command::Serve(args) => view::serve(client, &args.bind).await?,
+        Command::Agent(args) => agent_command(&client, args.command).await?,
         Command::Connect(_) | Command::Power(_) => unreachable!(),
     }
     Ok(())
@@ -294,6 +296,97 @@ fn resolve_fingerprint(
             None
         }
     })
+}
+
+async fn agent_command(client: &Client, command: AgentSubcommand) -> Result<(), Error> {
+    match command {
+        AgentSubcommand::List { json } => {
+            let outcome = agent::run_shell(client, &agent::probe_script(), false).await?;
+            if outcome.state != "completed" {
+                return Err(Error::Remote {
+                    code: outcome.state,
+                    message: outcome.error.unwrap_or_else(|| "探测失败".into()),
+                });
+            }
+            let installed = |name: &str| {
+                outcome
+                    .logs
+                    .iter()
+                    .any(|line| line == &format!("installed {name}"))
+            };
+            if json {
+                let items: Vec<_> = agent::AGENTS
+                    .iter()
+                    .map(|spec| {
+                        json!({
+                            "name": spec.name,
+                            "summary": spec.summary,
+                            "installed": installed(spec.name)
+                        })
+                    })
+                    .collect();
+                print_json(Some(json!(items)));
+            } else {
+                for spec in agent::AGENTS {
+                    println!(
+                        "{:<12} {:<6} {}",
+                        spec.name,
+                        if installed(spec.name) { "已安装" } else { "未安装" },
+                        spec.summary
+                    );
+                }
+            }
+        }
+        AgentSubcommand::Install {
+            name,
+            dry_run,
+            cmd,
+            json,
+        } => {
+            let spec = agent::find(&name).ok_or_else(|| {
+                Error::Config(format!(
+                    "未知 agent: {name}（可用: {}）",
+                    agent::names().join(", ")
+                ))
+            })?;
+            let script = agent::install_script_with(spec, cmd.as_deref());
+            if dry_run {
+                print!("{script}");
+                return Ok(());
+            }
+            let outcome = agent::run_shell(client, &script, true).await?;
+            if json {
+                print_json(Some(json!({
+                    "name": spec.name,
+                    "state": outcome.state,
+                    "error": outcome.error,
+                    "logs": outcome.logs
+                })));
+            }
+            if outcome.state != "completed" {
+                return Err(Error::Remote {
+                    code: outcome.state,
+                    message: outcome.error.unwrap_or_else(|| "安装失败".into()),
+                });
+            }
+            if !json {
+                println!(
+                    "已安装 {}；提示词模板：~/.mixum/agents/{}/PROMPT.md",
+                    spec.name, spec.name
+                );
+            }
+        }
+        AgentSubcommand::Template { name } => {
+            let spec = agent::find(&name).ok_or_else(|| {
+                Error::Config(format!(
+                    "未知 agent: {name}（可用: {}）",
+                    agent::names().join(", ")
+                ))
+            })?;
+            println!("{}", agent::template(spec.name));
+        }
+    }
+    Ok(())
 }
 
 async fn task_command(client: &Client, command: TaskSubcommand) -> Result<(), Error> {

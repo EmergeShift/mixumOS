@@ -27,6 +27,7 @@ pub enum Command {
     File(FileCommand),
     Serve(ServeArgs),
     Power(PowerArgs),
+    Agent(AgentArgs),
 }
 
 #[derive(Debug, Args)]
@@ -167,6 +168,35 @@ pub struct PowerArgs {
     /// 迁移时长上限(秒);0 = --simulate-sleep 不限时,--watch 默认 30s。
     #[arg(long, default_value_t = 0)]
     pub deadline_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentSubcommand {
+    /// 列出内置 agent 与容器内安装状态。
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 在容器内一键安装 agent，并写入提示词模板。
+    Install {
+        name: String,
+        /// 只打印将执行的脚本，不提交任务。
+        #[arg(long)]
+        dry_run: bool,
+        /// 覆盖安装命令（测试或私有源）；仍会写入提示词模板。
+        #[arg(long)]
+        cmd: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// 打印可复制到任意 agent 的提示词模板。
+    Template { name: String },
 }
 
 fn parse_param(raw: &str) -> Result<(String, String), String> {
