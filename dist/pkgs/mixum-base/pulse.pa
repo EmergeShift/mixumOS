@@ -1,0 +1,4 @@
+# mixumOS 容器音频：应用播放进 null sink，parec 从 monitor 采集。
+load-module module-native-protocol-unix socket=/run/mixum/pulse/native auth-anonymous=1
+load-module module-null-sink sink_name=mixum sink_properties=device.description=mixumOS
+set-default-sink mixum

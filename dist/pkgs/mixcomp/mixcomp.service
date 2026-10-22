@@ -10,6 +10,7 @@ Requires=mixumd.service
 # WAYLAND_DISPLAY=wayland-0 + XDG_RUNTIME_DIR=/run/mixum。
 User=mixum
 Environment=XDG_RUNTIME_DIR=/run/mixum
+Environment=PULSE_SERVER=unix:/run/mixum/pulse/native
 ExecStart=/usr/bin/mixcomp --sock /run/mixum/display.sock
 Restart=on-failure
 RestartSec=2

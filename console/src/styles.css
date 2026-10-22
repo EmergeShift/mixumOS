@@ -832,3 +832,9 @@ textarea {
   font-size: 14px;
   pointer-events: none;
 }
+
+/* 音频音量滑杆（画布工具栏） */
+.canvas-head .audio-vol {
+  width: 70px;
+  accent-color: #6aa9ff;
+}

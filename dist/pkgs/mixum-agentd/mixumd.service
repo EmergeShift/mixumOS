@@ -4,13 +4,15 @@
 # display.sock);工作目录 /var/lib/mixum(状态目录由 StateDirectory
 # 建,属主 mixum,用户由 mixum-base 的 sysusers.d 创建)。
 Description=mixumOS agent daemon(任务引擎/快照引擎/显示 broker/WSS)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target pulseaudio-mixum.service
+Wants=network-online.target pulseaudio-mixum.service
 # compositor 依赖本服务的 display.sock,先于它启动
 Before=mixcomp.service
 
 [Service]
 User=mixum
+Environment=XDG_RUNTIME_DIR=/run/mixum
+Environment=PULSE_SERVER=unix:/run/mixum/pulse/native
 StateDirectory=mixum
 WorkingDirectory=/var/lib/mixum
 ExecStart=/usr/bin/mixumd --config /etc/mixum/mixumd.json
