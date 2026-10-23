@@ -11,8 +11,9 @@ pkgdesc="CRIU 4.1 patched for mixumOS memory snapshots"
 arch=(aarch64 x86_64)
 url="https://github.com/checkpoint-restore/criu"
 license=('GPL2')
-depends=(glibc gcc-libs libnet protobuf-c libnl libcap util-linux-libs nftables)
+depends=(glibc gcc-libs libnet protobuf-c libnl libcap util-linux-libs nftables libbpf)
 makedepends=(base-devel git python)
+options=(!strip)
 provides=(criu)
 conflicts=(criu)
 source=("https://github.com/checkpoint-restore/criu/archive/refs/tags/v${pkgver}.tar.gz")
@@ -28,7 +29,7 @@ prepare() {
 
 build() {
 	cd "criu-${pkgver}"
-	make -j"$(nproc)" WERROR=0
+	make -j"$(nproc)" WERROR=0 NO_LIBBPF=1
 }
 
 package() {
