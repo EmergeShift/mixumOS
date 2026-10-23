@@ -93,9 +93,7 @@ impl Criu {
         }
         cmd.arg("--images-dir").arg(dir.as_ref()).args([
             "--shell-job",
-            // GUI 快照必须把 Wayland 连接两端都包含进来；外部 unix socket
-            // 由 --ext-unix-sk 放行，幽灵文件上限放大以容纳 wlroots shm。
-            "--ext-unix-sk",
+            // 幽灵文件上限放大以容纳 wlroots shm。
             "--file-locks",
             "--ghost-limit",
             "2147483648",
@@ -103,6 +101,11 @@ impl Criu {
             "-o",
             "dump.log",
         ]);
+        // Wayland 需要把任务与 compositor 两端的外部 unix socket 都放行。
+        // 单任务 dump 带上该标志会在当前内核的 parasite 阶段卡住。
+        if pids.len() > 1 {
+            cmd.arg("--ext-unix-sk");
+        }
         if leave_running {
             cmd.arg("--leave-running");
         }
