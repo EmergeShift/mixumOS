@@ -22,7 +22,7 @@ CFLAGS += -DHAVE_OPENH264 $(shell pkg-config --cflags openh264 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs openh264 2>/dev/null)
 endif
 
-SRCS := src/main.c src/window.c src/stream.c src/input.c src/text_input.c src/encoder_h264.c
+SRCS := src/main.c src/window.c src/stream.c src/input.c src/text_input.c src/clipboard.c src/encoder_h264.c
 OBJS := $(SRCS:.c=.o)
 # 协议文件现场生成（发行版打包时 build() 会装 wayland-protocols，无需补丁）：
 # - xdg-shell 头供 wlroots 头文件引用（wlr_xdg_shell.h）；

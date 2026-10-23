@@ -1,6 +1,6 @@
 # 剪贴板同步（A 路线）设计草案
 
-状态：草案，待上游评审。本文只描述协议与实现边界，不包含代码改动。
+状态：已接受；v1 按本文件实现（实现细节以代码与 `docs/protocol.md` 为准）。
 参考实现位于 fork（`1179e72`，sync 后恢复于 `475da2c`），e2e 见
 `tests/integration/clipboard-e2e.mjs`。
 

@@ -171,6 +171,15 @@ snapshots.md §4。`guiSessions` 是 OS 侧扩展（restore 后重放窗口）�
 | display.input | `{ window, type, … }`;type = `pointer_motion`/`pointer_button`/`pointer_axis`/`key`/`text`;`text` 为宿主输入法已提交的字符串(≤8192 字节),经服务端 text-input-v3 交给焦点窗口 | `{ ok: true }` |
 | display.takeover | `{ window, action: claim\|release, force? }` | `{ mode }` |
 | display.windows | — | `{ subscribed }`(此后推送窗口增删/改名) |
+| display.clipboard.set | `{ window, text }` | `{ ok: true }` |
+
+display.clipboard.set 把 console 侧文本设为窗口所属 comp 的 seat selection
+(容器应用可直接粘贴);需 display.input 能力,窗口归 agent 时拒绝(与注入同规),
+text 1..=4MiB、空串拒绝。`display.windows` 订阅建立后,服务器以 op
+`display.clipboard.changed`(payload `{ window, text }`)推送容器侧剪贴板
+变化,并再次按令牌的窗口 ACL 过滤;未声明剪贴板能力的 comp 返回 conflict。
+console 写入浏览器剪贴板并以“最近一轮文本”做回声抑制,浏览器 focus/paste
+时反向推送。
 
 ### 4.5 文件传输
 
