@@ -5,6 +5,11 @@
 # external agent），并把 redesign-cli 的模型配置挂进环境。
 set -e
 
+# 任务身份默认 mixum;镜像里没有该用户时显式使用 root(agentd 不再静默回退)。
+if ! id mixum >/dev/null 2>&1; then
+	export MIXUM_TASK_USER="${MIXUM_TASK_USER:-root}"
+fi
+
 DATA=/var/lib/mixum
 WORK=/var/lib/mixum/work
 HOME_DIR=/var/lib/mixum/home
