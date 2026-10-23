@@ -121,6 +121,8 @@ const winB = windows[1]?.id;
 const route = async (windowId) => {
   const text = `mixum-clip-route-${windowId}-${crypto.randomUUID().slice(0, 8)}`;
   await s.call("display.input", { window: windowId, type: "pointer_motion", x: 5, y: 5 });
+  // comp 的控制通道 200ms 轮询一次:等它处理完焦点注入再触发复制。
+  await new Promise((r) => setTimeout(r, 300));
   sh(`printf %s "${text}" | wl-copy`);
   for (let i = 0; i < 50; i++) {
     await new Promise((r) => setTimeout(r, 100));
@@ -145,6 +147,36 @@ try {
 } catch { /* 拒绝即失败 */ }
 await s.call("display.takeover", { window: win, action: "release" });
 console.log(`归属:user 接管下下行${userOk ? "放行(与 input 同规)" : "被拒(异常)"}`);
+
+// 4. agent 模式:任务活跃时窗口归 agent,下行必须拒绝。
+const task = await s.call("task.submit", {
+  instruction: "sleep 30",
+  agent: "shell",
+  runner: "here",
+  params: { cmd: "sleep 30" },
+});
+let agentRejected = false;
+for (let i = 0; i < 30; i++) {
+  const current = (await s.call("display.list", {})).windows?.find((item) => item.id === win);
+  if (current?.mode === "agent") break;
+  await new Promise((r) => setTimeout(r, 100));
+}
+try {
+  await s.call("display.clipboard.set", { window: win, text: "agent-owned" });
+} catch {
+  agentRejected = true;
+}
+if (task?.id) await s.call("task.cancel", { id: task.id });
+console.log(`agent 模式拒绝:${agentRejected ? "是" : "否(异常)"}`);
+
+// 4MiB 边界放在最后:4MB 控制消息会占用 comp 的控制通道,避免影响上面的
+// 焦点注入/上行归属用例。
+let maxAccepted = false;
+try {
+  await s.call("display.clipboard.set", { window: win, text: "y".repeat(4 * 1024 * 1024) });
+  maxAccepted = true;
+} catch { /* 拒绝即失败 */ }
+console.log(`4MiB 边界接受:${maxAccepted ? "是" : "否(异常)"}`);
 s.close();
 
 const ok =
@@ -153,8 +185,10 @@ const ok =
   received?.window === win &&
   emptyRejected &&
   oversizedRejected &&
+  maxAccepted &&
   routedA?.window === winA &&
   routedB?.window === winB &&
+  agentRejected &&
   userOk;
-console.log(ok ? "PASS 剪贴板:下行入选区/上行出事件/归属同规/边界与多窗口" : "FAIL 剪贴板双向同步不符");
+console.log(ok ? "PASS 剪贴板:下行入选区/上行出事件/归属与 ACL/边界与多窗口" : "FAIL 剪贴板双向同步不符");
 process.exit(ok ? 0 : 1);
