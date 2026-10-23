@@ -1,0 +1,38 @@
+# criu-mixum —— patched CRIU 4.1 for mixumOS memory snapshots.
+#
+# Stock CRIU 4.2.1 crashes in the parasite on the 6.18 mixum kernel
+# (si_status=11). 4.1 works after dropping the duplicate rseq enum block.
+# This package installs only the binary; CRIU plugins from the stock package
+# must not be loaded with this build.
+pkgname=criu-mixum
+pkgver=4.1
+pkgrel=1
+pkgdesc="CRIU 4.1 patched for mixumOS memory snapshots"
+arch=(aarch64 x86_64)
+url="https://github.com/checkpoint-restore/criu"
+license=('GPL2')
+depends=(glibc gcc-libs libnet protobuf-c libnl libcap util-linux-libs nftables)
+makedepends=(base-devel git python)
+provides=(criu)
+conflicts=(criu)
+source=("https://github.com/checkpoint-restore/criu/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('9a3094f3d0aa6cfa8bd5c9b92c05f4a566ad21ee20eb9b2fbc6129a74d1f6dc7')
+
+prepare() {
+	cd "criu-${pkgver}"
+	# Current glibc already defines the rseq enums; the bundled block
+	# duplicates them and fails to compile.
+	sed -i '/#ifdef CONFIG_HAS_NO_LIBC_RSEQ_DEFS/,/#endif \/\* CONFIG_HAS_NO_LIBC_RSEQ_DEFS \*\//d' \
+		criu/include/linux/rseq.h
+}
+
+build() {
+	cd "criu-${pkgver}"
+	make -j"$(nproc)" WERROR=0
+}
+
+package() {
+	cd "criu-${pkgver}"
+	install -Dm755 criu/criu "$pkgdir/usr/bin/criu"
+	install -Dm644 COPYING "$pkgdir/usr/share/licenses/${pkgname}/COPYING"
+}
