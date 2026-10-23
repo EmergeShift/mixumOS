@@ -254,7 +254,7 @@ main:  genesis ── n1 ── n2 ── n3
 - Apple Container 的内核是**宿主级**设置，切换会影响机器上所有容器；[Apple Container 指南](docs/apple-container.zh-CN.md)写明了如何切回以及会失去什么。
 - 项目明确不追求“单一静态二进制”的 unikernel 叙事；这是一个发行版，依赖与安全更新交给 pacman。
 
-分阶段计划见 [docs/roadmap.md](docs/roadmap.md)。
+分阶段计划见 [docs/roadmap.zh-CN.md](docs/roadmap.zh-CN.md)。
 
 ## 仓库地图
 
@@ -285,7 +285,7 @@ mixumOS/
 | [发行版构建](docs/distro.zh-CN.md) | 包、仓库、镜像构建与踩坑 |
 | [控制台](console/README.md) | PWA 架构与本地开发 |
 | [0.1.5 发布说明](docs/release-notes-0.1.5.md) | 当前版本改了什么 |
-| [路线图](docs/roadmap.md) | 阶段与完成标准 |
+| [路线图](docs/roadmap.zh-CN.md) | 阶段与完成标准 |
 
 设计文档目前以中文为主；英文入口是这份 README 与 MAP 规范。欢迎帮忙翻译，不需要改代码。
 
