@@ -47,7 +47,7 @@ Our attempt is to treat the workspace as an **event-sourced filesystem**. Every 
 |---|---|
 | **Snapshot tree, not a save button** | Content-addressed chunks + a DAG of nodes. Restore in place and keep working to create a parallel timeline; fork any past node into a named branch; nothing is ever deleted by rolling back. |
 | **Hot pre-task snapshots** | A task snapshots its workspace *before* the agent runs. Measured median: **8.8 ms** for an unchanged 300-file workspace, **45 ms** for an unchanged 50 MiB file. |
-| **Native window streaming** | Each GUI window is captured independently by `mixcomp` and streamed over MAP. Attach a window, inject input, take over from the agent — or watch read-only. |
+| **Native window streaming** | Each GUI window is captured independently by `mixcomp`, or by the optional B compositor, and streamed over MAP. Attach a window, inject input, take over from the agent — or watch read-only. |
 | **State that travels** | `snap.push` moves the tree peer-to-peer. The receiver reports missing chunks; re-pushing is **zero bytes**. A lid-close migration can resume a task in the cloud. |
 | **GUI sessions that replay** | Snapshots record `guiSessions`; after a restore or a `.mart` migration, applications are relaunched with their windows. |
 | **Agents as first-class citizens** | Rust `AgentDriver` SPI for embedded agents; the tiny line-delimited JSON **MAP-Bridge** for everything else. |
@@ -292,6 +292,7 @@ mixumOS/
 | [Host integration](docs/host-integration.md) | `mixum-ctl`, power hooks, local viewer, audio/IME |
 | [Backends](docs/backends.md) | Docker, WSL 2, nvx, Kubernetes |
 | [Security](docs/security.md) | Threat model and every defense |
+| [Documentation map](DOCS.md) | Language, status and docs-first items for every page |
 | [Migration](docs/migration.md) | `.mart` bundles and cross-device restore |
 | [Distribution](docs/distro.md) | Packages, repo, image build and known pits |
 | [Console](console/README.md) | PWA architecture and local dev |

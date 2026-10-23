@@ -1,5 +1,7 @@
 # PoC：CRIU + Wayland 会话快照/恢复
 
+> **状态：PoC 记录，不是产品路径。** 仅同机同内核；跨设备迁移未验证。
+> **Status: PoC, not a product path.** Same machine and kernel only; cross-device migration is not verified.
 > 结论：在 Apple Container 1.5.0 + `linux-mixum-micro`（6.18.35）上，
 > 用 CRIU 3.17.1 对 **Sway（headless）+ foot** 整个会话树做 checkpoint，
 > kill 后 restore，Sway IPC 正常，`swaymsg -t get_tree` 里仍能看到 `app_id: foot`。

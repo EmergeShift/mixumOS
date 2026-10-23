@@ -1,5 +1,7 @@
 # mixumOS 宿主后端形态
 
+> **状态：部分实现。** Apple Container / Docker / WSL 2 可用；`nvx` 仍只是早期脚本。
+> **Status: partial.** Apple Container / Docker / WSL 2 work; `nvx` is still an early script.
 > mixumd(agentd)对运行环境没有任何容器/虚拟机假设:它是一个 Linux
 > 守护进程,需要「一个 Linux 用户态 + 工作区目录(快照引擎打包
 > work root)+ 可选的 Wayland 合成器(mixcomp)」。因此任何能提供

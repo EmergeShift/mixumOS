@@ -1,5 +1,7 @@
 # gateway:云端枢纽设计(多容器路由、设备配对、令牌分发)
 
+> **状态：设计定稿，未实现。** 里程碑见 §9；当前代码没有 gateway。
+> **Status: design, not implemented.** See §9 for milestones; there is no gateway code yet.
 状态:设计定稿(2026-10-18),未实现。实施里程碑见 §9。
 
 ## 1. 定位与拓扑

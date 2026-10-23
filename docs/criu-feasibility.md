@@ -1,5 +1,7 @@
 # CRIU 跨内核迁移可行性验证
 
+> **状态：可行性研究，不是产品能力。** 结论只覆盖受控实验；跨内核/跨设备迁移仍需工程化。
+> **Status: research, not a product feature.** The results cover controlled experiments only.
 状态:**受控实验完成(2026-10-20)——同内核基线 PASS;跨内核 restore
 受控重跑两轮 PASS(进程计数继续)。此前「不可行/证据不足」均系环境
 混杂,已纠正;证据与分类见 §4.4。**

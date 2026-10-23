@@ -31,7 +31,7 @@ mixcomp 基于 wlroots 0.18，运行在 mixumOS 容器内，只做一件事：
 
 | 编码 | 触发 | 说明 |
 |------|------|------|
-| JPEG | 默认 | libjpeg-turbo；按 DRM 格式选 `JCS_EXT_BGRA` / `JCS_EXT_RGBA`；每帧都是关键帧 |
+| JPEG | 未协商时的基线 | libjpeg-turbo；按 DRM 格式选 `JCS_EXT_BGRA` / `JCS_EXT_RGBA`；每帧都是关键帧 |
 | PNG + damage | `stream.start {codec:"png"}` | 逐行 `memcmp` 找脏区包围盒，只发脏区 PNG 补丁；画面未变但光标移动时发 `format=0` 的空补丁；重新订阅强制首帧全量 |
 | H.264 | `stream.start {codec:"h264"}` 且编译期检测到 openh264 | `SCREEN_CONTENT_REAL_TIME`，2 秒 IDR；编码器缺失/失败时回告 `jpeg` |
 

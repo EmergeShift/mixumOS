@@ -1,5 +1,7 @@
 # 剪贴板同步（A 路线）设计草案
 
+> **状态：设计稿，未实现。** 本文只描述协议与实现边界；代码尚未合并，参考实现只在 fork 中。
+> **Status: design / not implemented.** The protocol is described here; the code is not merged.
 状态：草案，待上游评审。本文只描述协议与实现边界，不包含代码改动。
 参考实现位于 fork（`1179e72`，sync 后恢复于 `475da2c`），e2e 见
 `tests/integration/clipboard-e2e.mjs`。

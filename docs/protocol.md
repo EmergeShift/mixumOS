@@ -279,7 +279,7 @@ WebCodecs 解码。mixumd↔mixcomp 私有通道以记录类型区分
 (0x02=JPEG/0x03=H.264),对公有协议不可见;编码器缺失由 mixcomp 经
 控制消息回告,broker 统一切换并随 window 事件广播。
 
-**无损 damage 流(2026-10-19 起,实验)**:`display.attach` 可协商
+**无损 damage 流(2026-10-19 起;两个参考实现已使用,尚未进入一致性套件)**:`display.attach` 可协商
 `codec:"png"`。首帧/尺寸变化发全量 PNG;之后只发脏区包围盒,payload 在
 27 字节 video 头后追加 20 字节 patch 头(`x,y,w,h,format`,小端):
 `format=2` 为 PNG 补丁,`format=0` 仅更新光标;无变化不发帧。帧头 `flags`
