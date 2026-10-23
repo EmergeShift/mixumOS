@@ -6,14 +6,14 @@
 //! - 无审批人时超时拒绝，绝不默认放行；
 //! - 审计只记录命令与结果，不记录环境变量中的秘密。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::Read;
-use std::os::unix::fs::MetadataExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mixum_protocol::envelope::{new_id, Envelope};
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,11 @@ use crate::server::SessionStore;
 const REQUEST_TTL: Duration = Duration::from_secs(120);
 const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 const OUTPUT_LIMIT: usize = 64 * 1024;
+/// 同时待审批上限与请求频率上限，避免容器内进程刷屏或堆积请求。
+const MAX_PENDING: usize = 8;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+const RATE_PER_TASK: usize = 6;
+const RATE_GLOBAL: usize = 20;
 /// 审批后固定使用的 PATH；程序解析只在这几个 root 目录里做。
 const TRUSTED_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 /// 本 broker 不提供 root shell，也不允许借 wrapper 间接起 shell。
@@ -39,8 +44,12 @@ pub struct Decision {
     pub approve: bool,
     #[serde(default)]
     pub reason: String,
+    /// 目前只支持单次审批；保留字段用于协议前向兼容。
     #[serde(default)]
     pub scope: String,
+    /// 审批人身份，由已认证的管理会话填写并写入审计。
+    #[serde(default)]
+    pub approver: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +63,38 @@ pub struct Outcome {
 struct Pending {
     request: Value,
     tx: oneshot::Sender<Decision>,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct State {
+    pending: HashMap<String, Pending>,
+    recent: HashMap<String, VecDeque<Instant>>,
+    recent_global: VecDeque<Instant>,
+}
+
+impl State {
+    /// 记录一次请求并检查频率；保留任务维度与全局两道闸。
+    fn admit(&mut self, key: &str, now: Instant) -> Result<(), String> {
+        if self.pending.len() >= MAX_PENDING {
+            return Err("待审批的 sudo 请求过多，请稍后重试".into());
+        }
+        let cutoff = now.checked_sub(RATE_WINDOW).unwrap_or(now);
+        self.recent_global.retain(|time| *time > cutoff);
+        if self.recent_global.len() >= RATE_GLOBAL {
+            return Err("sudo 请求过于频繁，请稍后重试".into());
+        }
+        self.recent
+            .retain(|_, times| times.back().is_some_and(|time| *time > cutoff));
+        let times = self.recent.entry(key.to_owned()).or_default();
+        times.retain(|time| *time > cutoff);
+        if times.len() >= RATE_PER_TASK {
+            return Err("sudo 请求过于频繁，请稍后重试".into());
+        }
+        times.push_back(now);
+        self.recent_global.push_back(now);
+        Ok(())
+    }
 }
 
 /// 审批时固化的执行计划：审批人看到的路径/哈希就是随后执行的路径/哈希。
@@ -70,17 +111,27 @@ struct ExecPlan {
 
 pub struct PrivilegeBroker {
     sessions: Arc<SessionStore>,
-    pending: Mutex<HashMap<String, Pending>>,
+    state: Mutex<State>,
     audit_path: PathBuf,
+    request_ttl: Duration,
 }
 
 impl PrivilegeBroker {
     pub fn new(sessions: Arc<SessionStore>, data_dir: impl AsRef<Path>) -> Arc<Self> {
+        Self::with_ttl(sessions, data_dir, REQUEST_TTL)
+    }
+
+    pub fn with_ttl(
+        sessions: Arc<SessionStore>,
+        data_dir: impl AsRef<Path>,
+        request_ttl: Duration,
+    ) -> Arc<Self> {
         let audit_path = data_dir.as_ref().join("audit/privilege.log");
         Arc::new(Self {
             sessions,
-            pending: Mutex::new(HashMap::new()),
+            state: Mutex::new(State::default()),
             audit_path,
+            request_ttl,
         })
     }
 
@@ -93,15 +144,36 @@ impl PrivilegeBroker {
         reason: &str,
         task_id: &str,
     ) -> Result<Outcome, String> {
+        self.request_with_peer(program, args, cwd, reason, task_id, None)
+            .await
+    }
+
+    async fn request_with_peer(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &str,
+        reason: &str,
+        task_id: &str,
+        peer_uid: Option<u32>,
+    ) -> Result<Outcome, String> {
         // 先把程序解析成 root 所有的绝对路径并计算哈希；审批人看到的
         // resolved/sha256 就是随后实际执行的对象。
         let plan = prepare_execution(program, args, cwd)?;
+        let rate_key = if task_id.is_empty() {
+            peer_uid.map_or_else(|| "anonymous".to_owned(), |uid| format!("uid:{uid}"))
+        } else {
+            // taskId 由客户端自报，不能作为授权依据；这里只用于限流分桶，
+            // 全局闸仍然兜底。
+            format!("task:{task_id}")
+        };
         let id = new_id();
         let created_at = now_ms();
         let risk = classify(&plan.resolved.to_string_lossy(), &plan.args);
         let event = json!({
             "id": id,
             "taskId": task_id,
+            "peerUid": peer_uid,
             "program": plan.program,
             "resolved": plan.resolved.to_string_lossy(),
             "sha256": plan.sha256,
@@ -110,29 +182,40 @@ impl PrivilegeBroker {
             "reason": reason,
             "risk": risk,
             "createdAt": created_at,
-            "expiresAt": created_at + REQUEST_TTL.as_millis() as i64,
+            "expiresAt": created_at + self.request_ttl.as_millis() as i64,
         });
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(
-            id.clone(),
-            Pending {
-                request: event.clone(),
-                tx,
-            },
-        );
+        {
+            let mut state = self.state.lock().await;
+            state.admit(&rate_key, Instant::now())?;
+            state.pending.insert(
+                id.clone(),
+                Pending {
+                    request: event.clone(),
+                    tx,
+                    expires_at: Instant::now() + self.request_ttl,
+                },
+            );
+        }
         self.sessions
             .broadcast_admin(Envelope::new("privilege.request", Some(event.clone())))
             .await;
-        let decision = match tokio::time::timeout(REQUEST_TTL, rx).await {
+        let decision = match tokio::time::timeout(self.request_ttl, rx).await {
             Ok(Ok(decision)) => decision,
-            _ => {
-                self.pending.lock().await.remove(&id);
-                self.audit(&id, &event, "timeout", None).await;
+            Ok(Err(_)) => {
+                // decide() 已移除并审计（例如请求已过期）。
+                return Err("sudo 审批请求已关闭".into());
+            }
+            Err(_) => {
+                let removed = self.state.lock().await.pending.remove(&id).is_some();
+                if removed {
+                    self.audit(&id, &event, "timeout", None, None).await;
+                }
                 return Err("sudo 审批超时".into());
             }
         };
         if !decision.approve {
-            self.audit(&id, &event, "denied", Some(&decision.reason))
+            self.audit(&id, &event, "denied", Some(&decision), None)
                 .await;
             return Err(format!(
                 "sudo 被拒绝{}",
@@ -143,17 +226,32 @@ impl PrivilegeBroker {
                 }
             ));
         }
-        let outcome = self.execute(&plan).await;
-        self.audit(&id, &event, "executed", Some(&decision.reason))
-            .await;
-        outcome
+        match self.execute(&plan).await {
+            Ok(outcome) => {
+                self.audit(
+                    &id,
+                    &event,
+                    "executed",
+                    Some(&decision),
+                    Some(&format!("exit={}", outcome.exit_code)),
+                )
+                .await;
+                Ok(outcome)
+            }
+            Err(error) => {
+                self.audit(&id, &event, "failed", Some(&decision), Some(&error))
+                    .await;
+                Err(error)
+            }
+        }
     }
 
     /// Current pending requests for Admin clients that connected after the push.
     pub async fn list(&self) -> Vec<Value> {
-        self.pending
+        self.state
             .lock()
             .await
+            .pending
             .values()
             .map(|pending| pending.request.clone())
             .collect()
@@ -161,9 +259,18 @@ impl PrivilegeBroker {
 
     /// 由 Mart/CLI 的 `privilege.decision` 调用。
     pub async fn decide(&self, id: &str, decision: Decision) -> Result<(), String> {
-        let Some(pending) = self.pending.lock().await.remove(id) else {
+        if decision.scope != "" && decision.scope != "once" {
+            return Err(format!("不支持的审批范围: {}", decision.scope));
+        }
+        let removed = self.state.lock().await.pending.remove(id);
+        let Some(pending) = removed else {
             return Err("请求不存在或已过期".into());
         };
+        if Instant::now() >= pending.expires_at {
+            self.audit(id, &pending.request, "expired", Some(&decision), None)
+                .await;
+            return Err("请求已过期".into());
+        }
         pending
             .tx
             .send(decision)
@@ -222,33 +329,46 @@ impl PrivilegeBroker {
         }
     }
 
-    async fn audit(&self, id: &str, event: &Value, result: &str, reason: Option<&str>) {
+    async fn audit(
+        &self,
+        id: &str,
+        event: &Value,
+        result: &str,
+        decision: Option<&Decision>,
+        detail: Option<&str>,
+    ) {
         if let Some(parent) = self.audit_path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
+            if let Err(error) = tokio::fs::create_dir_all(parent).await {
+                eprintln!("privilege audit 创建目录失败: {error}");
+            }
         }
         let record = json!({
             "ts": now_ms(),
             "id": id,
             "result": result,
-            "reason": reason.unwrap_or_default(),
+            "approver": decision.map(|d| d.approver.as_str()).unwrap_or_default(),
+            "scope": decision.map(|d| d.scope.as_str()).unwrap_or_default(),
+            "reason": decision.map(|d| d.reason.as_str()).unwrap_or_default(),
+            "detail": detail.unwrap_or_default(),
             "request": event,
         });
-        if let Ok(mut file) = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.audit_path)
-            .await
-        {
-            let _ = file.write_all(format!("{record}\n").as_bytes()).await;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = tokio::fs::set_permissions(
-                    &self.audit_path,
-                    std::fs::Permissions::from_mode(0o600),
-                )
-                .await;
-            }
+        let line = format!("{record}\n");
+        let path = self.audit_path.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&path)?;
+            file.write_all(line.as_bytes())?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            Ok::<_, std::io::Error>(())
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("privilege audit 写入失败: {error}"),
+            Err(error) => eprintln!("privilege audit 任务失败: {error}"),
         }
     }
 
@@ -279,16 +399,27 @@ impl PrivilegeBroker {
 
     async fn handle_conn(&self, stream: UnixStream, allowed_uid: u32) -> std::io::Result<()> {
         #[cfg(not(target_os = "linux"))]
-        let _ = allowed_uid;
+        let peer_uid = {
+            let _ = allowed_uid;
+            None
+        };
+        // peer_cred 失败时拒绝连接：不能确认对端身份就不进入审批。
         #[cfg(target_os = "linux")]
-        {
-            if let Ok(cred) = stream.peer_cred() {
-                let uid = cred.uid();
-                if uid != 0 && uid != allowed_uid {
+        let peer_uid = {
+            let cred = match stream.peer_cred() {
+                Ok(cred) => cred,
+                Err(error) => {
+                    eprintln!("privilege: 读取对端凭据失败，拒绝连接: {error}");
                     return Ok(());
                 }
+            };
+            let uid = cred.uid();
+            if uid != 0 && uid != allowed_uid {
+                eprintln!("privilege: 拒绝 uid={uid} 的连接（允许 uid={allowed_uid} 或 root）");
+                return Ok(());
             }
-        }
+            Some(uid)
+        };
         let (reader, mut writer) = stream.into_split();
         let mut lines = BufReader::new(reader).lines();
         let Some(line) = lines.next_line().await? else {
@@ -313,7 +444,10 @@ impl PrivilegeBroker {
             .unwrap_or("/var/lib/mixum/work");
         let reason = request.get("reason").and_then(Value::as_str).unwrap_or("");
         let task_id = request.get("taskId").and_then(Value::as_str).unwrap_or("");
-        let reply = match self.request(program, &args, cwd, reason, task_id).await {
+        let reply = match self
+            .request_with_peer(program, &args, cwd, reason, task_id, peer_uid)
+            .await
+        {
             Ok(outcome) => {
                 json!({"ok": true, "exitCode": outcome.exit_code, "stdout": outcome.stdout, "stderr": outcome.stderr})
             }
@@ -566,6 +700,7 @@ mod approval_tests {
                     approve: true,
                     reason: "test".into(),
                     scope: "once".into(),
+                    approver: "test-admin".into(),
                 },
             )
             .await
@@ -599,11 +734,148 @@ mod approval_tests {
                     approve: false,
                     reason: "no".into(),
                     scope: "once".into(),
+                    approver: "test-admin".into(),
                 },
             )
             .await
             .expect("decide");
         assert!(request.await.unwrap().is_err());
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use mixum_protocol::ops::Cap;
+    use mixum_protocol::token::Claims;
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::tungstenite::Message;
+
+    fn admin_claims() -> Claims {
+        Claims {
+            sub: "test-admin".into(),
+            caps: vec![Cap::Admin],
+            iat: 0,
+            exp: i64::MAX / 2,
+            jti: String::new(),
+            task_id: String::new(),
+            windows: vec![],
+        }
+    }
+
+    fn decision(approver: &str, scope: &str) -> Decision {
+        Decision {
+            approve: true,
+            reason: "test".into(),
+            scope: scope.into(),
+            approver: approver.into(),
+        }
+    }
+
+    async fn next_request(rx: &mut mpsc::Receiver<Message>) -> String {
+        let message = rx.recv().await.expect("privilege event");
+        let event: Value =
+            serde_json::from_str(message.to_text().expect("text event")).expect("event json");
+        event["payload"]["id"]
+            .as_str()
+            .expect("request id")
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn caps_pending_requests() {
+        let sessions = Arc::new(SessionStore::new(16));
+        let (tx, _rx) = mpsc::channel(64);
+        sessions.create("cap", admin_claims(), tx).await;
+        let dir = tempfile::tempdir().unwrap();
+        let broker = PrivilegeBroker::new(sessions, dir.path());
+
+        let mut handles = Vec::new();
+        for index in 0..MAX_PENDING {
+            let broker = broker.clone();
+            handles.push(tokio::spawn(async move {
+                broker
+                    .request("id", &["-u".into()], "/tmp", "cap", &format!("task-{index}"))
+                    .await
+            }));
+        }
+        for _ in 0..200 {
+            if broker.list().await.len() == MAX_PENDING {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(broker.list().await.len(), MAX_PENDING);
+        let error = broker
+            .request("id", &["-u".into()], "/tmp", "cap", "task-extra")
+            .await
+            .unwrap_err();
+        assert!(error.contains("待审批"), "unexpected error: {error}");
+        for handle in handles {
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_scope_does_not_consume_request() {
+        let sessions = Arc::new(SessionStore::new(16));
+        let (tx, mut rx) = mpsc::channel(16);
+        sessions.create("scope", admin_claims(), tx).await;
+        let dir = tempfile::tempdir().unwrap();
+        let broker = PrivilegeBroker::new(sessions, dir.path());
+        let request = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .request("id", &["-u".into()], "/tmp", "scope", "")
+                    .await
+            })
+        };
+        let id = next_request(&mut rx).await;
+        let error = broker
+            .decide(&id, decision("test-admin", "always"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("审批范围"), "unexpected error: {error}");
+        assert_eq!(broker.list().await.len(), 1);
+        broker
+            .decide(&id, decision("test-admin", "once"))
+            .await
+            .unwrap();
+        assert!(request.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn audit_records_approver_and_result() {
+        let sessions = Arc::new(SessionStore::new(16));
+        let (tx, mut rx) = mpsc::channel(16);
+        sessions.create("audit", admin_claims(), tx).await;
+        let dir = tempfile::tempdir().unwrap();
+        let broker = PrivilegeBroker::new(sessions, dir.path());
+        let request = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .request("id", &["-u".into()], "/tmp", "audit", "")
+                    .await
+            })
+        };
+        let id = next_request(&mut rx).await;
+        broker
+            .decide(&id, decision("alice-admin", "once"))
+            .await
+            .unwrap();
+        assert!(request.await.unwrap().is_ok());
+
+        let log = std::fs::read_to_string(dir.path().join("audit/privilege.log")).unwrap();
+        let record: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(record["result"], "executed");
+        assert_eq!(record["approver"], "alice-admin");
+        assert_eq!(record["request"]["taskId"], "");
+        assert_eq!(
+            record["request"]["sha256"].as_str().map(str::len),
+            Some(64)
+        );
     }
 }
 
@@ -669,6 +941,7 @@ mod socket_tests {
                     approve: true,
                     reason: "socket".into(),
                     scope: "once".into(),
+                    approver: "test-admin".into(),
                 },
             )
             .await

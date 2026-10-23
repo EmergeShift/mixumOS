@@ -1687,6 +1687,11 @@ impl Session {
                 .and_then(Value::as_str)
                 .unwrap_or("once")
                 .to_owned(),
+            approver: self
+                .claims
+                .as_ref()
+                .map(|claims| claims.sub.clone())
+                .unwrap_or_default(),
         };
         match self.server.privilege.decide(id, decision).await {
             Ok(()) => self.reply(env, json!({"ok": true})).await,
