@@ -1,7 +1,11 @@
 # mixumOS 0.1.5 — aarch64
 
-状态：pre-release。发布日期：2026-10-22。构建 commit：`7fbbe0e`
-（发布 tag 另含本说明提交）。
+状态：pre-release。发布日期：2026-10-22。构建 commit：`266b719`
+（历史重写前为 `7fbbe0e`；发布 tag 另含本说明提交）。
+
+> **2026-10-24 历史重写**：作者/提交者邮箱统一为 `AshReo <ash@emergeshift.com>`，
+> 提交 tree 未变；`v0.1.5` tag 旧 `e8afa8f` → 新 `0ba15ae`。完整 old → new 映射见
+> release 资产 `COMMIT-MAP.txt` / `commit-map.tsv`。
 
 ## 亮点
 
