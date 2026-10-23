@@ -9,7 +9,8 @@ use mixum_agentd::display::Broker;
 use mixum_agentd::server::{Config, Server};
 use mixum_agentd::snapshot::SnapshotEngine;
 use mixum_agentd::task::{
-    Engine, ExternalDriver, LocalSandbox, NamedExternalDriver, Registry, ShellDriver,
+    task_identity_from_env, Engine, ExternalDriver, LocalSandbox, NamedExternalDriver, Registry,
+    ShellDriver,
 };
 use mixum_protocol::ops::Cap;
 use mixum_protocol::token::Claims;
@@ -100,14 +101,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
     // 系统级隔离：cgroup freezer 可用时优先，Landlock 限制文件系统写入。
+    let task_identity = task_identity_from_env();
+    let task_uid = task_identity.uid;
+    let task_gid = task_identity.gid;
+    eprintln!(
+        "task identity: {} (uid={} gid={})",
+        task_identity.name, task_identity.uid, task_identity.gid
+    );
     let sandbox = Arc::new(
         LocalSandbox::new()
+            .with_identity(task_identity)
             .with_leader(Arc::clone(&leader))
             .with_isolation(config.work_root.clone()),
     );
     // broker 提前创建：快照冻结钩子需要同步通知 comp 暂停捕获；
     // 快照 metadata 需要同步读取窗口表，restore 后还要重放 GUI。
     let broker = Broker::new("/run/mixum/display.sock");
+
+    // CRIU requires a writable sysctl namespace. This is opt-in: only
+    // environments created with --memory-snapshots carry the capabilities.
+    if std::env::var("MIXUM_MEMORY_SNAPSHOTS").ok().as_deref() == Some("1") {
+        match std::process::Command::new("mount")
+            .args(["-o", "remount,rw", "/proc/sys"])
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!("memory snapshots: remount /proc/sys exited with {status}"),
+            Err(error) => eprintln!("memory snapshots: remount /proc/sys failed: {error}"),
+        }
+    }
 
     // 快照引擎:git 式树 + 内容寻址块存储 + CRIU 探测。
     #[cfg(feature = "real-snapshot")]
@@ -152,6 +174,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let kill_sandbox = Arc::clone(&sandbox);
         engine.restore_prepare = Some(Box::new(move || {
             kill_sandbox.kill_all();
+            // A previous failed restore may have left the cgroup frozen; CRIU
+            // cannot move a restored task into a frozen cgroup.
+            kill_sandbox.freeze_all(false);
             Ok(())
         }));
         let mut adapter = mixum_agentd::snapshot::RealSnapshotEngine::from_engine(engine);
@@ -194,6 +219,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let assembled = Arc::get_mut(&mut server).expect("server 刚构造,无共享引用");
         assembled.sync = sync_backend;
     }
+
+    let privilege = server.privilege();
+    tokio::spawn(async move {
+        if let Err(error) = privilege
+            .serve_socket("/run/mixum/sudo.sock", task_uid, task_gid)
+            .await
+        {
+            eprintln!("sudo socket 启动失败: {error}");
+        }
+    });
     let token_path = std::path::Path::new(&config.data_dir).join("admin-token");
     let token = match std::fs::read_to_string(&token_path) {
         Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),
@@ -213,6 +248,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 windows: vec![],
             })?;
             std::fs::write(&token_path, &token)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600));
+            }
             token
         }
     };

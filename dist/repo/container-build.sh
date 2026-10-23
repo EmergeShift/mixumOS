@@ -52,10 +52,17 @@ install_pkgbuild_deps() {
 		cd "$1"
 		# shellcheck disable=SC1091
 		source ./PKGBUILD
-		pacman -S --noconfirm --needed \
-			${depends[@]+"${depends[@]}"} \
+		# Some packages are built locally and installed with pacman -U before
+		# this point (criu-mixum); they are not in a sync database, so pacman
+		# -S cannot resolve them even though they are installed.
+		local missing=()
+		local dep
+		for dep in ${depends[@]+"${depends[@]}"} \
 			${makedepends[@]+"${makedepends[@]}"} \
-			${checkdepends[@]+"${checkdepends[@]}"}
+			${checkdepends[@]+"${checkdepends[@]}"}; do
+			pacman -Q "$dep" >/dev/null 2>&1 || missing+=("$dep")
+		done
+		[ ${#missing[@]} -eq 0 ] || pacman -S --noconfirm --needed "${missing[@]}"
 	)
 }
 
@@ -124,7 +131,7 @@ install -d -o builder -g builder "$MIXUM_CARGO_HOME" "$MIXUM_CARGO_TARGET_DIR" 2
 chown -R builder:builder "$BUILD"
 
 # 三个组件包:装依赖 → makepkg(mixum-base 依赖它们,放最后单独处理)
-for p in mixcomp mixum-agentd mixum-ctl; do
+for p in criu mixcomp mixum-agentd mixum-ctl; do
 	echo "==> [container] deps:$p"
 	install_pkgbuild_deps "$BUILD/$p"
 	echo "==> [container] makepkg $p"
@@ -136,8 +143,9 @@ for p in mixcomp mixum-agentd mixum-ctl; do
 	)
 done
 
-echo "==> [container] 安装三包后构建元包 mixum-base"
+echo "==> [container] 安装四包后构建元包 mixum-base"
 pacman -U --noconfirm \
+	"$BUILD"/criu/*.pkg.tar.* \
 	"$BUILD"/mixcomp/*.pkg.tar.* \
 	"$BUILD"/mixum-agentd/*.pkg.tar.* \
 	"$BUILD"/mixum-ctl/*.pkg.tar.* >/dev/null

@@ -52,6 +52,11 @@ check() {
 package() {
 	install -Dm755 "${MIXUM_CARGO_TARGET_DIR:-$startdir/rust/target}/release/mixum-agentd" \
 		"$pkgdir/usr/bin/mixumd"
+	install -Dm755 "${MIXUM_CARGO_TARGET_DIR:-$startdir/rust/target}/release/mixum-sudo" \
+		"$pkgdir/usr/bin/mixum-sudo"
+	# agent 的 sudo 只提交 argv 给 agentd 审批；不是 setuid，也不覆盖真 sudo。
+	install -d "$pkgdir/usr/local/bin"
+	ln -s /usr/bin/mixum-sudo "$pkgdir/usr/local/bin/sudo"
 	install -Dm644 "$startdir/mixumd.service" "$pkgdir/usr/lib/systemd/system/mixumd.service"
 	install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/mixum-agentd/README.md"
 }

@@ -29,7 +29,7 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 rcgen = "0.13"
-nix = { version = "0.29", features = ["signal", "process", "hostname"] }
+nix = { version = "0.29", features = ["signal", "process", "hostname", "user"] }
 tempfile = "3"
 aes-gcm = "0.10"
 hkdf = "0.12"

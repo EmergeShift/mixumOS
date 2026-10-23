@@ -49,6 +49,9 @@ pub mod op {
     pub const DISPLAY_INPUT: &str = "display.input";
     pub const DISPLAY_TAKEOVER: &str = "display.takeover";
     pub const DISPLAY_CLIPBOARD: &str = "display.clipboard";
+    /// 宿主/CLI 对 sudo 请求的批准或拒绝（需要 admin 能力）。
+    pub const PRIVILEGE_DECISION: &str = "privilege.decision";
+    pub const PRIVILEGE_LIST: &str = "privilege.list";
     pub const AUDIO_ATTACH: &str = "audio.attach";
     pub const AUDIO_DETACH: &str = "audio.detach";
 

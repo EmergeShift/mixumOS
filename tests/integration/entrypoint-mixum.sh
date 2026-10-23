@@ -7,9 +7,14 @@ set -e
 
 DATA=/var/lib/mixum
 WORK=/var/lib/mixum/work
-mkdir -p "$WORK" /run/mixum
+HOME_DIR=/var/lib/mixum/home
+mkdir -p "$DATA" "$WORK" "$HOME_DIR" /run/mixum /run/mixum/pulse
+chmod 0711 "$DATA"
+chown root:root "$DATA" 2>/dev/null || true
+chown mixum:mixum "$WORK" "$HOME_DIR" /run/mixum /run/mixum/pulse 2>/dev/null || true
+chmod 0750 "$WORK" "$HOME_DIR"
 export XDG_RUNTIME_DIR=/run/mixum
-chmod 700 "$XDG_RUNTIME_DIR"
+chmod 0750 "$XDG_RUNTIME_DIR"
 
 # redesign cli 运行环境（模型路由挂载点由 -v 提供，缺省给容器内路径）
 export REDESIGN_MODELS_PATH="${REDESIGN_MODELS_PATH:-/etc/redesign/models.json}"

@@ -37,16 +37,18 @@ package() {
 	# sysusers.d:mixum 系统用户(属主目录见 tmpfiles.d)
 	install -Dm644 /dev/null "$pkgdir/usr/lib/sysusers.d/mixum.conf"
 	printf '%s\n' \
-		'u mixum - "mixumOS agent runtime" /var/lib/mixum' \
+		'u mixum - "mixumOS agent runtime" /var/lib/mixum/home' \
 		> "$pkgdir/usr/lib/sysusers.d/mixum.conf"
 
 	# tmpfiles.d:/var/lib/mixum 布局;work/ 是被快照的工作区根,
 	# k8s 场景挂独立卷(快照引擎 skip 列表已排除自身存储)。
 	install -Dm644 /dev/null "$pkgdir/usr/lib/tmpfiles.d/mixum.conf"
 	printf '%s\n' \
-		'd /var/lib/mixum 0750 mixum mixum -' \
+		'd /var/lib/mixum 0711 root root -' \
 		'd /var/lib/mixum/work 0750 mixum mixum -' \
-		'd /run/mixum 0750 mixum mixum -' 		'd /run/mixum/pulse 0750 mixum mixum -' \
+		'd /var/lib/mixum/home 0750 mixum mixum -' \
+		'd /run/mixum 0750 mixum mixum -' \
+		'd /run/mixum/pulse 0750 mixum mixum -' \
 		> "$pkgdir/usr/lib/tmpfiles.d/mixum.conf"
 
 	# 默认配置(字段与 mixum-agentd defaultConfig 一致;
