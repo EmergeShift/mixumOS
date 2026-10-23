@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="brand/logo-lockup-horizontal.svg" alt="mixumOS" width="440">
+  <img src="brand/svg/lockup-horizontal.svg" alt="mixumOS" width="440">
   <h3>An early attempt at an agent OS that can rewind, fork, and move.</h3>
   <p>An Arch-based operating system for AI agents: containerized workspaces, git-like snapshot trees,<br/>native GUI windows streamed to any device, and state that travels between machines.</p>
   <p>
@@ -111,13 +111,22 @@ flowchart LR
     A --> T["Task engine"]
     A --> S["Snapshot engine"]
     A --> D["Display broker"]
-    D -->|"AF_UNIX"| C["mixcomp<br/>wlroots 0.18"]
+    D -->|"display.sock · A"| C["mixcomp<br/>C / wlroots 0.18"]
+    D -->|"display.sock · B"| B["mixum-env-compositor<br/>Rust / Smithay (optional)"]
     S --> CAS[("CAS + snapshot DAG")]
     A <-->|"snap.push / CAS sync"| R["Remote Node"]
     A -->|"MAP-Bridge · stdio JSON"| X["Agent process"]
+    C -->|"wayland-0"| G["GUI apps"]
+    B -->|"mixum-art-0"| G
     C --> W["Per-window buffers<br/>+ damage"]
+    B --> W
     W --> D
 ```
+
+`mixcomp` (Route A) is bundled and is the compatibility baseline. Route B is
+optional: MixumART supplies `mixum-env-compositor`, which runs inside the
+container and connects to the same `/run/mixum/display.sock` broker. The broker
+is the only component that speaks MAP over WSS to the host.
 
 | Component | Language | Responsibility |
 |---|---|---|
@@ -125,7 +134,8 @@ flowchart LR
 | `mixum-snapshot` | Rust | Content-addressed store, manifests, snapshot tree DAG, CRIU, GC |
 | `mixum-protocol` | Rust | Envelope, ops, tokens, binary frame headers |
 | `mixum-ctl` | Rust | Host CLI: connect, tasks, snapshots, file transfer, window view, power hooks |
-| `mixcomp` | C | Per-window capture and input injection on wlroots 0.18 |
+| `mixcomp` | C | Bundled Route A compositor; per-window capture and input injection on wlroots 0.18 |
+| `mixum-env-compositor` (optional) | Rust | Route B Smithay compositor, supplied by MixumART; connects to the same display broker |
 | `console/` | TypeScript | Installable PWA: tasks, window canvas, snapshot tree |
 | `mixum-gateway` / `mixum-operator` | Rust | Cloud routing and Kubernetes operator (early) |
 | `dist/` | Shell + PKGBUILD | Packages → pacman repo → rootfs/OCI images |

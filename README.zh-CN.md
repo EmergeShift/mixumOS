@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="brand/logo-lockup-horizontal.svg" alt="mixumOS" width="440">
+  <img src="brand/svg/lockup-horizontal.svg" alt="mixumOS" width="440">
   <h3>一个还在早期、尝试让 agent 能回退、分叉和迁移的操作系统。</h3>
   <p>基于 Arch Linux 的 AI agent 操作系统：容器化工作区、类 Git 的快照树、<br/>以原生窗口流到任意设备的 GUI，以及可在机器之间迁移的工作状态。</p>
   <p>
@@ -107,13 +107,21 @@ flowchart LR
     A --> T["任务引擎"]
     A --> S["快照引擎"]
     A --> D["显示 broker"]
-    D -->|"AF_UNIX"| C["mixcomp<br/>wlroots 0.18"]
+    D -->|"display.sock · A"| C["mixcomp<br/>C / wlroots 0.18"]
+    D -->|"display.sock · B"| B["mixum-env-compositor<br/>Rust / Smithay（可选）"]
     S --> CAS[("CAS + 快照 DAG")]
     A <-->|"snap.push / CAS 同步"| R["远端 Node"]
     A -->|"MAP-Bridge · stdio JSON"| X["Agent 进程"]
+    C -->|"wayland-0"| G["GUI 应用"]
+    B -->|"mixum-art-0"| G
     C --> W["逐窗口 buffer<br/>+ damage"]
+    B --> W
     W --> D
 ```
+
+`mixcomp`（Route A）是内置的兼容基线。Route B 是可选的：MixumART 提供
+`mixum-env-compositor`，在容器内运行，连接同一个 `/run/mixum/display.sock`
+broker。只有 broker 通过 MAP over WSS 连到宿主。
 
 | 组件 | 语言 | 职责 |
 |---|---|---|
@@ -121,7 +129,8 @@ flowchart LR
 | `mixum-snapshot` | Rust | 内容寻址存储、清单、快照树 DAG、CRIU、GC |
 | `mixum-protocol` | Rust | Envelope、ops、令牌、二进制帧头 |
 | `mixum-ctl` | Rust | 主机 CLI：连接、任务、快照、文件传输、窗口视图、电力钩子 |
-| `mixcomp` | C | wlroots 0.18 上的逐窗口捕获与输入注入 |
+| `mixcomp` | C | 内置 Route A 合成器；wlroots 0.18 上的逐窗口捕获与输入注入 |
+| `mixum-env-compositor`（可选） | Rust | Route B Smithay 合成器，由 MixumART 提供；连接同一个显示 broker |
 | `console/` | TypeScript | 可安装 PWA：任务、窗口画布、快照树 |
 | `mixum-gateway` / `mixum-operator` | Rust | 云端路由与 Kubernetes operator（早期） |
 | `dist/` | Shell + PKGBUILD | 包 → pacman 仓库 → rootfs/OCI 镜像 |
