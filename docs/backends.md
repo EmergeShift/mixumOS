@@ -1,74 +1,81 @@
-# mixumOS 宿主后端形态
+> English translation of the Chinese document. Original: [backends.zh-CN.md](backends.zh-CN.md). Technical review pending.
 
-> **状态：部分实现。** Apple Container / Docker / WSL 2 可用；`nvx` 仍只是早期脚本。
+# mixumOS host backends
+
 > **Status: partial.** Apple Container / Docker / WSL 2 work; `nvx` is still an early script.
-> mixumd(agentd)对运行环境没有任何容器/虚拟机假设:它是一个 Linux
-> 守护进程,需要「一个 Linux 用户态 + 工作区目录(快照引擎打包
-> work root)+ 可选的 Wayland 合成器(mixcomp)」。因此任何能提供
-> 这三样的宿主技术都可以做后端。本文定义官方支持的四种形态。
+> `mixumd` (agentd) makes no container/VM assumption about its runtime: it is a Linux
+> daemon that needs **a Linux userland + a workspace directory (the work root the
+> snapshot engine packs) + an optional Wayland compositor (mixcomp)**. Any host
+> technology that provides those three can be a backend. This page defines the four
+> officially supported shapes.
 
-## 1. Docker / OCI(默认形态)
+## 1. Docker / OCI (default shape)
 
-- 产物:`make dist` 的 OCI 镜像(`mixumos-<ver>-<arch>.oci.tar`),
-  `docker load`/`import` 后 `docker run -p 7601:7601` 使用;
-- 适用:云端、k8s(mixum-operator,MixumTask CRD)、本机开发 e2e;
-- 限制:容器内 CRIU 需特权变体(阶段 5);工作区建议挂独立卷。
+- Artifact: the OCI image from `make dist` (`mixumos-<ver>-<arch>.oci.tar`); load it
+  with `docker load`/`import`, then run `docker run -p 7601:7601`.
+- Use: cloud, k8s (`mixum-operator`, MixumTask CRD), local e2e development.
+- Limit: CRIU inside the container needs the privileged variant (stage 5); mount a
+  separate volume for the workspace.
 
-## 2. WSL2(Windows 本机,零 Docker)
+## 2. WSL2 (Windows host, no Docker)
 
-v0.1.0 起,发行版 rootfs 可直接导入为 WSL 发行版——rootfs 里有完整
-systemd 与包管理,一键导入:
+Since v0.1.0 the distro rootfs can be imported directly as a WSL distro — it has
+full systemd and package management, so the import is one command:
 
 ```sh
-bash dist/os/wsl-import.sh            # 或按上文手工四步
+bash dist/os/wsl-import.sh            # or the four manual steps above
 ```
 
-**历史验证(2026-10-17,本机实测;本次 PR 未重新跑完整导入流程)**:rootfs 直导 → systemd 激活 →
-mixumd 服务化(User=mixum,StateDirectory)→ Windows 直连
-wss://127.0.0.1:7601(WSL2 localhost 转发)→ 真实快照引擎建快照 →
-改动 → 原地回退 → 文件物化逐字一致;kernel 字段如实记录为
-WSL 内核(跨内核恢复闸生效)。WSL 形态里 pacman/Arch 官方源可用,
-单包升级路径照常。验证探针:[tests/integration/wsl-probe.mjs](../tests/integration/wsl-probe.mjs)。
+**Historical verification (2026-10-17, this machine; the full import was not rerun in
+this PR)**: direct rootfs import → systemd active → mixumd as a service
+(User=mixum, StateDirectory) → Windows connects directly to
+`wss://127.0.0.1:7601` (WSL2 localhost forwarding) → a real snapshot is created →
+change a file → restore in place → materialized files match byte for byte; the
+kernel field honestly records the WSL kernel (the cross-kernel restore gate applies).
+In the WSL shape pacman/Arch official repositories work and single-package upgrades
+work as usual. Probe: [tests/integration/wsl-probe.mjs](../tests/integration/wsl-probe.mjs).
 
-- 工作区在 WSL ext4 上,快照引擎受益于真实 ext4;
-- 窗口流:mixcomp 服务化已随包安装(mixcomp.service,0.1.0-3 起),
-  GUI 应用以 mixum 用户连 `WAYLAND_DISPLAY=wayland-0`
-  (XDG_RUNTIME_DIR=/run/mixum);**注意 GUI 应用需要字体**
-  (pacman -S ttf-dejavu noto-fonts-cjk noto-fonts noto-fonts-emoji),
-  缺字体会导致客户端应用启动即退(foot 实测)，缺 CJK 字体时中文/日文
-  会显示成方框。**已知限制**:foot 在无 WSLg 的 headless 环境
-  偶发 abort(230),窗口流端到端验证受阻——mixumd/mixcomp 侧
-  注册与协商链路正常,待 foot-on-WSL 稳定性跟进或换最小
-  Wayland 客户端复验;
-- 已知限制:CRIU 可用性取决于 WSL 内核配置(memory/hybrid 快照
-  在此形态下按不可用降级);跨内核快照恢复由 kernel 校验闸拒绝;
-- 运维注意:服务以 User=mixum 运行,工作区文件勿用 root 手工种
-  (回退清理需要文件属主一致,root 种的文件会导致 restore 报
-  Permission denied——行为正确,报错可读)。
+- The workspace lives on WSL ext4, so the snapshot engine gets real ext4 semantics.
+- Window streaming: mixcomp is installed as a service (mixcomp.service, since 0.1.0-3);
+  GUI apps connect as the mixum user with `WAYLAND_DISPLAY=wayland-0`
+  (XDG_RUNTIME_DIR=/run/mixum). **GUI apps need fonts**
+  (`pacman -S ttf-dejavu noto-fonts-cjk noto-fonts noto-fonts-emoji`); without them
+  the client exits immediately (observed with foot), and missing CJK fonts render
+  Chinese/Japanese as boxes. **Known limit**: foot occasionally aborts (230) in a
+  headless environment without WSLg, which blocks end-to-end window-stream
+  verification — registration and negotiation on the mixumd/mixcomp side are fine;
+  follow up on foot-on-WSL stability or re-test with a minimal Wayland client.
+- Known limit: CRIU availability depends on the WSL kernel config (memory/hybrid
+  snapshots degrade to unavailable in this shape); cross-kernel restore is refused
+  by the kernel check gate.
+- Operations: the service runs as User=mixum; do not seed workspace files as root
+  by hand. Restore cleanup requires consistent file ownership; root-owned files make
+  restore fail with Permission denied — correct behavior, readable error.
 
-## 3. microsoft/nvx(microVM,观察中)
+## 3. microsoft/nvx (microVM, watching)
 
-[nvx](https://github.com/microsoft/nvx) 是微软面向 agentic workloads
-的跨平台 microVM 沙箱(OpenVMM 之上,Linux KVM/MSHV + Windows WHP),
-与 mixumOS 分层互补:nvx 管 hypervisor 层的 VM 启动,mixumOS 是
-guest 内的 OS/发行版。接入形态:mixumOS rootfs(OCI)作为 nvx guest
-镜像,nvx 替代 Docker 成为「起环境」的后端。
+[nvx](https://github.com/microsoft/nvx) is Microsoft's cross-platform microVM sandbox
+for agentic workloads (on OpenVMM, Linux KVM/MSHV + Windows WHP), complementary to
+mixumOS: nvx manages hypervisor-level VM startup, mixumOS is the OS/distro inside the
+guest. Integration shape: use the mixumOS rootfs (OCI) as the nvx guest image, with
+nvx replacing Docker as the "start an environment" backend.
 
-状态:早期(README 仅 scripts/nvx.py 启动 Alpine/Ubuntu/Azure Linux,
-快照/共享目录/GPU 未露出),**列为演进项**,待其 guest image 与 API
-稳定后接入;届时 microVM 强隔离 + mixumOS 快照/窗口流是理想组合。
+Status: early (the README only has `scripts/nvx.py` booting Alpine/Ubuntu/Azure Linux;
+snapshots/shared directories/GPU are not exposed). **Tracked as an evolution item**;
+integrate once its guest image and API stabilize. At that point microVM isolation +
+mixumOS snapshots/window streaming is the ideal combination.
 
-## 4. k8s(mixum-operator)
+## 4. k8s (mixum-operator)
 
-[MixumTask CRD](https://github.com/yubing0721/mixumOS-yubing-dev-fork)
-调度 OCI 镜像到节点池(arm64/x86_64),快照卷挂载;云端/多容器路由
-gateway 为阶段 5 内容。
+The [MixumTask CRD](https://github.com/yubing0721/mixumOS-yubing-dev-fork) schedules
+OCI images onto node pools (arm64/x86_64) and mounts snapshot volumes; cloud/multi-
+container routing gateway is stage 5 work.
 
-## 选型速查
+## Choosing a shape
 
-| 形态 | 适合 | 前置 | 隔离强度 |
-|------|------|------|----------|
-| Docker/OCI | 云端/服务器/k8s | docker | 容器 |
-| WSL2 | Windows 本机开发/个人 agent | WSL2 | 容器(VM 内) |
-| nvx | 强隔离 agentic 沙箱(未来) | OpenVMM/WHP | microVM |
-| k8s | 多容器/团队/云端编排 | 集群 + operator | 容器 + 策略 |
+| Shape | Good for | Prerequisite | Isolation |
+|---|---|---|---|
+| Docker/OCI | cloud/server/k8s | docker | container |
+| WSL2 | Windows local dev/personal agent | WSL2 | container (inside a VM) |
+| nvx | strongly isolated agentic sandbox (future) | OpenVMM/WHP | microVM |
+| k8s | multi-container/team/cloud orchestration | cluster + operator | container + policy |

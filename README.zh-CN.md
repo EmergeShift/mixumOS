@@ -97,7 +97,7 @@ container system kernel set --binary /tmp/vmlinux-original
 
 切回原内核**不会**丢失磁盘快照、`.mart` 迁移或窗口流；丢的是基于 CRIU 的 memory/hybrid 能力，切回 `linux-mixum-micro` 后恢复。细节与实测见 [docs/apple-container.md](docs/apple-container.md)。
 
-Linux 上同一个节点可以跑在 Docker，或直接跑在 Arch 上；Windows 上发行版 rootfs 可直接导入 WSL 2。完整矩阵见 [backends](docs/backends.md)。
+Linux 上同一个节点可以跑在 Docker，或直接跑在 Arch 上；Windows 上发行版 rootfs 可直接导入 WSL 2。完整矩阵见 [backends](docs/backends.zh-CN.md)。
 
 ## 架构
 
@@ -223,7 +223,7 @@ main:  genesis ── n1 ── n2 ── n3
 - **沙箱内：** 任务在独立进程组中运行；快照优先用 cgroup v2 freezer 冻结（不可用时退回 `SIGSTOP`）。内核支持时用 Landlock 把写入限制在工作区、`/tmp`、`/dev` 和 `/run`。
 - **无遥测。** OS、节点和 CLI 都不回传数据。唯一可选的统计在 MixumART 桌面端，且默认关闭。
 
-完整[威胁模型](docs/security.md)与生态级 [TRUST 承诺](https://github.com/EmergeShift/Mixum-Agent-Protocol/blob/main/TRUST.md)。
+完整[威胁模型](docs/security.zh-CN.md)与生态级 [TRUST 承诺](https://github.com/EmergeShift/Mixum-Agent-Protocol/blob/main/TRUST.md)。
 
 ## 我们可能错在哪
 
@@ -280,7 +280,7 @@ mixumOS/
 | [Apple Container](docs/apple-container.md) | 内核安装、实测数字、如何切回 |
 | [主机集成](docs/host-integration.md) | `mixum-ctl`、电力钩子、本地查看器、音频/输入法 |
 | [后端形态](docs/backends.md) | Docker、WSL 2、nvx、Kubernetes |
-| [安全](docs/security.md) | 威胁模型与每一条防线 |
+| [安全](docs/security.zh-CN.md) | 威胁模型与每一条防线 |
 | [迁移](docs/migration.md) | `.mart` 包与跨设备恢复 |
 | [发行版构建](docs/distro.md) | 包、仓库、镜像构建与踩坑 |
 | [控制台](console/README.md) | PWA 架构与本地开发 |
@@ -312,7 +312,7 @@ cargo test --workspace
 cd ../console && npm ci && npm run build
 ```
 
-平台相关工作应落在后端 crate，而不是共享代码。改令牌或快照路径之前，请先读[架构](docs/architecture.md)和[安全](docs/security.md)。协议语义的 RFC 流程在 MAP 仓库。
+平台相关工作应落在后端 crate，而不是共享代码。改令牌或快照路径之前，请先读[架构](docs/architecture.md)和[安全](docs/security.zh-CN.md)。协议语义的 RFC 流程在 MAP 仓库。
 
 ## 许可证
 
