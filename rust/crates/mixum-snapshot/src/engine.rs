@@ -210,8 +210,15 @@ impl Engine {
             }
             Ok(())
         };
-        if let Some(freeze) = self.freeze.as_mut() {
-            freeze(&mut action)?;
+        // CRIU freezes the dumped process tree itself. Pre-freezing it with
+        // SIGSTOP makes the parasite injection hang on the mixum kernel;
+        // only disk (and hybrid) packing needs the host freeze hook.
+        if do_disk {
+            if let Some(freeze) = self.freeze.as_mut() {
+                freeze(&mut action)?;
+            } else {
+                action()?;
+            }
         } else {
             action()?;
         }
@@ -241,7 +248,10 @@ impl Engine {
             .lock()
             .map_err(|_| EngineError::Freeze("engine lock poisoned".into()))?;
         let node = self.tree.get(id)?;
-        if node.kind == KIND_MEMORY || node.disk.is_none() {
+        // Memory-only snapshots restore process memory into the current
+        // filesystem state; disk snapshots restore both. A node with neither
+        // is invalid.
+        if node.disk.is_none() && node.memory.is_none() {
             return Err(EngineError::MemoryOnly);
         }
         Self::check_kernel_compat(&node, &kernel_release())?;
@@ -259,13 +269,15 @@ impl Engine {
         // （agentd 里是 Sandbox::freeze_all → SIGSTOP/SIGCONT）。
         let memory = node.memory.clone();
         let criu = self.criu.as_ref();
-        let manifest = node.disk.as_ref().expect("checked above");
+        let manifest = node.disk.clone();
         let root = &self.root;
         let store = &self.store;
         let skip = &self.skip;
         let mut action = || -> Result<(), EngineError> {
-            clear_root(root, skip)?;
-            manifest.materialize(store, root)?;
+            if let Some(manifest) = &manifest {
+                clear_root(root, skip)?;
+                manifest.materialize(store, root)?;
+            }
             if let Some(memory) = &memory {
                 let dir = std::env::temp_dir().join(format!(
                     "mixum-restore-{}",
