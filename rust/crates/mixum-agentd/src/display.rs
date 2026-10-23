@@ -196,7 +196,7 @@ enum CompMessage {
 impl Broker {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let (window_events, _) = broadcast::channel(128);
-        let (clipboard_events, _) = broadcast::channel(128);
+        let (clipboard_events, _) = broadcast::channel(8);
         Self {
             windows: Arc::new(Mutex::new(HashMap::new())),
             comp: Arc::new(Mutex::new(HashMap::new())),

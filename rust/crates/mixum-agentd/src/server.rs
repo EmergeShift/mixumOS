@@ -303,10 +303,14 @@ impl SessionStore {
         };
         record.seq += 1;
         envelope.seq = record.seq;
-        if record.ring.len() >= self.capacity {
-            record.ring.pop_front();
+        // 剪贴板帧最大 4 MiB,不能进 512 条 replay ring(否则单会话可放大到 2 GiB)。
+        let transient = envelope.op == ops::op::DISPLAY_CLIPBOARD_CHANGED;
+        if !transient {
+            if record.ring.len() >= self.capacity {
+                record.ring.pop_front();
+            }
+            record.ring.push_back(envelope.clone());
         }
-        record.ring.push_back(envelope.clone());
         if let Some(tx) = &record.tx {
             let _ = tx.send(Message::Text(envelope.to_json().into())).await;
         }

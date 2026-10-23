@@ -259,14 +259,17 @@ client.onWindowPush = (w) => {
 // ---------- 剪贴板同步（console ↔ 容器选区，回声抑制） ----------
 // 双向各记最近一轮文本：容器推来的文本若正是刚推过去的（回声）则不写
 // 浏览器；浏览器读到的文本若与两端已知一致则不重发，失败时保留重试机会。
-let clipLastSent = '' // 最近一次成功推给容器的文本
-let clipLastFromRemote = '' // 最近一次容器推来的文本
+let clipLastSynced = '' // 两个方向最近一次确认同步的文本
+let clipPendingRemote = '' // 已收到但尚未写入浏览器剪贴板的远端文本
 
 client.onClipboard = (_window, text) => {
-  clipLastFromRemote = text
-  if (!text || text === clipLastSent) return
-  navigator.clipboard?.writeText(text).catch(() => {
-    /* 无剪贴板权限或文档非焦点：静默（用户可手动复制） */
+  if (!text || text === clipLastSynced) return
+  clipPendingRemote = text
+  navigator.clipboard?.writeText(text).then(() => {
+    clipLastSynced = text
+    if (clipPendingRemote === text) clipPendingRemote = ''
+  }).catch(() => {
+    /* 无剪贴板权限或文档非焦点：保留 pending，避免用旧浏览器文本覆盖容器 */
   })
 }
 
@@ -274,12 +277,15 @@ async function pushClipboard(): Promise<void> {
   if (!client.connected) return
   try {
     const text = await navigator.clipboard?.readText()
-    if (!text || text === clipLastSent || text === clipLastFromRemote) return
+    if (!text || text === clipLastSynced) return
+    // 远端文本还没成功写入浏览器时，不要用旧浏览器内容反向覆盖容器。
+    if (clipPendingRemote && text !== clipPendingRemote) return
     const s = useStore.getState()
     const win = s.activeWindow ?? s.windows[0]?.id
     if (win == null) return
     await client.clipboardSet(win, text)
-    clipLastSent = text
+    clipLastSynced = text
+    clipPendingRemote = ''
   } catch {
     /* 无剪贴板权限：静默 */
   }
@@ -289,5 +295,7 @@ window.addEventListener('focus', () => {
   void pushClipboard()
 })
 document.addEventListener('paste', () => {
+  // 用户主动粘贴视为覆盖权限：解除远端 pending，允许把新内容推给容器。
+  clipPendingRemote = ''
   void pushClipboard()
 })

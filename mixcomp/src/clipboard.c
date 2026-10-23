@@ -8,6 +8,8 @@
 //   impl->destroy）；本文件只在 seat set_selection 信号里同步指针。
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -35,23 +37,72 @@ struct clip_read {
 	size_t len, cap;
 };
 
-static void clip_source_send(struct wlr_data_source *base, const char *mime_type,
-		int32_t fd) {
-	(void)mime_type; // 只声明 text/*，请求哪个 mime 都给同一份文本
-	struct clip_source *src = wl_container_of(base, src, base);
+struct clip_write {
+	int fd;
+	char *text;
+	size_t len;
+};
+
+// 写端在独立线程:客户端不读时不能让单线程 compositor 卡住。
+static void *clip_write_main(void *arg) {
+	struct clip_write *write = arg;
+	int flags = fcntl(write->fd, F_GETFL);
+	if (flags >= 0) (void)fcntl(write->fd, F_SETFL, flags | O_NONBLOCK);
 	size_t off = 0;
-	while (off < src->len) {
-		ssize_t n = write(fd, src->text + off, src->len - off);
+	int stalls = 0;
+	while (off < write->len) {
+		ssize_t n = write(write->fd, write->text + off, write->len - off);
 		if (n > 0) {
 			off += (size_t)n;
+			stalls = 0;
 			continue;
 		}
-		if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
+		if (n < 0 && errno == EINTR) {
+			continue;
+		}
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			struct pollfd pfd = { .fd = write->fd, .events = POLLOUT };
+			if (poll(&pfd, 1, 100) > 0) {
+				stalls = 0;
+				continue;
+			}
+			if (++stalls >= 20) break; // 最多等 2s,超时丢弃
 			continue;
 		}
 		break;
 	}
-	close(fd);
+	close(write->fd);
+	free(write->text);
+	free(write);
+	return NULL;
+}
+
+static void clip_source_send(struct wlr_data_source *base, const char *mime_type,
+		int32_t fd) {
+	(void)mime_type; // 只声明 text/*，请求哪个 mime 都给同一份文本
+	struct clip_source *src = wl_container_of(base, src, base);
+	struct clip_write *write = calloc(1, sizeof(*write));
+	if (!write) {
+		close(fd);
+		return;
+	}
+	write->text = malloc(src->len);
+	if (!write->text) {
+		free(write);
+		close(fd);
+		return;
+	}
+	memcpy(write->text, src->text, src->len);
+	write->len = src->len;
+	write->fd = fd;
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, clip_write_main, write) != 0) {
+		free(write->text);
+		free(write);
+		close(fd);
+		return;
+	}
+	pthread_detach(thread);
 }
 
 static void clip_source_accept(struct wlr_data_source *base, uint32_t serial,
