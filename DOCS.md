@@ -15,10 +15,10 @@ linked below.
 
 ## Coverage (2026-10-24)
 
-- English default: 15 of 21 pages (`agent-bridge`, `agent-driver`, `apple-container`,
+- English default: 16 of 21 pages (`agent-bridge`, `agent-driver`, `apple-container`,
   `architecture`, `backends`, `clipboard`, `console`, `distro`, `host-integration`,
   `macOS verification`, `migration`, `poc-criu-wayland`, `roadmap`, `security`,
-  `snapshots`).
+  `snapshots`, `wayland-magic`).
 - Architecture translation is still pending; the remaining pages are Chinese or
   mixed. The map below is the queue, not a claim that the work is done.
 
@@ -43,7 +43,7 @@ linked below.
 | [protocol](docs/protocol.md) | current | pending | [中文](docs/protocol.md) |
 | [security](docs/security.md) | current | [English](docs/security.md) | [中文](docs/security.zh-CN.md) |
 | [snapshots](docs/snapshots.md) | current | [English](docs/snapshots.md) | [中文](docs/snapshots.zh-CN.md) |
-| [Wayland magic](docs/wayland-magic.md) | current | pending | [中文](docs/wayland-magic.md) |
+| [Wayland magic](docs/wayland-magic.md) | current | [English](docs/wayland-magic.md) | [中文](docs/wayland-magic.zh-CN.md) |
 | [roadmap](docs/roadmap.md) | plan | [English](docs/roadmap.md) | [中文](docs/roadmap.zh-CN.md) |
 | [release notes 0.1.4](docs/release-notes-0.1.4.md) | historical | pending | [中文](docs/release-notes-0.1.4.md) |
 | [release notes 0.1.5](docs/release-notes-0.1.5.md) | historical | pending | [中文](docs/release-notes-0.1.5.md) |
