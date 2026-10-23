@@ -1,166 +1,303 @@
-# mixumOS
+<div align="center">
+  <img src="brand/logo-lockup-horizontal.svg" alt="mixumOS" width="440">
+  <h3>The agent OS that can rewind, fork, and move.</h3>
+  <p>An Arch-based operating system for AI agents: containerized workspaces, git-like snapshot trees,<br/>native GUI windows streamed to any device, and state that travels between machines.</p>
+  <p>
+    <a href="https://github.com/EmergeShift/mixumOS/releases"><img alt="Release" src="https://img.shields.io/github/v/release/EmergeShift/mixumOS?include_prereleases&amp;label=release"></a>
+    <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+    <a href="https://www.rust-lang.org/"><img alt="Core: Rust" src="https://img.shields.io/badge/core-Rust-000000?logo=rust"></a>
+    <a href="https://archlinux.org/"><img alt="Guest: Arch Linux" src="https://img.shields.io/badge/guest-Arch%20Linux-1793d1?logo=archlinux&logoColor=white"></a>
+    <a href="https://github.com/EmergeShift/mixumOS/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/EmergeShift/mixumOS/actions/workflows/ci.yml/badge.svg"></a>
+  </p>
+  <p><a href="README.zh-CN.md">简体中文</a> · <strong>English</strong></p>
+</div>
 
-**Agent OS 发行版:给 AI agent 一个可回退、可分叉、可迁移的操作系统。**
+> **Status: v0.1.5, pre-1.0.** Runs on Apple Silicon today; the x86_64 build path exists but is not part of the 0.1.5 release. Interfaces can still move before 1.0; the honest limitations are listed [below](#status-and-roadmap).
 
-基于 Arch Linux:容器即 agent 运行环境,操作可回退、可分叉、可在设备间
-迁移;agent 操作的 GUI 以独立原生窗口流到手机或电脑,不抢宿主的鼠标键盘。
+---
 
-- 设计文档入口:[docs/architecture.md](docs/architecture.md)
-- 路线图:[docs/roadmap.md](docs/roadmap.md)(ddl 以月计,文档先行)
-- 协议规范:[docs/protocol.md](docs/protocol.md)
+## Why another operating system?
 
-## 核心能力
+An agent that can only call tools is still a guest in someone else's process. Real work needs a **computer**: a workspace, a shell, applications, a desktop — and the ability to undo, inspect, and relocate all of it.
 
-**快照即时间线(类 Git)**
-- 内容寻址块存储(CAS + zstd + 可选 AES-256-GCM),快照树是 DAG:
-  原地回退自然分叉、显式 fork、回到任一未来快照,节点永不丢失;
-- **无感前置快照**:任务启动前自动打点,进程冻结窗口内打包,
-  未变更工作区热快照实测 **8.8 ms**(300 文件),大文件吞吐约 640 MB/s;
-  容器内 mixumd 启动到可连接中位 **102–107 ms**,端到端 `docker run` 中位
-  **226 ms**(2026-10-21 基准,见 [snapshots.md §9](docs/snapshots.md);
-  复现:`cargo run --release -p mixum-snapshot --example bench`、
-  `node tests/integration/startup-bench.mjs`);
-- 跨节点流转幂等去重:重推已同步快照零字节传输;
-  盒盖→云端全链(快照→TLS 推送→远端 restore 物化→head 迁移续跑)
-  由双节点 e2e 锁定([tests/integration/sync-e2e.mjs](tests/integration/sync-e2e.mjs))。
+Today's sandboxes give you a container and a log. They do not give you:
 
-**容器内 GUI 以原生窗口流到宿主桌面**
-- mixcomp(C/wlroots 0.18)按窗口隔离捕获,HEADLESS 多后端合成器;
-- JPEG 帧流 30fps 实测稳定(30 分钟浸泡 54,361 帧零异常零断连),
-  光标来自帧头,鼠标键盘经能力令牌鉴权后注入接管;
-- 不抢宿主输入:接管是显式动作,agent 模式下注入硬拒绝。
+- **Reversibility.** A bad `rm -rf`, a half-finished refactor, a broken package upgrade — there is no "go back".
+- **A real desktop.** The agent opens a browser; you get a screenshot stream, not a window you can take over.
+- **Mobility.** Your work is pinned to one machine. Closing the laptop means killing the task.
+- **Portable memory.** What the agent learned dies with the container.
 
-**发行版形态**
-- `make dist` 一条命令产出双架构(x86_64 原生 + aarch64)pacman 仓库
-  与 OCI 镜像,单组件 `pacman -S mixum-agentd` 独立升级;
-- 动态链接优先:Rust 组件动态链接 glibc,mixcomp 链系统 wlroots 0.18
-  (依赖库安全更新升一个 so 即可)。
+mixumOS treats the workspace as an **event-sourced filesystem**. Every task starts with a snapshot, every snapshot is a node in a tree, and the whole tree can be forked, restored, or pushed to another machine — while the agent's GUI keeps streaming as native windows.
 
-## macOS / Apple Container 内核
+## What you get
 
-Apple Container 的内核是**宿主级全局设置**，不支持按容器指定内核。mixumOS 在 macOS 上
-使用 `linux-mixum-micro`（基于 kata 6.18.35，开启 CRIU/Landlock/diag）。把它设为默认后，
-**新建容器会自动使用这个内核**；已经运行的容器保持启动时的内核，重启后才切换。因此
-“自动切换”只作用于之后启动的容器，不存在给单个容器换内核的开关。
+| Capability | What it means in practice |
+|---|---|
+| **Snapshot tree, not a save button** | Content-addressed chunks + a DAG of nodes. Restore in place and keep working to create a parallel timeline; fork any past node into a named branch; nothing is ever deleted by rolling back. |
+| **Hot pre-task snapshots** | A task snapshots its workspace *before* the agent runs. Measured median: **8.8 ms** for an unchanged 300-file workspace, **45 ms** for an unchanged 50 MiB file. |
+| **Native window streaming** | Each GUI window is captured independently by `mixcomp` and streamed over MAP. Attach a window, inject input, take over from the agent — or watch read-only. |
+| **State that travels** | `snap.push` moves the tree peer-to-peer. The receiver reports missing chunks; re-pushing is **zero bytes**. A lid-close migration can resume a task in the cloud. |
+| **GUI sessions that replay** | Snapshots record `guiSessions`; after a restore or a `.mart` migration, applications are relaunched with their windows. |
+| **Agents as first-class citizens** | Rust `AgentDriver` SPI for embedded agents; the tiny line-delimited JSON **MAP-Bridge** for everything else. |
+| **A real distribution** | `make dist` produces pacman packages, a pacman repository, rootfs and OCI images for `aarch64` and `x86_64` (0.1.5 ships aarch64). Components upgrade independently with `pacman -S mixum-agentd`. |
 
-安装/升级内核（会提示确认，影响本机所有 Apple Container）：
+### Rust at the core
+
+The control plane and snapshot engine — the parts that parse untrusted protocol payloads and hold snapshot state — are Rust: `mixum-agentd`, the snapshot engine, the protocol crate, `mixum-ctl`, the gateway and the Kubernetes operator all live in one Cargo workspace. That buys memory safety at the snapshot/manifest boundary, a single async runtime (tokio), `rustls` for TLS 1.3, `ed25519-dalek` for capability tokens, `zstd` for chunk compression and `sled` for the tree index — with no GC pauses and no interpreter in the hot path.
+
+C is used exactly where the ecosystem demands it: the Wayland compositor (`mixcomp`) is built directly on **wlroots 0.18**. TypeScript is used for the PWA console. No language is chosen for fashion; each boundary is explicit.
+
+### Apple Container, first-class
+
+macOS cannot run Linux containers natively. mixumOS supports **Apple Container** as a real backend, not a compatibility shim:
 
 ```bash
-container system kernel set --binary /path/to/Image   # 或 ./kernel/scripts/install-apple-container.sh <Image>
-container run --rm alpine:3.20 uname -r               # 期望 6.18.35-mixum-micro
+brew install container
+container system start
 ```
 
-### 切回原内核
+- Ephemeral containers share the kernel, image blobs and APFS clonefile blocks. A full node (agentd + mixcomp) measured **≈38 MiB** of RAM; a second container from the same image added **0 MB** of physical disk.
+- Warm container start measured **≈1.0 s** on an M1.
+- A custom guest kernel, [`linux-mixum-micro`](kernel/README.md) (kata 6.18.35 base), enables CRIU, Landlock, FUSE, vsock/9p and the `-mixum-micro` fingerprint. Install it with `kernel/scripts/install-apple-container.sh` after reading the [kernel notes](docs/apple-container.md) — it is a **host-wide** setting and affects every Apple Container.
 
-`container system kernel set` 拒绝目标目录同名文件覆盖，先备份并复制成唯一文件名：
+#### Switching the guest kernel, and switching back
+
+Apple Container has one kernel setting for the whole host; there is no per-container kernel flag. Save the current kernel before installing mixumOS's:
 
 ```bash
+# Save the current kernel before switching. The filename may differ; list $K first.
 K="$HOME/Library/Application Support/com.apple.container/kernels"
-# 安装 mixumOS 内核前先备份当前默认内核（如果还没备份，原 kata 内核通常是
-# vmlinux-6.18.35-197-debug）
 cp "$K/vmlinux-6.18.35-197-debug" /tmp/vmlinux-original
+
+# Switch to mixumOS's kernel (host-wide).
+container system kernel set --binary /path/to/linux-mixum-micro-6.18.35-arm64.Image
+
+# Switch back later.
 container system kernel set --binary /tmp/vmlinux-original
-container system status
-container run --rm alpine:3.20 uname -r
 ```
 
-> 切换后已运行容器不会自动换内核；需要旧内核的容器要 stop/start 一次。
-> Apple Container 服务若在切换后卡住，先清理卡住的 VM 再重启 `container system`。
+New containers use the selected kernel; running containers keep the kernel they booted with until they are stopped and started. If the Apple Container service wedges after a switch, clean up the stuck VM and restart `container system`.
 
-### 切回原内核会放弃什么
-
-| 能力 | 原 kata 内核（无 CRIU） | `linux-mixum-micro` |
+| Capability | Original kata kernel (no CRIU) | `linux-mixum-micro` |
 |---|---|---|
-| 磁盘快照 / 快照树 / fork / 回退 | ✅ | ✅ |
-| `.mart` 跨设备迁移（文件层） | ✅ | ✅ |
-| mixcomp GUI 流 / 窗口重放 | ✅ | ✅ |
-| **memory / hybrid 快照（CRIU dump）** | ❌ | ✅ |
-| **同机进程级回退（CRIU restore）** | ❌ | ✅ |
-| CRIU 的 UNIX/INET socket 收集（diag） | ❌ | ✅ |
-| Landlock / FUSE / cgroup freezer | 以原内核配置为准（kata 3.32 仍有 Landlock/FUSE） | ✅ |
-| 自定义内核补丁与 `-mixum-micro` 指纹 | ❌ | ✅ |
+| Disk snapshots, snapshot tree, fork, rollback | ✅ | ✅ |
+| `.mart` cross-device migration (files) | ✅ | ✅ |
+| `mixcomp` GUI stream / window replay | ✅ | ✅ |
+| **Memory / hybrid snapshots (CRIU dump)** | ❌ | ✅ (with `criu` installed) |
+| **Same-host process-level rollback (CRIU restore)** | ❌ | ✅ (with `criu` installed) |
+| Landlock / FUSE / cgroup freezer / diag sockets | Depends on the original config | ✅ |
 
-**不依赖内核的能力不会丢**：文件快照、`.mart` 迁移、GUI 画面流、窗口重放仍可用；
-丢的是“进程内存/打开的文件与 socket”这一类 CRIU 能力。需要这些能力时再切回
-`linux-mixum-micro` 并重启容器即可。
+Reverting the kernel does **not** lose disk snapshots, `.mart` migration or window streaming. It loses the CRIU-based memory/hybrid capabilities until you switch back. Details and measured results: [docs/apple-container.md](docs/apple-container.md).
 
-## 架构总览
+On Linux, the same node runs under Docker or directly on Arch. On Windows, the distro rootfs imports into WSL 2. See [backends](docs/backends.md) for the full matrix.
 
-```
- console(PWA)──┐                          手机/浏览器
-               │ WSS(TLS 1.3 + ed25519 能力令牌)
-               ▼
-        mixum-agentd ──── 任务引擎(shell/external 驱动,进程组冻结)
-               │  │  ──── 快照引擎(CAS + 快照树 DAG + CRIU)
-               │  │  ──── 显示 broker(窗口注册/帧分发/接管状态机)
-               │  └──── snap.push → 远端 agentd(跨节点块同步,幂等)
-               ▼ AF_UNIX
-            mixcomp ──── wlroots 0.18:每窗口捕获 + 输入注入
-               ▼
-          Arch 容器(agent 工作区;镜像由 dist/ 从 pacman 仓库组装)
+## Architecture
+
+```mermaid
+flowchart LR
+    U["Phone / desktop / PWA"] -->|"WSS · TLS 1.3 · map1 token"| A["mixum-agentd<br/>(MAP Node)"]
+    A --> T["Task engine"]
+    A --> S["Snapshot engine"]
+    A --> D["Display broker"]
+    D -->|"AF_UNIX"| C["mixcomp<br/>wlroots 0.18"]
+    S --> CAS[("CAS + snapshot DAG")]
+    A <-->|"snap.push / CAS sync"| R["Remote Node"]
+    A -->|"MAP-Bridge · stdio JSON"| X["Agent process"]
+    C --> W["Per-window buffers<br/>+ damage"]
+    W --> D
 ```
 
-## 快速体验
+| Component | Language | Responsibility |
+|---|---|---|
+| `mixum-agentd` (installed as `mixumd`) | Rust | MAP Node: sessions, capability tokens, task engine, snapshot engine, display broker, cross-node sync |
+| `mixum-snapshot` | Rust | Content-addressed store, manifests, snapshot tree DAG, CRIU, GC |
+| `mixum-protocol` | Rust | Envelope, ops, tokens, binary frame headers |
+| `mixum-ctl` | Rust | Host CLI: connect, tasks, snapshots, file transfer, window view, power hooks |
+| `mixcomp` | C | Per-window capture and input injection on wlroots 0.18 |
+| `console/` | TypeScript | Installable PWA: tasks, window canvas, snapshot tree |
+| `mixum-gateway` / `mixum-operator` | Rust | Cloud routing and Kubernetes operator (early) |
+| `dist/` | Shell + PKGBUILD | Packages → pacman repo → rootfs/OCI images |
 
-```sh
-# 1. 单元测试(协议/快照引擎,含交叉回归向量;Linux 或容器内)
-cd rust && cargo test -p mixum-protocol -p mixum-snapshot
+## Quick start
 
-# 2. 容器 e2e(mixum-agentd + mixcomp + foot 窗口流 + 任务 + 快照)
-#    需先构建 Linux 二进制放 build/mixum-agentd-arm64(方法见
-#    tests/integration/Dockerfile.e2e-rust 头注)
-docker build -f tests/integration/Dockerfile.e2e-rust -t mixumos-e2e-rust .
-docker run -d --name mixum-e2e -p 17601:7601 mixumos-e2e-rust
-# 令牌在容器日志 READY 行;控制台开发对接见 console/README.md
+### Option A — let MixumART do the host work
 
-# 3. 发行版双架构全链(pacman 仓库 + OCI 镜像;需 docker,耗时较长)
-make dist ARCHS="aarch64 x86_64"
-# 产物:dist/out/repo-{aarch64,x86_64}、mixumos-<ver>-<arch>.oci.tar、
-#       mixumos-<ver>-multi.oci.tar(双架构索引)
-# 验收:docker import --platform <arch> dist/out/rootfs-<arch>.tar mixumos:dev
-#       docker run -p 17601:7601 mixumos:dev /entrypoint.sh   # 看 READY 行
+[MixumART](https://github.com/EmergeShift/MixumART) is the desktop runtime manager for macOS, Windows and Linux. It creates and starts a mixumOS container for you, pins the TLS fingerprint, and opens a window per surface. This is the shortest path on a Mac with Apple Container.
+
+### Option B — Docker/OCI from source
+
+Requirements: Docker (or a Docker-compatible runtime), about 10 GB of free disk for the build, and `make`.
+
+```bash
+git clone https://github.com/EmergeShift/mixumOS.git
+cd mixumOS
+
+# Build packages + repository + rootfs + OCI for one architecture.
+# The Makefile defaults to a colima context; override it for plain Docker:
+DOCKER_CONTEXT=default make dist ARCH=aarch64
+
+# Import the rootfs and start a Node.
+docker import --platform linux/arm64 dist/out/rootfs-aarch64.tar mixumos:0.1.5-dev
+docker run -d --name mixum-node \
+  -p 127.0.0.1:17601:7601 \
+  mixumos:0.1.5-dev /entrypoint.sh
+
+# The first start prints a READY line containing a map1. bootstrap token.
+docker logs mixum-node | grep READY
 ```
 
-## 文档地图
+> The bootstrap token is an admin credential. Keep it out of shell history, screenshots and logs.
 
-| 文档 | 内容 |
-|------|------|
-| [architecture.md](docs/architecture.md) | 组件、目录结构、数据流 |
-| [protocol.md](docs/protocol.md) | 线协议 v1:envelope、ops、能力令牌、二进制帧 |
-| [snapshots.md](docs/snapshots.md) | 快照引擎设计 + 基准数字(§9) |
-| [tests/poc/fuse-lazy](tests/poc/fuse-lazy) | FUSE 惰性挂载 PoC 脚本与判定标准 |
-| [tests/poc/qemu-full](tests/poc/qemu-full) | QEMU virt 启动 linux-mixum full |
-| [poc-criu-wayland.md](docs/poc-criu-wayland.md) | CRIU + Wayland 会话快照 PoC 与结论 |
-| [console.md](docs/console.md) | Web 控制台(PWA)架构与对接 |
-| [wayland-magic.md](docs/wayland-magic.md) | mixcomp 合成器与窗口流实现 |
-| [backends.md](docs/backends.md) | 宿主后端形态:Docker/WSL2/nvx/k8s |
-| [distro.md](docs/distro.md) | 发行版构建工具链与踩坑记录 |
-| [security.md](docs/security.md) | 威胁模型、令牌、传输、快照加密 |
-| [agent-bridge.md](docs/agent-bridge.md) | agent 进程接入协议(external 驱动) |
-| [migration.md](docs/migration.md) | 跨设备 `.mart` 迁移包与流程 |
-| [gateway.md](docs/gateway.md) | 云端枢纽设计:多容器路由、设备配对、令牌分发 |
-| [criu-feasibility.md](docs/criu-feasibility.md) | CRIU 跨内核迁移可行性验证与工程对策 |
-| [roadmap.md](docs/roadmap.md) | 路线图与阶段完成标准 |
+Drive the node with the host CLI:
 
-## 当前状态(2026-10-17)
+```bash
+cd rust
+cargo build --release -p mixum-ctl
 
-| 部分 | 状态 |
-|------|------|
-| rust/(核心实现) | mixum-protocol/mixum-snapshot/mixum-agentd/mixum-ctl/operator 全链落地,Rust e2e PASS |
-| mixcomp(C/wlroots 0.18) | 每窗口捕获 + 协议注入;30fps 稳定流,30 分钟浸泡零异常 |
-| 跨节点同步 | 推送/导入/幂等/云端恢复续跑,双节点 e2e 全链 PASS |
-| dist/(发行版) | 双架构(x86_64 原生 + aarch64 qemu)五包/仓库/OCI 全链重打实测 PASS,multi 索引合并 |
-| Go 参考实现 | 已移除:历史行为由 tests/cross-protocol 回归向量锁定 |
-| docs/ | 架构/协议/快照/合成器/发行版/安全/agent 桥 已定稿 |
+export MIXUM_ADDR=wss://127.0.0.1:17601/ws
+export MIXUM_TOKEN='map1.…'   # from the READY line
 
-## 许可证
+./target/release/mixum-ctl task submit "inspect the workspace" \
+  --agent shell --param cmd="ls -la"
+./target/release/mixum-ctl snap tree
+./target/release/mixum-ctl serve --bind 127.0.0.1:7602
+# open http://127.0.0.1:7602/ for the local window viewer
+```
 
-本仓库以 [Apache-2.0](LICENSE) 发布。mixcomp 的"魔改 Wayland 合成器"
-指基于 wlroots 自研,仓库不包含任何上游组件的修改版源码:
+`mixum-ctl` pins the node certificate on first connect (TOFU) in `~/.mixum/known-hosts`. The local viewer binds to loopback by default.
 
-- 仓库内源码(rust/mixcomp/console/dist 脚本)为原创;
-  构建期拉取的上游 wlroots 0.18.2 tarball 未打补丁(MIT,见其 PKGBUILD);
-- 运行时动态链接的第三方库按各自许可:wayland/wayland-protocols(MIT)、
-  libxkbcommon(MIT)、json-c(MIT)、libjpeg-turbo(IJG/BSD-3)、zstd(BSD);
-- mixumOS 镜像内含 Arch/ALARM 基础系统(glibc/systemd/coreutils 等
-  GPL/LGPL 组件),其源码合规由上游发行仓库满足。
+### Snapshot in 30 seconds
+
+```bash
+./target/release/mixum-ctl snap create --kind disk --label before-refactor
+./target/release/mixum-ctl snap restore <node-id> --strategy inplace
+./target/release/mixum-ctl snap fork <node-id> experiment
+```
+
+An in-place restore moves the branch head back; the next snapshot creates a **parallel timeline**, not a deletion. A fork points a new branch at any past node. This is the mental model:
+
+```text
+main:  genesis ── n1 ── n2 ── n3
+                          │
+                          └── restore(n2) + work ── n4   (parallel timeline)
+```
+
+## Measured, not promised
+
+All numbers below were measured on the reference machine and are reproducible from the repository. They are medians, not best cases; your hardware and cache state will differ.
+
+| Metric | Result | How to reproduce |
+|---|---|---|
+| Pre-task snapshot, 300 × 2 KiB files, no changes | **8.8 ms** | `cargo run --release -p mixum-snapshot --example bench` |
+| Pre-task snapshot, 50 MiB file, no changes | **45 ms** | same bench |
+| Restore, 300 files / 50 MiB file | **689 ms** / **122 ms** | same bench |
+| `mixumd` start → listening | **107 ms** cold / **102 ms** warm | `node tests/integration/startup-bench.mjs --runs 10` |
+| `docker run` → connectable | **226 ms** median | same bench |
+| Window stream | 30 fps, 54,361 frames over a 30-minute soak, zero disconnects | `tests/integration/soak-run.mjs` |
+| Apple Container node memory | **≈38 MiB** for agentd + mixcomp | `container stats` (M1, 16 GB) |
+
+The full methodology, including caveats about small-file workloads, is in [docs/snapshots.md §9](docs/snapshots.md).
+
+## Security model
+
+- **Transport:** WSS only, TLS 1.3, self-signed ECDSA P-256 certificate pinned by SHA-256 fingerprint (TOFU). A changed fingerprint is a hard disconnect.
+- **Authorization:** `map1.` capability tokens signed with the node's ed25519 identity. Least privilege, optional bindings to a task, window list or memory provider. No ambient "logged-in user".
+- **At rest:** CAS chunks are optionally encrypted with AES-256-GCM; the key is derived per store with HKDF-SHA256, and the AAD binds the store and plaintext chunk hash.
+- **Inside the sandbox:** tasks run in their own process group; snapshots freeze with cgroup v2 freezer (falling back to `SIGSTOP`). Landlock confines writes to the workspace, `/tmp`, `/dev` and `/run` where the kernel supports it.
+- **No telemetry.** The OS, the node and the CLI do not phone home. The only optional analytics live in the MixumART desktop app and are off by default.
+
+Read the full [threat model](docs/security.md) and the ecosystem-wide [TRUST commitments](https://github.com/EmergeShift/Mixum-Agent-Protocol/blob/main/TRUST.md).
+
+## Status and roadmap
+
+| Area | State |
+|---|---|
+| Protocol, snapshot engine, agentd, `mixum-ctl` | ✅ Rust end-to-end; CI on Linux + Windows platform checks |
+| Snapshot tree (restore / fork / GC / sync) | ✅ Double-node e2e, idempotent re-push |
+| Display: per-window stream, input, takeover | ✅ 30 fps; png damage patches and H.264 negotiation |
+| Apple Container + `linux-mixum-micro` | ✅ Verified on M1; CRIU/Landlock enabled in the guest kernel |
+| Docker / OCI | ✅ aarch64 verified; the x86_64 build path exists but is not shipped in 0.1.5 |
+| WSL 2 | ✅ Rootfs import + systemd service; GUI streaming has known foot/WSL caveats |
+| Distribution (`make dist`) | ✅ Dual-arch packages, repo, rootfs, OCI; v0.1.5 ships aarch64 assets |
+| Console PWA | 🚧 Early; tasks, snapshots and window canvas work, polish pending |
+| Gateway / Kubernetes operator | ✅ Gateway M1–M3; operator is early |
+| Memory snapshots (CRIU) | ⚠️ Kernel support is there; `criu` is **not bundled** in the image. Arch's CRIU 4.2.1 crashes on this kernel; the PoC uses Debian CRIU 3.17.1 |
+| GPU / dmabuf zero-copy | ⏳ Waiting on stable virtio-gpu/venus paths; everything today is CPU `wl_shm` + damage |
+
+**Known limitations, stated plainly:**
+
+- v0.1.5 publishes **aarch64** images only; the x86_64 build path exists but has not been validated for this release.
+- Node-to-node `snap.push` uses TLS 1.3 but does not pin the peer certificate yet. Push only to nodes you trust or over a private network; client and gateway-relay connections do pin.
+- Memory/hybrid snapshots are not turnkey until CRIU packaging is resolved. Disk snapshots, migration and GUI replay do not depend on CRIU.
+- Apple Container's kernel is a **host-wide** setting. Switching it affects every container on the machine; the [Apple Container guide](docs/apple-container.md) documents how to switch back and what you lose.
+- The unikernel-style "one binary" story is explicitly not a goal; this is a distribution, with pacman doing dependency and security updates.
+
+The staged plan lives in [docs/roadmap.md](docs/roadmap.md).
+
+## Repository map
+
+```text
+mixumOS/
+├── rust/                  Rust workspace: agentd, snapshot, protocol, ctl, gateway, operator
+├── mixcomp/               C/wlroots 0.18 compositor
+├── console/               PWA control surface
+├── dist/                  PKGBUILDs, pacman repo tooling, rootfs/OCI assembly
+├── kernel/                linux-mixum / linux-mixum-micro build + install scripts
+├── tests/integration/     container e2e, soak, migration, gateway, audio, display
+├── docs/                  architecture, protocol, snapshots, security, backends…
+└── brand/                 logo and app icon sources
+```
+
+## Documentation
+
+| Start here | What it answers |
+|---|---|
+| [Architecture](docs/architecture.md) | What the pieces are and why they are split this way |
+| [Protocol v1](docs/protocol.md) | Envelope, ops, tokens, binary frames |
+| [Snapshots](docs/snapshots.md) | CAS, tree semantics, CRIU, benchmarks |
+| [Apple Container](docs/apple-container.md) | Kernel install, measured numbers, how to revert |
+| [Host integration](docs/host-integration.md) | `mixum-ctl`, power hooks, local viewer, audio/IME |
+| [Backends](docs/backends.md) | Docker, WSL 2, nvx, Kubernetes |
+| [Security](docs/security.md) | Threat model and every defense |
+| [Migration](docs/migration.md) | `.mart` bundles and cross-device restore |
+| [Distribution](docs/distro.md) | Packages, repo, image build and known pits |
+| [Console](console/README.md) | PWA architecture and local dev |
+| [Release notes 0.1.5](docs/release-notes-0.1.5.md) | What changed in the current release |
+| [Roadmap](docs/roadmap.md) | Stages and exit criteria |
+
+Most design documents are currently written in Chinese; this README and the MAP specification are the English entry points. Translation help is welcome and does not require code changes.
+
+The wire contract is standardized as [MAP](https://github.com/EmergeShift/Mixum-Agent-Protocol); this repository is its reference **Node** implementation.
+
+## Ecosystem
+
+| Project | Role |
+|---|---|
+| **mixumOS** (this repo) | The OS distribution and reference MAP Node |
+| [MixumART](https://github.com/EmergeShift/MixumART) | Desktop host: runtime management, CLI, MCP, native window rendering |
+| [Mixum Agent Protocol](https://github.com/EmergeShift/Mixum-Agent-Protocol) | The open contract: spec, schemas, vectors, SDKs |
+
+## Contributing
+
+Issues and pull requests are welcome. The project is documentation-first: a behavioral change should update the relevant `docs/` page and a test that locks it. Before opening a PR:
+
+```bash
+cd rust
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+cd ../console && npm ci && npm run build
+```
+
+Platform-specific work belongs in the backend crate, not in shared code. See the [architecture](docs/architecture.md) and [security](docs/security.md) docs before touching tokens or snapshot paths. For protocol semantics, the RFC process lives in the MAP repository.
+
+## License
+
+[Apache-2.0](LICENSE). `mixcomp` is an original compositor built on the unmodified wlroots 0.18.2 tarball; runtime libraries keep their own licenses (wlroots/wayland MIT, libxkbcommon MIT, json-c MIT, libjpeg-turbo IJG/BSD-3, zstd BSD). The Arch/ALARM base system inside the images keeps its upstream licenses.
+
+---
+
+<div align="center">
+  <sub>Built with Rust, wlroots, Arch Linux, and an unreasonable amount of respect for undo.</sub>
+</div>
