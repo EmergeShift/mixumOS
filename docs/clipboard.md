@@ -1,201 +1,236 @@
-# 剪贴板同步（A 路线）设计草案
+> English translation of the Chinese document. Original: [clipboard.zh-CN.md](clipboard.zh-CN.md). Technical review pending.
 
-> **状态：设计稿，未实现。** 本文只描述协议与实现边界；代码尚未合并，参考实现只在 fork 中。
+# Clipboard Sync (Route A) Design Draft
+
+> **Status: design draft, not implemented.** This document only describes the protocol and implementation boundaries; the code has not been merged, and the reference implementation exists only in a fork.
 > **Status: design / not implemented.** The protocol is described here; the code is not merged.
-状态：草案，待上游评审。本文只描述协议与实现边界，不包含代码改动。
-参考实现位于 fork（`1179e72`，sync 后恢复于 `475da2c`），e2e 见
-`tests/integration/clipboard-e2e.mjs`。
+Status: draft, pending upstream review. This document only describes the protocol and implementation boundaries and contains no code changes.
+The reference implementation is in the fork (`1179e72`, restored after sync at `475da2c`); see
+`tests/integration/clipboard-e2e.mjs` for the e2e test.
 
-## 1. 背景
+## 1. Background
 
-上游目前有一个只读的 `display.clipboard` 请求：agentd 以 2s 超时执行
-`wl-paste`，固定连接 B compositor（`XDG_RUNTIME_DIR=/run/mixum`、
-`WAYLAND_DISPLAY=mixum-art-0`），返回当前 selection。它解决了 MixumART
-（B 路线）的"拉取一次"需求，但作为通用剪贴板能力有四个缺口：
+Upstream currently has a read-only `display.clipboard` request: agentd runs `wl-paste`
+with a 2s timeout, always connecting to the B compositor (`XDG_RUNTIME_DIR=/run/mixum`,
+`WAYLAND_DISPLAY=mixum-art-0`), and returns the current selection. It solves the MixumART
+(Route B) "pull once" requirement, but as a general clipboard capability it has four gaps:
 
-- 只覆盖 B compositor；mixcomp（A 路线）的窗口无法使用；
-- 只有拉取，没有写入，console 无法把文本粘贴进容器；
-- 没有变化推送，每次复制都要轮询；
-- 不绑定窗口，无法按 owner 路由，也无法套用窗口 ACL 与 agent 模式门控。
+- It only covers the B compositor; windows of mixcomp (Route A) cannot use it;
+- Pull only, no write, so the console cannot paste text into a container;
+- No change push, so every copy requires polling;
+- It is not bound to a window, so it cannot route by owner, and cannot apply window ACLs
+  or agent-mode gating.
 
-本文定义 **A 路线**：由窗口所属 comp 原生管理 seat selection，agentd 只做
-协议路由与权限判定。B 路线继续保留其拉取请求，作为兼容路径。
+This document defines **Route A**: the comp that owns the window natively manages the seat
+selection, and agentd only performs protocol routing and permission decisions. Route B keeps
+its pull request as a compatibility path.
 
-## 2. 目标与非目标
+## 2. Goals and Non-Goals
 
-目标：
+Goals:
 
-1. console ↔ 容器 GUI 双向文本剪贴板，按窗口路由；
-2. 权限、窗口 ACL、agent 模式门控与输入注入同规；
-3. 多 comp（mixcomp 与 B compositor 并存）下不串窗口、不串 comp；
-4. 纯增量协议，旧客户端与旧 comp 不受影响；
-5. 可在 CI 的容器 e2e 中验证（`wl-copy`/`wl-paste` 作为真实客户端）。
+1. Bidirectional text clipboard between console ↔ container GUI, routed by window;
+2. Permissions, window ACLs, and agent-mode gating follow the same rules as input injection;
+3. With multiple comps (mixcomp and the B compositor coexisting), no cross-window or
+   cross-comp leakage;
+4. A purely additive protocol; old clients and old comps are unaffected;
+5. Verifiable in CI container e2e tests (`wl-copy`/`wl-paste` as real clients).
 
-非目标（v1）：
+Non-goals (v1):
 
-- 富 MIME（图片、文件、`text/html`）；
-- 剪贴板历史、持久化与跨节点同步（gateway 只是透传，同步域是节点内）；
-- 多 seat / 多用户并发策略；
-- 浏览器剪贴板权限失败时的降级 UI（由 console 处理）。
+- Rich MIME (images, files, `text/html`);
+- Clipboard history, persistence, and cross-node sync (the gateway only passes through; the
+  sync domain is within a node);
+- Multi-seat / multi-user concurrency policy;
+- Fallback UI when browser clipboard permission fails (handled by the console).
 
-## 3. 路线比较
+## 3. Route Comparison
 
-| | A：comp 原生（推荐） | B：agentd 代理（现状） |
+| | A: comp-native (recommended) | B: agentd proxy (current) |
 |---|---|---|
-| 选区归属 | 各 comp 的 seat，窗口语义天然正确 | agentd 作为独立 Wayland 客户端 |
-| 覆盖范围 | 每个 comp 可各自实现 | 固定 B compositor socket |
-| 写入 | `wlr_data_source` / Smithay selection | 需再拉一个 `wl-copy` 进程 |
-| 变化通知 | comp 直接上报 | 只能轮询 |
-| 路由/权限 | 按窗口 owner 与 ACL | 无窗口上下文 |
-| 依赖 | comp 内实现 | agentd 依赖 `wl-clipboard` |
+| Selection ownership | Each comp's seat; window semantics are naturally correct | agentd as an independent Wayland client |
+| Coverage | Each comp can implement its own | Fixed B compositor socket |
+| Write | `wlr_data_source` / Smithay selection | Requires spawning another `wl-copy` process |
+| Change notification | The comp reports directly | Polling only |
+| Routing/permissions | By window owner and ACL | No window context |
+| Dependency | Implemented inside the comp | agentd depends on `wl-clipboard` |
 
-决策：新增 A 路线；B 的 `display.clipboard` 拉取语义保持不变，不扩展。
+Decision: add Route A; the pull semantics of B's `display.clipboard` remain unchanged and are
+not extended.
 
-## 4. 协议增量
+## 4. Protocol Additions
 
-### 4.1 下行写入
+### 4.1 Downstream Write
 
 ```json
 {"op":"display.clipboard.set","payload":{"window":3,"text":"hello"}}
 ```
 
-应答 `{ "ok": true }`。规则：
+Replies `{ "ok": true }`. Rules:
 
-- 需要 `display.input` 能力，且令牌的窗口 ACL 覆盖 `window`；
-- 窗口处于 `agent` 模式时拒绝（`conflict`），与 `display.input` 同规；
-- `text` 必须是 UTF-8，长度 1..=4 MiB；空串与超限返回 `bad_request`
-  （清空 selection 不在 v1 语义内，留待后续显式 `clear`）；
-- 窗口不存在 `not_found`；comp 不支持 A 路线时 `conflict`；
-- 成功仅表示文本已送入 owner comp 的控制通道，不保证应用已读取。
+- Requires the `display.input` capability, and the token's window ACL must cover `window`;
+- Rejected (`conflict`) when the window is in `agent` mode, per the same rules as
+  `display.input`;
+- `text` must be UTF-8 with a length of 1..=4 MiB; an empty string or an over-limit value
+  returns `bad_request` (clearing the selection is not part of v1 semantics and is left to a
+  later explicit `clear`);
+- A nonexistent window returns `not_found`; `conflict` when the comp does not support Route A;
+- Success only means the text has been delivered to the owner comp's control channel; it does
+  not guarantee the application has read it.
 
-### 4.2 上行变化事件
+### 4.2 Upstream Change Event
 
 ```json
 {"op":"display.clipboard.changed","payload":{"window":3,"text":"hello"}}
 ```
 
-推送给已订阅 `display.windows` **且令牌窗口 ACL 覆盖 `window`** 的会话
-（订阅本身要求 `display.view`）。仅 `display.view` 不够：剪贴板内容比
-窗口画面更敏感，不能因为能看全屏就默认能读所有窗口的剪贴板。`window`
-用于客户端做窗口级同步与回声抑制；不携带 comp id（客户端不感知）。
-超过 4 MiB 的上行内容截断并丢弃，不推送部分文本。
+Pushed to sessions that have subscribed to `display.windows` **and whose token window ACL
+covers `window`** (the subscription itself requires `display.view`). `display.view` alone is
+not enough: clipboard contents are more sensitive than window imagery, and being able to see
+the full screen must not imply being able to read the clipboard of every window. `window` lets
+clients do window-level synchronization and echo suppression; it carries no comp id (clients
+are unaware of comps). Upstream content over 4 MiB is truncated and discarded; no partial text
+is pushed.
 
-命名说明：**定为 `display.clipboard.changed`**。上游已有同名的
-`display.clipboard` 请求，若复用它作为推送事件，同一 op 会同时表示
-"拉取请求"和"异步事件"，客户端只能靠 `id`/`replyTo` 区分，容易误判。
-fork 参考实现复用了 `display.clipboard`，落地前必须改名。
+Naming note: **it is named `display.clipboard.changed`**. Upstream already has a request of
+the same name, `display.clipboard`; reusing it as a push event would make the same op mean both
+"pull request" and "asynchronous event", leaving clients to distinguish them only by
+`id`/`replyTo`, which invites misinterpretation. The fork reference implementation reused
+`display.clipboard` and must be renamed before landing.
 
-### 4.3 兼容路径
+### 4.3 Compatibility Path
 
-`display.clipboard`（无参数，返回 `{text}`）保留，语义明确为"B compositor
-只读拉取"，不做窗口路由。A 路线可用时客户端应优先使用窗口级操作；两者
-互不影响。
+`display.clipboard` (no parameters, returns `{text}`) is retained, with its semantics
+explicitly being "read-only pull from the B compositor", and does no window routing. When
+Route A is available, clients should prefer the window-level operations; the two do not affect
+each other.
 
-## 5. 数据流
+## 5. Data Flow
 
-下行（console → 容器应用）：
+Downstream (console → container application):
 
-1. console 在 focus/paste 时读取浏览器剪贴板；
-2. 发 `display.clipboard.set`，gateway 按 `envelope.node` 透传到目标节点；
-3. agentd 校验能力/ACL/mode，按窗口 owner 找到 comp 控制通道；
-4. 向 comp 发送私有消息 `{"type":"clipboard.set","id":3,"text":"..."}`；
-5. comp 创建内建 data source，设为 seat selection，声明
-   `text/plain;charset=utf-8` 与 `text/plain`；容器应用直接粘贴。
+1. The console reads the browser clipboard on focus/paste;
+2. It sends `display.clipboard.set`, and the gateway passes it through to the target node
+   according to `envelope.node`;
+3. agentd validates capability/ACL/mode and locates the comp control channel by window owner;
+4. It sends a private message to the comp: `{"type":"clipboard.set","id":3,"text":"..."}`;
+5. The comp creates a built-in data source, sets it as the seat selection, and announces
+   `text/plain;charset=utf-8` and `text/plain`; the container application can paste directly.
 
-上行（容器应用 → console）：
+Upstream (container application → console):
 
-1. 应用复制触发 `request_set_selection`，comp 的 data-control 路径接受；
-2. comp 读取数据管道直到 EOF（上限 4 MiB，建议加 2s 读超时）；
-3. comp 上报 `{"type":"clipboard","id":3,"text":"..."}`；
-4. broker 校验该窗口 owner 与消息来源 comp 一致，广播事件；
-5. 订阅 `display.windows` 的会话收到 `display.clipboard.changed`；
-6. console 写入浏览器剪贴板；用"最近一轮文本"做回声抑制，避免
-   console→容器→console 的无限往返。
+1. A copy in the application triggers `request_set_selection`, and the comp's data-control
+   path accepts it;
+2. The comp reads the data pipe until EOF (limit 4 MiB; a 2s read timeout is recommended);
+3. The comp reports `{"type":"clipboard","id":3,"text":"..."}`;
+4. The broker verifies that the window owner matches the comp the message came from, and
+   broadcasts the event;
+5. Sessions subscribed to `display.windows` receive `display.clipboard.changed`;
+6. The console writes to the browser clipboard; it uses "the most recent round of text" for
+   echo suppression, avoiding an infinite console→container→console round trip.
 
-## 6. 多 comp owner 路由
+## 6. Multi-Comp Owner Routing
 
-- 窗口表以 `window.id` 为键，记录 `owner`（comp 连接 id），沿用现有
-  `stream.start`/`display.input`/视频帧的 owner 规则；
-- 下行只发 owner；owner 断连时窗口被清理，无需保留选区；
-- 上行 `clipboard` 消息必须校验 owner，非 owner 上报丢弃并计入
-  `protocol_errors`（**参考实现当前缺少这一校验，落地时必须补**）；
-- 前提是 `window.id` 在 broker 内唯一；首占者胜，另一 comp 的同 id 更新
-  被忽略。该假设已存在于现有窗口表，本文不改变；
-- comp 能力：**v1 要求** comp 连接后上报
-  `{"type":"capabilities","clipboard":true}`（agentd↔comp 私有协议，不进 MAP）。
-  broker 记录该标记；未声明能力的 comp 收到 `clipboard.set` 时回
-  `conflict`，避免"应答成功但无效果"。没有能力握手就不发 `set`，也不广播
-  `changed`；这样旧 comp 不会产生假成功。
+- The window table is keyed by `window.id` and records `owner` (the comp connection id),
+  reusing the owner rules of the existing `stream.start`/`display.input`/video frame paths;
+- Downstream messages go only to the owner; when the owner disconnects the window is cleaned
+  up, and no selection needs to be preserved;
+- Upstream `clipboard` messages must be owner-validated; reports from non-owners are dropped
+  and counted in `protocol_errors` (**the reference implementation currently lacks this check
+  and it must be added before landing**);
+- This assumes `window.id` is unique within the broker: first claimant wins, and same-id
+  updates from another comp are ignored. This assumption already exists in the current window
+  table and is not changed here;
+- Comp capabilities: **v1 requires** a comp to report
+  `{"type":"capabilities","clipboard":true}` after connecting (agentd↔comp private protocol,
+  not part of MAP). The broker records this flag; a comp that has not declared the capability
+  replies `conflict` when it receives `clipboard.set`, avoiding "a successful reply with no
+  effect". Without the capability handshake, no `set` is sent and no `changed` is broadcast,
+  so old comps cannot produce false success.
 
-## 7. 实现约束（wlroots 0.18 / mixcomp）
+## 7. Implementation Constraints (wlroots 0.18 / mixcomp)
 
-以下为参考实现踩过的坑，B compositor 实现同语义时同样适用：
+The following are pitfalls the reference implementation hit; they apply equally when the B
+compositor implements the same semantics:
 
-1. `wlr_seat_set_selection` 内部会销毁旧 data source（发 destroy 信号并释放
-   mime）；comp 不能再手动销毁，只能在 `seat.events.set_selection` 回调里
-   同步指针；
-2. `wlr_data_source_init` 会整体重置 `base`（含 `mime_types`），MIME 必须
-   在 init 之后添加；
-3. 下行 serial 必须使用 `wl_display_next_serial(display)`。自增小计数超过
-   display serial 后，客户端后续 `set_selection` 会因无符号下溢被 wlroots
-   当作过期请求静默丢弃，表现为"第一次成功之后永远失败"；
-4. 必须创建 `wlr_data_control_manager_v1`，否则 `wl-copy`/`wl-paste`
-   以及应用间复制没有挂接点；
-5. 上行读取走 event loop 非阻塞 fd；EOF 才算完成，4 MiB 截断并丢弃；
-   建议加 2s 读超时，防止 source 持有者不写导致 fd 泄漏；
-6. 单选区假设：一个 comp 一个 seat；多 seat 留待后续。
+1. `wlr_seat_set_selection` destroys the old data source internally (emitting the destroy
+   signal and freeing the mime); the comp must not destroy it manually again and can only sync
+   the pointer in the `seat.events.set_selection` callback;
+2. `wlr_data_source_init` resets `base` as a whole (including `mime_types`), so MIME must be
+   added after init;
+3. The downstream serial must use `wl_display_next_serial(display)`. Once a self-incrementing
+   small counter exceeds the display serial, subsequent client `set_selection` requests wrap
+   through unsigned underflow and are silently discarded by wlroots as stale requests,
+   presenting as "always fails after the first success";
+4. `wlr_data_control_manager_v1` must be created; otherwise `wl-copy`/`wl-paste` and
+   inter-application copy have no hook point;
+5. Upstream reads use a non-blocking fd on the event loop; completion requires EOF, with
+   4 MiB truncation and discard; a 2s read timeout is recommended to prevent fd leaks when the
+   source holder never writes;
+6. Single-selection assumption: one comp, one seat; multiple seats are left for later.
 
-## 8. 安全与隐私
+## 8. Security and Privacy
 
-- `set` 复用 `display.input`，不新增能力位；事件仅发给已通过
-  `display.view` 的 `display.windows` 订阅者；
-- 窗口 ACL 与 agent 模式门控先于投递；被拒绝的请求不触发 comp 副作用；
-- 双向 4 MiB 上限，按字节计（UTF-8），超限在协议层拒绝/截断；
-- 服务端与 comp 日志只记录长度与结果，不记录内容；
-- gateway 不解析 payload，仅按 `node` 路由；设备令牌默认无 `snap.manage`/
-  `admin`，剪贴板不扩大其权限。
+- `set` reuses `display.input` and adds no new capability bit; events go only to
+  `display.windows` subscribers that already passed `display.view`;
+- Window ACL and agent-mode gating happen before delivery; a rejected request triggers no comp
+  side effects;
+- A 4 MiB limit in both directions, counted in bytes (UTF-8); over-limit content is
+  rejected/truncated at the protocol layer;
+- Server and comp logs record only length and outcome, never content;
+- The gateway does not parse the payload and routes only by `node`; device tokens have no
+  `snap.manage`/`admin` by default, and clipboard does not broaden their permissions.
 
-## 9. 测试计划
+## 9. Test Plan
 
-单元（agentd）：
+Unit (agentd):
 
-- 下行按 owner 路由；owner 断连返回 `conflict`；
-- 非 owner 的 `clipboard` 上报被丢弃；
-- agent 模式拒绝、ACL 拒绝、缺失能力拒绝；
-- 4 MiB 边界与空串语义；
-- 无 `capabilities.clipboard` 的 comp 返回 `conflict`。
+- Downstream routing follows the owner; a disconnected owner returns `conflict`;
+- `clipboard` reports from non-owners are dropped;
+- Agent-mode rejection, ACL rejection, missing-capability rejection;
+- The 4 MiB boundary and empty-string semantics;
+- A comp without `capabilities.clipboard` returns `conflict`.
 
-e2e（容器内真实 Wayland 客户端）：
+e2e (real Wayland clients inside the container):
 
-- 下行：console 侧发送后，容器内 `wl-paste` 读回同一文本；
-- 上行：容器内 `wl-copy` 后，事件在 1s 内到达且文本一致；
-- 归属：用户接管（user 模式）后仍可写入；agent 持有窗口时写入被拒；
-- 多 comp：A/B 各开窗口，交叉写入不串窗（需要 B compositor 侧实现）；
-- 回归：damage 门控、H.264 协商、`display.windows` 订阅不受影响。
+- Downstream: after the console sends, `wl-paste` inside the container reads back the same
+  text;
+- Upstream: after `wl-copy` inside the container, the event arrives within 1s with identical
+  text;
+- Ownership: writes still work after the user takes over (user mode); writes are rejected
+  while the agent holds the window;
+- Multiple comps: open a window in each of A and B; cross-writes do not leak between windows
+  (requires the B compositor side implementation);
+- Regression: damage gating, H.264 negotiation, and `display.windows` subscription are
+  unaffected.
 
-浏览器：console 焦点/paste 反向同步的端到端用例，验证回声抑制只回传一次。
+Browser: an end-to-end case for reverse sync of console focus/paste, verifying that echo
+suppression sends back only once.
 
-## 10. 落地拆分
+## 10. Landing Breakdown
 
-建议单个上游 PR 内按 commit 拆分：
+Recommended split into commits within a single upstream PR:
 
-1. `mixum-protocol`：新增 op 常量与文档（本文件 + `protocol.md` §4.4）；
-2. `mixum-agentd`：broker owner 路由、上行业主校验、server 权限与事件推送、
-   单测；
-3. `mixcomp`：`clipboard.c`、`stream.c` 分发、data-control manager、
-   Makefile 依赖（`wlroots` 已提供）；
-4. `console`：`clipboardSet`、事件监听与回声抑制；
-5. `tests/integration/clipboard-e2e.mjs` 与文档回写。
+1. `mixum-protocol`: add the op constant and documentation (this file + `protocol.md` §4.4);
+2. `mixum-agentd`: broker owner routing, upstream owner validation, server permissions and
+   event push, unit tests;
+3. `mixcomp`: `clipboard.c`, `stream.c` dispatch, data-control manager, Makefile dependencies
+   (`wlroots` already provides them);
+4. `console`: `clipboardSet`, event listeners, and echo suppression;
+5. `tests/integration/clipboard-e2e.mjs` and documentation write-back.
 
-参考实现：fork `1179e72`（原始）、`475da2c`（sync 后恢复 A 路线）、
-`tests/integration/clipboard-e2e.mjs`。
+Reference implementation: fork `1179e72` (original), `475da2c` (Route A restored after sync),
+`tests/integration/clipboard-e2e.mjs`.
 
-## 11. 评审结论（2026-10-22）
+## 11. Review Conclusions (2026-10-22)
 
-1. 上行事件使用 **`display.clipboard.changed`**；fork 的复用实现合并前改名。
-2. **要求 comp 能力握手**；未声明 `clipboard` 的 comp 一律 `conflict`，
-   不产生假成功。
-3. **空串拒绝**；清空 selection 不在 v1，后续用显式 `clear` 定义。
-4. 事件必须按令牌窗口 ACL 再过滤，不能只依赖 `display.view`。
-5. 仍待排期：B compositor 的 A 路线实现；在此之前其窗口 `set` 返回
-   `conflict`。富 MIME（`text/html`/图片）留 v2。
+1. The upstream event uses **`display.clipboard.changed`**; the fork's reuse implementation
+   must be renamed before merge.
+2. **A comp capability handshake is required**; comps that do not declare `clipboard` always
+   get `conflict` and never produce false success.
+3. **Empty strings are rejected**; clearing the selection is not in v1 and will later be
+   defined with an explicit `clear`.
+4. Events must be additionally filtered by the token window ACL and must not rely on
+   `display.view` alone.
+5. Still to be scheduled: the Route A implementation for the B compositor; until then, `set`
+   on its windows returns `conflict`. Rich MIME (`text/html`/images) is left for v2.

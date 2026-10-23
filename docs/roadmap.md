@@ -63,7 +63,7 @@
 - [x] AgentDriver trait 的 crate 化发布(2026-10-18):SPI 独立为
       mixum-agent-driver crate(零内部依赖,Task/TaskSpec/TaskView/
       Sandbox/EventEmitter/Registry/ShellDriver),agentd 经再导出
-      保持 API 不变;接入指南 docs/agent-driver.md,可运行示例
+      保持 API 不变;接入指南 docs/agent-driver.zh-CN.md,可运行示例
       hello_driver(in-process 与子进程桥接两条路);
 - [x] mixcomp H.264 流(openh264 编码,attach 协商 + WebCodecs 解码,
       JPEG 路径保留;2026-10-17,静态内容 10s 流量 JPEG 的 1/84,

@@ -1,110 +1,147 @@
-# Web 控制台(console)
+> English translation of the Chinese document. Original: [console.zh-CN.md](console.zh-CN.md). Technical review pending.
 
-> 状态:v1 已交付(2026-10-04),对 e2e 容器全链路实测通过。
-> 本文档说明控制台的架构、协议层实现要点与开发对接方式。
+# Web console (console)
 
-## 定位
+> Status: v1 delivered (2026-10-04), with the full path measured and passing
+> against the e2e container.
+> This document describes the console's architecture, the key points of its
+> protocol-layer implementation, and how to integrate with it in development.
 
-控制台是 mixumOS 的用户入口:发任务、看 agent 实时操作的 GUI 窗口、
-管理快照树。PWA 形态,iOS/Android 浏览器或添加到主屏幕直接使用;
-桌面浏览器同样可用(单页三栏)。
+## Role
 
-技术栈:Vite + TypeScript + React + zustand。依赖刻意克制:无路由、
-无 UI 组件库,样式全部手写(`src/styles.css`),构建产物为纯静态文件
-(相对路径,可托管在任意路径下)。
+The console is the user entry point of mixumOS: submit tasks, watch a GUI
+window of the agent operating in real time, and manage the snapshot tree. It
+is a PWA, used directly from an iOS/Android browser or added to the home
+screen; desktop browsers work equally well (a single page with three columns).
 
-## 布局
+Tech stack: Vite + TypeScript + React + zustand. Dependencies are deliberately
+restrained: no router, no UI component library, all styles hand-written
+(`src/styles.css`), and the build output is pure static files (relative paths,
+so it can be hosted under any path).
 
-桌面三栏:任务(提交表单 + 列表 + 事件流)| 窗口画布 | 快照树。
-窄屏(≤980px,手机)折叠为底部三页签,同一套组件切换显示。
+## Layout
 
-## 协议层(src/protocol/)
+Three columns on desktop: tasks (submission form + list + event stream) |
+window canvas | snapshot tree.
+On narrow screens (≤980px, phones) it collapses into three bottom tabs, with
+the same set of components toggled in and out of view.
 
-对齐 `docs/protocol.md` v1 与 mixum-agentd 实现,要点:
+## Protocol layer (src/protocol/)
 
-- **envelope**:文本帧 JSON,`v/id/op/seq/ts/payload`,请求-应答用
-  `id`/`replyTo` 关联;`op.err` 负载 `{code, message}` 映射为
-  `ProtocolError` 供界面程序化处理;
-- **握手**:子协议 `map.v1`(服务端同时接受旧 `mixum.v1`);op 为
-  `session.hello`(旧 `hello` 别名仍可用),`hello.ok` 的 `heartbeat`
-  驱动 `sys.ping` 心跳,连续两次失败即断开重连;
-- **事件形状**:`task.event.data` 恒为对象(`state`/`log`/`step`/`progress`/
-  `error`/`input`);控制台对旧节点的裸字符串做兼容读取;
-- **二进制帧**:首字节通道标签,`0x01` video 按 27 字节小端帧头解析
-  (协议 §5),`cursorX/Y/flags` 直接交给画布叠加;
-- **重连**:指数退避(1s 起,10s 封顶);重连成功后自动补订阅
-  `task.events`、`display.windows`,并重新 `display.attach` 附流中的窗口;
-- **窗口增删**:`display.windows` 推送单条 Window;`title === "__closed__"`
-  视为窗口关闭(mixumd 关闭窗口时以该标题推送,见 agentd display.rs)。
+Aligned with `docs/protocol.md` v1 and the mixum-agentd implementation; the
+key points:
 
-高频视频帧不经过 zustand:`WindowCanvas` 直接订阅 `client.onFrame`,
-store 只放任务、窗口列表、快照树等低频状态。
+- **envelope**: JSON in text frames, `v/id/op/seq/ts/payload`; requests and
+  replies are correlated with `id`/`replyTo`; the `op.err` payload
+  `{code, message}` is mapped to `ProtocolError` so the UI can handle it
+  programmatically;
+- **handshake**: subprotocol `map.v1` (the server also accepts the legacy
+  `mixum.v1`); the op is `session.hello` (the legacy `hello` alias still
+  works), the `heartbeat` from `hello.ok` drives the `sys.ping` heartbeat, and
+  two consecutive failures disconnect and reconnect;
+- **event shape**: `task.event.data` is always an object (`state`/`log`/`step`/
+  `progress`/`error`/`input`); for compatibility the console also reads bare
+  strings from older nodes;
+- **binary frames**: the first byte is a channel tag; `0x01` video is parsed
+  with a 27-byte little-endian frame header (protocol §5), and
+  `cursorX/Y/flags` are handed straight to the canvas for overlay;
+- **reconnect**: exponential backoff (starting at 1s, capped at 10s); after a
+  successful reconnect it automatically re-subscribes to `task.events` and
+  `display.windows`, and re-runs `display.attach` on windows that had a stream
+  attached;
+- **window add/remove**: `display.windows` pushes a single Window;
+  `title === "__closed__"` is treated as the window closing (mixumd pushes
+  with that title when it closes a window, see agentd display.rs).
 
-## 窗口画布
+High-frequency video frames do not go through zustand: `WindowCanvas`
+subscribes to `client.onFrame` directly, and the store only holds
+low-frequency state such as tasks, the window list, and the snapshot tree.
 
-- 附流 `display.attach`(15fps),收帧只留最新一帧,绘制用
-  `requestAnimationFrame` 合帧——绘制期间到达的帧静默丢弃(只画最新);
-  另有 120ms 定时器兜底,内嵌/后台等 rAF 受限环境也能播帧;
-- canvas 尺寸 = 帧头 width/height(物理像素),CSS 缩放适配容器;
-- **光标来自帧头**(flags bit1),画白色描边箭头叠加,不用本机指针推算;
-- 接管:`display.takeover claim/release`;`mode=agent` 时提供「强制接管」
-  (确认框,`force: true`);接管后画布聚焦,鼠标/键盘事件回传:
-  - 坐标换算:事件位置 × (物理尺寸 / 画布 CSS 尺寸),夹到窗口范围;
-  - `pointer_motion` 按 rAF 合帧发送;滚轮映射 `pointer_axis`;
-  - 键盘映射 XKB keysym 名(`Enter→Return`、`ArrowUp→Up` 等,见
-    `src/util/keysym.ts`),修饰键 `mods: ctrl/alt/shift/logo`;
-- 已知平台限制:浏览器拿不到对端证书,协议 §1 的 TOFU 指纹固定无法在
-  纯浏览器端实现;开发期由 vite 中继兜底,生产由托管侧(mixum-ctl)
-  解决,已在 console/README 注明。
+## Window canvas
 
-## 快照树
+- Stream attachment is `display.attach` (15fps); received frames keep only the
+  latest one, and drawing coalesces frames with `requestAnimationFrame` —
+  frames arriving during a draw are silently dropped (only the newest is
+  drawn); a 120ms timer is a fallback so frames also play in embedded or
+  background environments where rAF is restricted;
+- canvas size = the frame header's width/height (physical pixels), scaled by
+  CSS to fit the container;
+- **the cursor comes from the frame header** (flags bit1); a white outlined
+  arrow is drawn as an overlay rather than inferring it from the local pointer;
+- takeover: `display.takeover claim/release`; when `mode=agent` a "force
+  takeover" is offered (confirmation dialog, `force: true`); after takeover
+  the canvas takes focus and mouse/keyboard events are sent back:
+  - coordinate mapping: event position × (physical size / canvas CSS size),
+    clamped to the window bounds;
+  - `pointer_motion` is sent coalesced by rAF; the scroll wheel maps to
+    `pointer_axis`;
+  - keys map to XKB keysym names (`Enter→Return`, `ArrowUp→Up`, etc., see
+    `src/util/keysym.ts`), modifier keys in `mods: ctrl/alt/shift/logo`;
+- known platform limitation: a browser cannot access the peer's certificate,
+  so the TOFU fingerprint pinning in protocol §1 cannot be implemented purely
+  in the browser; during development the vite relay covers for it, and in
+  production it is solved on the hosting side (mixum-ctl); this is noted in
+  console/README.
 
-`snap.tree` 的节点数组自建 DAG:层号 = 到根的最长路径,层内按
-(分支首节点时间,创建时间)排序,三次贝塞尔连线,SVG 渲染
-(`src/util/treelayout.ts`,不用图形库)。节点显示 label/分支/kind/
-自动标记/时间/体积;当前 head 蓝框高亮 + head 角标;分支着色取自
-低饱和调色板。
+## Snapshot tree
 
-树语义的表达(snapshots.md §4):回退(inplace)不删节点——回退后
-新快照挂在旧节点下,与旧时间线并排渲染成两个分支;fork 按协议不产生
-新节点(head 是指针),节点盒子的 branch 属性与当前分支名如实显示。
+The node array from `snap.tree` builds its own DAG: the layer number is the
+longest path to the root, nodes within a layer are sorted by (branch's first
+node time, creation time), links are cubic Béziers, and rendering is SVG
+(`src/util/treelayout.ts`, no graphics library). A node shows label/branch/
+kind/auto marker/time/size; the current head is highlighted with a blue box
+plus a head badge; branch colours come from a low-saturation palette.
 
-操作:回退(inplace)、fork(弹窗输入分支名,`snap.restore strategy=fork`,
-冲突由服务端自动加 -2、-3);连接时与手动刷新时拉取,协议没有快照推送,
-产生新快照后需刷新。
+How tree semantics are expressed (snapshots.md §4): a rollback (inplace) does
+not delete nodes — after a rollback the new snapshot hangs under the old node,
+rendered side by side with the old timeline as two branches; per the protocol,
+a fork does not create a new node (the head is a pointer), and a node box's
+branch attribute and the current branch name are shown as they are.
 
-## 任务视图
+Operations: rollback (inplace), fork (a dialog to enter the branch name,
+`snap.restore strategy=fork`; the server automatically appends -2, -3 on
+conflict); the tree is fetched on connect and on manual refresh, the protocol
+has no snapshot push, so a refresh is needed after a new snapshot is produced.
 
-提交表单(指令、agent、键值参数、快照策略 pre/kind/onFailure);
-`task.list` + `task.event` 维护列表,状态机着色;选中任务看实时事件流
-(log 等宽字体自动滚动,step/progress/error 分类着色);`type=window`
-事件提供跳转窗口画布的按钮。
+## Task view
+
+Submission form (command, agent, key-value parameters, snapshot strategy
+pre/kind/onFailure); `task.list` + `task.event` maintain the list, coloured by
+state machine; selecting a task shows its live event stream (log in a
+monospace font with auto-scroll; step/progress/error coloured by category);
+`type=window` events provide a button to jump to the window canvas.
 
 ## PWA
 
-- `manifest.json`:standalone、克制主题色(`#f4f4f2`)、图标三份
-  (192/512/maskable,由 `scripts/gen-icons.mjs` 零依赖生成);
-- `sw.js`:只缓存应用壳——导航请求网络优先回退缓存,带哈希的静态
-  资源缓存优先;协议数据全走 WebSocket 不经 HTTP,不缓存任何数据;
-- iOS meta:`apple-mobile-web-app-capable`、状态栏样式、标题、
-  apple-touch-icon;添加到主屏幕后以独立窗口打开。
+- `manifest.json`: standalone, a restrained theme colour (`#f4f4f2`), three
+  icons (192/512/maskable, generated with zero dependencies by
+  `scripts/gen-icons.mjs`);
+- `sw.js`: caches only the app shell — navigation requests are network-first
+  with cache fallback, hashed static assets are cache-first; protocol data all
+  goes over WebSocket and never over HTTP, so no data is cached;
+- iOS meta: `apple-mobile-web-app-capable`, status bar style, title,
+  apple-touch-icon; after adding to the home screen it opens in a standalone
+  window.
 
-## 开发对接
+## Development integration
 
-见 `console/README.md`:vite 开发中继(默认)或信任证书直连两条路、
-fakecomp 演示容器、`scripts/e2e-check.mjs` 冒烟脚本。
+See `console/README.md`: the two routes — the vite development relay (default)
+or a direct connection with a trusted certificate — the fakecomp demo
+container, and the `scripts/e2e-check.mjs` smoke script.
 
-## 边界与遗留
+## Scope and remaining items
 
-边界:本模块只新增 `console/` 与本文档;`mixcomp/`、
-`rust/`、`dist/`、`tests/` 只读。
+Scope: this module only adds `console/` and this document; `mixcomp/`, `rust/`,
+`dist/`, `tests/` are read-only.
 
-遗留:
+Remaining items:
 
-- 纯浏览器端无法做 TOFU 指纹固定(平台限制),待 mixum-ctl 托管方案;
-- 快照树无推送,新快照需手动刷新;
-- H.264/WebCodecs 已实现(2026-10-17):attach 以 codec 协商(探测
-  VideoDecoder + isConfigSupported,Annex-B 无 description 直解),
-  输出 VideoFrame 直接 drawImage(零拷贝);解码失败自动降级重连为
-  jpeg;JPEG 路径不变。e2e 双 codec 探针见
-  [tests/integration/h264-e2e.mjs](../tests/integration/h264-e2e.mjs)。
+- TOFU fingerprint pinning is not possible purely in the browser (platform
+  limitation); awaiting the mixum-ctl hosting solution;
+- the snapshot tree has no push, so a new snapshot requires a manual refresh;
+- H.264/WebCodecs implemented (2026-10-17): attach negotiates the codec
+  (probes VideoDecoder + isConfigSupported, Annex-B decoded directly without a
+  description), the output VideoFrame is drawn straight with drawImage (zero
+  copy); on decode failure it automatically falls back and reconnects as jpeg;
+  the JPEG path is unchanged. For the e2e dual-codec probe see
+  [tests/integration/h264-e2e.mjs](../tests/integration/h264-e2e.mjs).
