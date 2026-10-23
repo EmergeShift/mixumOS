@@ -1,195 +1,235 @@
-# 快照引擎设计
+> English translation of the Chinese document. Original: [snapshots.zh-CN.md](snapshots.zh-CN.md). Technical review pending.
 
-> 状态:语义经参考实现验证后以 Rust 落地(`rust/crates/mixum-snapshot`,
-> 见 §9);本文档仍是快照语义的规格权威。
+# Snapshot engine design
 
-## 1. 三种快照
+> Status: semantics were validated by the reference implementation and landed in
+> Rust (`rust/crates/mixum-snapshot`, §9); this page remains the specification
+> authority for snapshot semantics.
 
-| kind | 内容 | 技术 | 典型耗时 | 用途 |
-|------|------|------|----------|------|
-| disk | 工作区文件系统 | 目录打包进 CAS(见 §2) | 随增量变化,前置快照毫秒级(热数据小) | 任务前置无感快照、常规保存点 |
-| memory | 任务进程树完整状态 | CRIU dump | 秒级 | 任务进程迁移/恢复 |
-| hybrid | disk + memory | 两者叠加 | 两者之和 | 盒盖迁移、YOLO 模式全态 |
+## 1. Three kinds of snapshot
 
-前置快照的「无感」来自两点:任务进程在打包窗口内被冻结
-(SIGSTOP 进程组,cgroup v2 可用时用 freezer),进程对冻结无感知;
-打包只触及增量(块级去重后,未变更文件零成本)。
+| kind | Content | Technique | Typical time | Use |
+|---|---|---|---|---|
+| disk | workspace filesystem | directory packed into CAS (§2) | scales with the delta; pre-task snapshots are millisecond-scale (small hot data) | transparent pre-task snapshot, ordinary save points |
+| memory | full state of the task process tree | CRIU dump | seconds | task process migration/restore |
+| hybrid | disk + memory | both | sum of both | lid-close migration, YOLO full-state |
 
-## 2. 内容寻址块存储(CAS)
+The "transparent" part of a pre-task snapshot comes from two things: the task
+processes are frozen during the packing window (SIGSTOP the process group, or the
+cgroup v2 freezer when available), so they do not notice; and packing only touches
+the delta (after block-level dedup, unchanged files cost nothing).
 
-- 块:固定 1 MiB 标称分块,尾块可短;**哈希 = 明文 SHA-256**,
-  与压缩/加密无关,保证跨设备去重不受影响;
-- 落盘:`objects/<h[:2]>/<h[2:]>`,zstd(fastest 级)压缩后写临时文件
-  再原子 rename;
-- 静态加密(可配):AES-256-GCM,密钥 = HKDF-SHA256(masterKey,
-  salt="mixum/snap/v1:<storeID>", info="chunk-aead"),nonce 前置,
-  AAD 绑定 storeID + 块哈希(防块挪用);masterKey 32B,
-  首次生成落 `dataDir/master.key`(0600);
-- 读取时校验:解压后重算哈希必须等于块名,不匹配即报损坏;
-- GC:节点可达性收集全部引用块 → Sweep 删除未标记块(见 §5)。
+## 2. Content-addressed block store (CAS)
 
-## 3. 文件清单(manifest)
+- Blocks: fixed 1 MiB nominal chunks, the tail may be shorter; **hash = plaintext
+  SHA-256**, independent of compression/encryption, so cross-device dedup is not
+  affected.
+- On disk: `objects/<h[:2]>/<h[2:]>`, zstd (fastest level) compressed, written to a
+  temporary file then atomically renamed.
+- Optional encryption at rest: AES-256-GCM, key = HKDF-SHA256(masterKey,
+  salt="mixum/snap/v1:<storeID>", info="chunk-aead"), nonce prepended, AAD binds
+  storeID + block hash (prevents block transplant); masterKey 32 B, generated on
+  first use at `dataDir/master.key` (0600).
+- Read verification: after decompression the recomputed hash must equal the block
+  name; a mismatch reports corruption.
+- GC: node reachability collects all referenced blocks → Sweep deletes unmarked
+  blocks (§5).
+
+## 3. File manifest
 
 ```
 Manifest { version, files: [FileEntry], dirs: [DirEntry] }
 FileEntry { path, mode, size, symlink?, chunks: [hash], ino? }
 ```
 
-- 打包(PackDirectory):遍历工作区,常规文件切块入 CAS,符号链接记目标,
-  其他类型(sockets 等)仅记类型;skip 列表排除块仓库自身等;
-- 落地(Materialize):目录先建,文件「写临时 + chmod + rename」逐个原子落地;
-- 路径安全:清单路径来自不可信来源(远端推送)时,拒绝 `..` 与绝对路径;
-- diff:两清单对比得 added/removed/changed 文件与新块统计。
+- PackDirectory: walk the workspace, chunk regular files into CAS, record symlink
+  targets, record only the type for other kinds (sockets etc.); the skip list
+  excludes the block store itself.
+- Materialize: create directories first; write each file as "temporary + chmod +
+  rename" atomically.
+- Path safety: when a manifest path comes from an untrusted source (remote push),
+  reject `..` and absolute paths.
+- diff: compare two manifests for added/removed/changed files and new-block stats.
 
-## 4. 快照树(git 式 DAG)
+## 4. Snapshot tree (git-style DAG)
 
-- 节点 TreeNode:`{ id, parent?, branch, label?, kind, auto?, createdAt,
-  origin?, disk: Manifest?, memory: Manifest?, kernel, arch, sizeBytes,
-  chunks }`;存储为单文件 KV 库(参考实现曾用 bbolt;Rust 版已选 sled,见 §9);
-- **分支 = 节点属性,head = 指针**。新快照永远挂在「当前 head」之下并成为
-  该分支新 head;
-- **原地回退(inplace)**:head 移回旧节点。此后继续工作产生的新快照
-  自然成为旧节点的新孩子——与旧时间线并存,即树状分叉;
-- **显式 fork**:在某节点上开新分支(head 指向该节点,不改工作区),
-  分支名冲突自动追加 `-2`、`-3`;
-- **回到任一未来快照**:树里节点永不因回退而丢失,直接 restore 即可;
-- 容器初始化时自动打 `genesis` 快照(空工作区),是全树的根;
-- 删除:仅允许删叶子节点,防止悬空引用;
-- 恢复的安全闸:含 CRIU 内存镜像的节点(memory/hybrid)要求 kernel 完全一致;
-  纯 disk 节点跨内核只记 warn 并放行(文件语义不依赖内核)。`arch` 仍强校验。
-- 恢复期间由宿主冻结全部任务进程组,`materialize` 完成后再解冻,
-  避免 `clear_root` 与运行中的进程读写打架。
-- **GUI 会话清单（OS 扩展）**：节点元数据可带 `guiSessions`，由 `spawn_gui`
-  路径记录（命令、参数、cwd、最小环境、pid），快照时与 mixcomp 窗口表按 pid
-  合并出 app_id/title/几何。restore 完成后 agentd 先终止本地旧进程（SIGTERM
-  等待退出，超时 SIGKILL）再按清单重拉；重拉与 `spawn_gui` 走同一
-  Landlock/cgroup 隔离路径。**仅当节点 origin 为空（本机产生）且为 disk
-  快照时才自动重放**：memory/hybrid 恢复已由 CRIU 带回进程，重放会产生重复
-  窗口；sync 推送/`.mart` 导入的节点跳过（空白 origin 在导入时即拒绝），
-  避免执行不可信元数据里的命令。重拉进程会 `env_clear()` 后只设置
-  PATH/HOME/USER/DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/MIXUM_WORK，
-  `MIXUM_*` 令牌既不入快照也不被继承。
-  外部驱动自己拉起的 GUI 进程不在清单内。
+- Node `TreeNode`: `{ id, parent?, branch, label?, kind, auto?, createdAt, origin?,
+  disk: Manifest?, memory: Manifest?, kernel, arch, sizeBytes, chunks }`; stored in a
+  single-file KV store (the reference used bbolt; Rust chose sled, §9).
+- **Branch is a node property, head is a pointer.** A new snapshot always hangs under
+  the current head and becomes that branch's new head.
+- **In-place rollback**: move head back to an old node. New snapshots produced by
+  continued work naturally become new children of the old node — coexisting with the
+  old timeline, i.e. a tree fork.
+- **Explicit fork**: open a new branch at a node (head points at it, workspace
+  unchanged); name collisions get `-2`, `-3`.
+- **Return to any future snapshot**: nodes are never lost by rollback; just restore.
+- On container init, an empty `genesis` snapshot is taken automatically and is the
+  root of the whole tree.
+- Delete: only leaf nodes, to prevent dangling references.
+- Restore safety gate: nodes with CRIU memory images (memory/hybrid) require an exact
+  kernel; pure disk nodes crossing kernels only log a warning and proceed (file
+  semantics do not depend on the kernel). `arch` is still strictly checked.
+- During restore the host freezes all task process groups and unfreezes after
+  `materialize`, so `clear_root` does not race running processes.
+- **GUI session manifest (OS extension)**: node metadata may carry `guiSessions`,
+  recorded by the `spawn_gui` path (command, args, cwd, minimal env, pid); at snapshot
+  time it is merged with mixcomp's window table by pid to produce app_id/title/
+  geometry. After restore, agentd first terminates the local old processes (SIGTERM,
+  wait, then SIGKILL on timeout), then relaunches from the manifest; relaunch uses the
+  same Landlock/cgroup isolation as `spawn_gui`. **Automatic replay happens only when
+  the node's origin is empty (local) and the snapshot is disk**: memory/hybrid restore
+  already brings processes back via CRIU, so replay would duplicate windows;
+  sync-pushed/`.mart`-imported nodes are skipped (empty origin is rejected on import),
+  so commands in untrusted metadata are never executed. The relaunched process gets
+  `env_clear()` and only PATH/HOME/USER/DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/
+  MIXUM_WORK; `MIXUM_*` tokens are neither snapshotted nor inherited. GUI processes
+  launched by external drivers are not in the manifest.
 
-### 用户视角的例子
+### A user-facing example
 
 ```
-20:00 打快照 n2(任务前置)
-22:00 工作区变化,快照 n3
+20:00 snapshot n2 (pre-task)
+22:00 workspace changes, snapshot n3
         main:  genesis ── n1 ── n2 ── n3
-22:30 回退到 n2(inplace),继续工作 → n4
+22:30 roll back to n2 (inplace), continue → n4
         main:  genesis ── n1 ── n2 ── n3
-                                    └─ n4   ← 平行时间线
-23:00 发现 22:00 的参数更优,restore(n3, fork, "调参-激进") → 新分支
-        调参-激进: n3 → …
+                                    └─ n4   ← parallel timeline
+23:00 decide the 22:00 parameters were better, restore(n3, fork, "tuning-aggressive") → new branch
+        tuning-aggressive: n3 → …
 ```
 
 ## 5. GC
 
-可达集合 = 树中全部现存节点引用的块(节点删除只允许删叶子,所以
-不存在「被删节点仍被引用」的中间态)。Sweep 清掉 CAS 中未标记块;
-「保护最近 10 分钟的块」已实现(`engine.rs::GC_PROTECT_WINDOW`,
-按 mtime 跳过),进行中的推送/导入写入的块不会被并发 GC 清掉。
+The reachable set = blocks referenced by all existing nodes (only leaves can be
+deleted, so there is no "deleted node still referenced" intermediate state). Sweep
+removes unmarked CAS blocks. "Protect blocks from the last 10 minutes" is implemented
+(`engine.rs::GC_PROTECT_WINDOW`, skip by mtime), so blocks written by an in-flight
+push/import are not collected by a concurrent GC.
 
-## 6. 内存快照(CRIU)
+## 6. Memory snapshots (CRIU)
 
-- 探测:`criu` 二进制存在即启用;`sys.info.criuAvailable` 暴露;
-- dump:`criu dump --tree <pid> --images-dir <dir> [--leave-running]`,
-  镜像目录再走一次目录打包进 CAS(挂到节点的 memory 清单);
-- restore:`criu restore --images-dir <dir> --shell-job`;
-- 兼容指纹:节点记录 `arch/kernelRelease`,恢复时强校验(保守门禁);
-  **受控实验(2026-10-20)已验证最小静态进程跨内核 restore 可行**——源 6.18+CRIU 4.2.1
-  → 目标 6.1.0-47+同版本 CRIU,目标 control PASS 后跨内核 restore 两轮
-  PASS(进程计数继续);此前「不可行」系环境混杂,已纠正,方法与证据见
-  docs/criu-feasibility.md §4.4。覆盖范围仅最小静态进程,精确指纹门禁
-  仍为默认,按场景扩展后再评估放宽;
-- v1 限制:纯 memory 快照不允许恢复(必须配合 disk);
-  进程持有的外部 fd(unix socket 到 mixumd)由任务引擎在快照前规范化。
-- 同机回退:restore 先调用宿主的 `restore_prepare`(agentd 终止当前任务进程树),
-  再落地文件并执行 `criu restore`;跨设备仍拒绝 memory/hybrid。
-- 任务 leader pid 由 `LocalSandbox` 写入共享 AtomicI32,快照引擎在
-  memory/hybrid 创建前读取;没有运行中的任务时 memory 快照直接报错。
+- Probe: enabled when the `criu` binary exists; exposed as `sys.info.criuAvailable`.
+- dump: `criu dump --tree <pid> --images-dir <dir> [--leave-running]`, then pack the
+  image directory into CAS again (attached to the node's memory manifest).
+- restore: `criu restore --images-dir <dir> --shell-job`.
+- Compatibility fingerprint: the node records `arch/kernelRelease` and restore checks
+  them strictly (conservative gate). **Controlled experiments (2026-10-20) verified
+  that a minimal static process can restore across kernels** — source 6.18 + CRIU
+  4.2.1 → target 6.1.0-47 + same CRIU version; after the target control PASSed,
+  cross-kernel restore PASSed twice (process count continued). The earlier
+  "infeasible" result was a mixed environment and was corrected; method and evidence
+  are in `docs/criu-feasibility.md` §4.4. Coverage is only a minimal static process;
+  the precise fingerprint gate remains the default and is evaluated for relaxation
+  per scenario.
+- v1 limits: pure memory snapshots cannot be restored (disk is required); external
+  fds held by processes (Unix socket to mixumd) are normalized by the task engine
+  before the snapshot.
+- Same-host rollback: restore first calls the host's `restore_prepare` (agentd
+  terminates the current task process tree), then materializes files and runs
+  `criu restore`; cross-device memory/hybrid is still refused.
+- The task leader pid is written by `LocalSandbox` into a shared AtomicI32 and read by
+  the snapshot engine before memory/hybrid creation; with no running task, a memory
+  snapshot reports an error immediately.
 
-## 7. 跨设备流转
+## 7. Cross-device transfer
 
-协议见 protocol.md §6。补充语义:
+Protocol in `protocol.md` §6. Additional semantics:
 
-- origin 字段记录来源主机名,树里可见「这个分支从哪来」;
-- 推送是幂等的:第二次推送 missing 为空,零字节传输;同内容的新快照
-  (盒盖自动快照)同样零字节,commit 照常落树,云端不会缺新 head;
-- 传输只发明文块,哈希即校验和;落盘加密是各端自己的事;
-- 「mac 盒盖 → 云端续跑」链路:mixum-ctl 监听电源事件 → hybrid 快照
-  → snap.push 到云端 → 云端容器 restore 该节点 → 任务继续;
-  反向回迁同理。平台侧(macOS)用 IOKN 通知在盒盖前抢出几秒窗口,
-  细节见 host-integration.md。
+- The origin field records the source hostname; the tree shows "where this branch came
+  from".
+- Push is idempotent: the second push has an empty missing list, zero-byte transfer;
+  a new snapshot with identical content (automatic lid-close snapshot) also transfers
+  zero bytes, commit still lands in the tree, and the cloud does not miss a new head.
+- Transfer sends plaintext blocks only; the hash is the checksum; encryption at rest
+  is each side's business.
+- "Mac lid close → cloud continues" chain: mixum-ctl listens for power events →
+  hybrid snapshot → `snap.push` to the cloud → the cloud container restores that node
+  → the task continues; the reverse path is symmetric. On macOS the IOKit
+  notification buys a few seconds before the lid closes; details in
+  `host-integration.md`.
 
-## 8. Go 参考实现对照表(已移除)
+## 8. Go reference implementation map (removed)
 
-Go 参考实现已移除(2026-10-16),下表保留为概念溯源;行为以
-`rust/crates/mixum-snapshot` 为准。
+The Go reference implementation was removed (2026-10-16); the table is kept for
+concept provenance. Behavior is defined by `rust/crates/mixum-snapshot`.
 
-| 本文概念 | 原 reference/ 位置 |
-|----------|-----------------|
-| CAS + 加密 | internal/snap/chunk.go |
-| 清单/打包/落地/diff | internal/snap/manifest.go |
-| 树 DAG | internal/snap/tree.go |
-| 引擎(快照/恢复/fork/GC) | internal/snap/engine.go |
-| CRIU 驱动 | internal/snap/memory.go |
-| 后端探测 | internal/snap/backend.go |
-| 推送/导入(协议侧) | internal/server/handlers_snap.go |
-| 行为测试 | internal/snap/engine_test.go, internal/server/server_test.go |
+| Concept here | Old reference/ location |
+|---|---|
+| CAS + encryption | internal/snap/chunk.go |
+| manifest/pack/materialize/diff | internal/snap/manifest.go |
+| tree DAG | internal/snap/tree.go |
+| engine (snapshot/restore/fork/GC) | internal/snap/engine.go |
+| CRIU driver | internal/snap/memory.go |
+| backend probe | internal/snap/backend.go |
+| push/import (protocol side) | internal/server/handlers_snap.go |
+| behavior tests | internal/snap/engine_test.go, internal/server/server_test.go |
 
-## 9. Rust 实现记录
+## 9. Rust implementation record
 
-Rust 实现位于 `rust/crates/mixum-snapshot`，并以本节与本文规格为准。树的持久化后端选用 **sled**：它提供嵌入式有序 KV、事务式单键更新和跨平台文件存储，接口比 bbolt 的事务回调更适合 Rust；快照节点、分支 head 和当前分支分别存放在 `nodes`、`heads`、`meta` 树中。阶段 1 不依赖外部数据库服务。
+The Rust implementation is in `rust/crates/mixum-snapshot` and follows this page's
+spec. The tree persistence backend is **sled**: it provides an embedded ordered KV,
+transactional single-key updates and cross-platform file storage, and its interface
+fits Rust better than bbolt's transaction callback. Snapshot nodes, branch heads and
+the current branch live in the `nodes`, `heads` and `meta` trees. Stage 1 does not
+depend on an external database service.
 
-与 Go 参考实现的对应关系如下：
+Mapping to the Go reference:
 
-| 能力 | Rust 实现 | 说明 |
-|------|-----------|------|
-| CAS | `store.rs` | zstd、明文 SHA-256、可选 AES-256-GCM；HKDF 盐、`chunk-aead` info、AAD 与 Go 一致 |
-| 清单 | `manifest.rs` | 固定 1 MiB 分块、目录/符号链接、原子落地、路径穿越拒绝、diff |
-| 树 DAG | `tree.rs` | genesis、head、回退、fork 自动编号、叶子删除、分支改名 |
-| 引擎 | `engine.rs` | disk/memory/hybrid、冻结 hook、恢复、GC；纯 memory 恢复拒绝 |
-| CRIU | `criu.rs` | 启动时探测 `criu`，非 Linux 仍可编译；不可用时返回明确错误 |
+| Capability | Rust implementation | Notes |
+|---|---|---|
+| CAS | `store.rs` | zstd, plaintext SHA-256, optional AES-256-GCM; HKDF salt, `chunk-aead` info and AAD match Go |
+| manifest | `manifest.rs` | fixed 1 MiB chunks, directories/symlinks, atomic materialize, path traversal rejection, diff |
+| tree DAG | `tree.rs` | genesis, head, rollback, fork auto-numbering, leaf delete, branch rename |
+| engine | `engine.rs` | disk/memory/hybrid, freeze hook, restore, GC; pure-memory restore refused |
+| CRIU | `criu.rs` | probe `criu` at startup; still compiles on non-Linux; returns a clear error when unavailable |
 
-Rust 节点 ID 使用本地随机十六进制后缀，时间字段仍为 Unix 毫秒；JSON 字段使用协议规定的 camelCase。Go 侧 bbolt 的事务存储和 Rust 侧 sled 的文件格式不互通，但节点/清单/块的线格式与语义由交叉向量测试锁定。GC 的推送竞态保护已实现(§5,10 分钟 mtime 窗口)。
+Rust node IDs use a local random hex suffix; time fields remain Unix milliseconds;
+JSON fields use the protocol's camelCase. Go's bbolt transaction storage and Rust's
+sled file format are not interoperable, but node/manifest/block wire formats and
+semantics are locked by cross vectors. GC's push-race protection is implemented
+(§5, 10-minute mtime window).
 
-### 引擎延迟基准（2026-10-21 复测，Linux 容器 release 构建）
+### Engine latency benchmarks (2026-10-21, Linux container release build)
 
-复现:`cargo run --release -p mixum-snapshot --example bench`。
+Repro: `cargo run --release -p mixum-snapshot --example bench`.
 
-| 工作区 | 冷打包 | 无变更(中位) | 部分变更 | 恢复物化 |
-|--------|--------|--------------|----------|----------|
-| code:300 × 2 KiB 小文件 | 2388 ms | 8.8 ms | 373 ms | 689 ms |
-| assets:50 MiB 单文件 | 74.6 ms | 44.9 ms | 90.4 ms | 122 ms |
+| Workspace | Cold pack | No change (median) | Partial change | Restore materialize |
+|---|---|---|---|---|
+| code: 300 × 2 KiB small files | 2388 ms | 8.8 ms | 373 ms | 689 ms |
+| assets: 50 MiB single file | 74.6 ms | 44.9 ms | 90.4 ms | 122 ms |
 
-结论:**「无感前置快照」在热路径成立**(未变更工作区 8.8 ms / 大文件 45 ms),
-大文件吞吐约 640 MB/s。短板仍是小文件工作区:逐块「临时文件+rename」与
-sled 单键提交的每文件开销 ≈2.3 ms(打包)/ ≈2.7 ms(恢复),几百个
-小文件即进入秒级(上轮 2026-10-17 首次测量为冷 1651 ms/恢复 1593 ms,
-本轮恢复降至 689 ms,数字随机器与缓存波动,以同环境复测为准)。优化方向
-(未实施):块分组批量落盘、清单复用(ino/size/mtime 未变直接引用旧块)、
-sled 批量事务。跨节点流转(盒盖→云端续跑)已由双节点 e2e 全链验证,
-见 tests/integration/sync-e2e.mjs。
+Conclusion: **the "transparent pre-task snapshot" holds on the hot path** (unchanged
+workspace 8.8 ms / large file 45 ms), large-file throughput ~640 MB/s. The weak spot
+is still small-file workspaces: per-block "temp file + rename" and sled single-key
+commit cost ≈2.3 ms/file (pack) / ≈2.7 ms (restore); a few hundred small files reach
+seconds (the first measurement on 2026-10-17 was 1651 ms cold / 1593 ms restore; this
+round restore dropped to 689 ms; numbers vary with machine and cache, use same-
+environment reruns). Optimization directions (not implemented): group blocks into
+batched writes, manifest reuse (reuse old blocks when ino/size/mtime are unchanged),
+sled batch transactions. Cross-node transfer (lid close → cloud continue) is verified
+by the two-node e2e full chain, see `tests/integration/sync-e2e.mjs`.
 
-### 启动延迟基准（2026-10-21，Windows 11 + Docker Desktop/WSL2）
+### Startup latency benchmarks (2026-10-21, Windows 11 + Docker Desktop/WSL2)
 
-复现:`node tests/integration/startup-bench.mjs --runs 10`(镜像
-`mixumos:0.1.0-x86_64`,入口显式 `/usr/bin/mixumd --config /dev/null`;
-时间戳取自 `docker logs -t` 与 `State.StartedAt`,不受轮询间隔影响)。
+Repro: `node tests/integration/startup-bench.mjs --runs 10` (image
+`mixumos:0.1.0-x86_64`, entrypoint explicitly `/usr/bin/mixumd --config /dev/null`;
+timestamps from `docker logs -t` and `State.StartedAt`, not affected by polling
+interval).
 
-| 场景 | container→ready(min/median/p95) | run→ready(median/p95) |
-|------|--------------------------------|-----------------------|
-| 冷启动(新建容器) | 82 / 107 / 118 ms | 226 / 236 ms |
-| 热重启(docker start) | 90 / 102 / 110 ms | 175 / 185 ms |
+| Case | container→ready (min/median/p95) | run→ready (median/p95) |
+|---|---|---|
+| Cold start (new container) | 82 / 107 / 118 ms | 226 / 236 ms |
+| Warm restart (docker start) | 90 / 102 / 110 ms | 175 / 185 ms |
 
-- `container→ready` = mixumd 进程启动到监听 7601 的延迟(含快照引擎打开、
-  证书与令牌生成);`run→ready` = 宿主发起 docker run/start 到可连接的端到端
-  延迟(含 Docker CLI/daemon/容器创建)。表中为中位数(10 次,宿主负载会影响
-  绝对值;同机复测请以 `--runs 10` 输出为准)。
-- 冷/热容器内延迟接近(107 vs 102 ms),说明主要开销在 mixumd 自身启动;
-  端到端与容器内的差值(冷 119 ms / 热 73 ms)来自 Docker CLI/daemon/容器创建。
-- 会话恢复组合:快照物化(300 小文件 689 ms / 50 MiB 单文件 122 ms)
-  + agentd 启动(约 107 ms)→ 约 0.23–0.80 s;未计入 GUI(mixcomp/foot)
-  启动与宿主冷缓存。
+- `container→ready` = delay from mixumd process start to listening on 7601
+  (including snapshot engine open, certificate and token generation); `run→ready` =
+  host-initiated docker run/start to connectable, end to end (including Docker
+  CLI/daemon/container creation). Values are medians (10 runs; host load affects
+  absolute values; rerun with `--runs 10` on the same machine).
+- Cold and warm in-container latency is close (107 vs 102 ms), so most of the cost is
+  mixumd startup; the end-to-end minus in-container difference (119 ms cold / 73 ms
+  warm) is Docker CLI/daemon/container creation.
+- Combined session restore: snapshot materialize (300 small files 689 ms / 50 MiB
+  single file 122 ms) + agentd start (~107 ms) → roughly 0.23–0.80 s; GUI
+  (mixcomp/foot) startup and host cold cache are excluded.

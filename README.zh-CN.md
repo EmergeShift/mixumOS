@@ -213,7 +213,7 @@ main:  genesis ── n1 ── n2 ── n3
 | 窗口流 | 30 fps，30 分钟浸泡 54,361 帧，零断连 | `tests/integration/soak-run.mjs` |
 | Apple Container 节点内存 | agentd + mixcomp **≈38 MiB** | `container stats`（M1，16 GB） |
 
-完整口径（包括小文件工作区的短板）见 [docs/snapshots.md §9](docs/snapshots.md#9-rust-实现记录)。
+完整口径（包括小文件工作区的短板）见 [docs/snapshots.zh-CN.md §9](docs/snapshots.zh-CN.md#9-rust-实现记录)。
 
 ## 安全模型
 
@@ -276,7 +276,7 @@ mixumOS/
 |---|---|
 | [架构](docs/architecture.zh-CN.md) | 有哪些部件，为什么这样拆 |
 | [协议 v1](docs/protocol.md) | Envelope、ops、令牌、二进制帧 |
-| [快照](docs/snapshots.md) | CAS、树语义、CRIU、基准 |
+| [快照](docs/snapshots.zh-CN.md) | CAS、树语义、CRIU、基准 |
 | [Apple Container](docs/apple-container.zh-CN.md) | 内核安装、实测数字、如何切回 |
 | [主机集成](docs/host-integration.zh-CN.md) | `mixum-ctl`、电力钩子、本地查看器、音频/输入法 |
 | [后端形态](docs/backends.zh-CN.md) | Docker、WSL 2、nvx、Kubernetes |
