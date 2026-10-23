@@ -259,7 +259,7 @@ impl PrivilegeBroker {
 
     /// 由 Mart/CLI 的 `privilege.decision` 调用。
     pub async fn decide(&self, id: &str, decision: Decision) -> Result<(), String> {
-        if decision.scope != "" && decision.scope != "once" {
+        if !decision.scope.is_empty() && decision.scope != "once" {
             return Err(format!("不支持的审批范围: {}", decision.scope));
         }
         let removed = self.state.lock().await.pending.remove(id);
@@ -795,7 +795,13 @@ mod hardening_tests {
             let broker = broker.clone();
             handles.push(tokio::spawn(async move {
                 broker
-                    .request("id", &["-u".into()], "/tmp", "cap", &format!("task-{index}"))
+                    .request(
+                        "id",
+                        &["-u".into()],
+                        "/tmp",
+                        "cap",
+                        &format!("task-{index}"),
+                    )
                     .await
             }));
         }
@@ -872,10 +878,7 @@ mod hardening_tests {
         assert_eq!(record["result"], "executed");
         assert_eq!(record["approver"], "alice-admin");
         assert_eq!(record["request"]["taskId"], "");
-        assert_eq!(
-            record["request"]["sha256"].as_str().map(str::len),
-            Some(64)
-        );
+        assert_eq!(record["request"]["sha256"].as_str().map(str::len), Some(64));
     }
 }
 
