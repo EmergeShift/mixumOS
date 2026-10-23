@@ -1,36 +1,116 @@
-# 主机集成
+> English translation of the Chinese document. Original: [host-integration.zh-CN.md](host-integration.zh-CN.md). Technical review pending.
 
-`mixum-ctl` 是协议 v1 的主机客户端。它通过 `wss://host:port/ws` 连接 mixumd，先发送 `hello`，随后把每个控制请求编码为 envelope，并按 `replyTo` 关联应答。服务端推送的 `task.event` 进入事件通道，视频二进制帧进入帧通道。
+# Host integration
 
-首次连接会计算服务器端实体证书的 SHA-256 指纹，保存到 `~/.mixum/known-hosts`，文件权限为 0600。之后同一地址必须提供相同指纹；`--fingerprint` 可在首次配对时显式指定指纹。令牌文件同样按 0600 配置，客户端不把令牌写入日志。
+`mixum-ctl` is the protocol-v1 host client. It connects to mixumd over
+`wss://host:port/ws`, sends `hello`, then encodes every control request as an
+envelope and correlates replies by `replyTo`. Server-pushed `task.event`s go to the
+event channel; binary video frames go to the frame channel.
 
-指纹按地址固定，解析顺序为：显式 `--fingerprint`、known-hosts 中该地址的记录、配置文件里已配对设备（`remote`）的指纹。多节点使用时，`connect` 到新节点不会影响其它地址的校验；证书轮换后对目标地址重新执行带 `--fingerprint` 的 `connect` 即完成重新配对。
+The first connection computes the SHA-256 fingerprint of the server's end-entity
+certificate and stores it in `~/.mixum/known-hosts` with mode 0600. The same address
+must later present the same fingerprint; `--fingerprint` lets the first pairing
+specify it explicitly. Token files are also 0600, and the client never writes tokens
+to logs.
 
-合盖迁移链路是：电力事件或 `mixum-ctl power --simulate-sleep` 调用 `snap.create`（`hybrid`、`auto=true`），再调用 `snap.push` 将节点和缺失块送到远端。块传输的去重与落树由对端按协议 §6 完成，第二次推送不应产生块流量。
+Fingerprints are pinned per address. Resolution order: explicit `--fingerprint`, the
+known-hosts entry for that address, then the fingerprint of a paired device
+(`remote`) in the config. With multiple nodes, `connect` to a new node does not
+affect the verification of other addresses; after certificate rotation, run
+`connect --fingerprint` against the target address again to re-pair.
 
-手动跨节点推送时，源节点令牌使用全局 `--token`，目标节点令牌使用 `snap push ... --remote-token <token>`，避免两个端点的令牌混淆。
+The lid-close migration path: a power event (or `mixum-ctl power --simulate-sleep`)
+calls `snap.create` (`hybrid`, `auto=true`), then `snap.push` sends the node and
+missing blocks to the remote. The peer handles block dedup and tree insertion per
+protocol §6; a second push should produce no block traffic.
 
-`connect --token-path <file>` 只保存令牌文件路径；`connect --token <value>` 仅用于当前握手，不会被写入配置。
+For manual cross-node push, the source token uses the global `--token`; the target
+token uses `snap push ... --remote-token <token>`, so the two endpoints' tokens do
+not get mixed up.
 
-模拟合盖同样支持 `power --simulate-sleep --remote <addr> --remote-token <token>`；省略目标令牌时才回退使用源连接令牌。
+`connect --token-path <file>` only stores the token file path; `connect --token
+<value>` is used for the current handshake only and is never written to config.
 
-macOS 的正式集成点是 IOKit 的 `IORegisterForSystemPower`，该回调不要求 root。`power --watch` 的语义：`kIOMessageCanSystemSleep`（闲置倒计时）仅放行不迁移；`kIOMessageSystemWillSleep` 触发盒盖迁移（与 `--simulate-sleep` 同一链路），系统保持唤醒等待迁移完成或超时（`--deadline-secs`，默认 30s）后才归还 `IOAllowPowerChange` 确认——迁移失败或超时也照常放行，不会挂死睡眠。Linux 使用 systemd `sleep.target` 的 system-sleep 钩子：`power --install` 生成 `/usr/lib/systemd/system-sleep/mixum-ctl`（pre 阶段同步执行迁移，deadline 20s，日志 `/var/log/mixum-power.log`），`power --print` 预览、`power --remove` 卸载；钩子以 root 运行，配置目录经 `MIXUM_CONFIG_DIR` 指向用户 `~/.mixum`，安装前需先 `connect` 配置 remote 与 token_path。
+Simulated lid close also supports `power --simulate-sleep --remote <addr>
+--remote-token <token>`; only when the target token is omitted does it fall back to
+the source connection token.
 
-文件传输给 agent 的推荐用法：
+On macOS the official integration point is IOKit's `IORegisterForSystemPower`; the
+callback does not require root. `power --watch` semantics:
+`kIOMessageCanSystemSleep` (idle countdown) is allowed through without migration;
+`kIOMessageSystemWillSleep` triggers lid-close migration (the same path as
+`--simulate-sleep`), and the system stays awake until migration completes or the
+deadline expires (`--deadline-secs`, default 30 s) before returning
+`IOAllowPowerChange` — even on failure or timeout it still allows sleep, so the
+machine cannot hang. Linux uses the systemd `sleep.target` system-sleep hook:
+`power --install` writes `/usr/lib/systemd/system-sleep/mixum-ctl` (the pre stage
+runs migration synchronously, 20 s deadline, log at `/var/log/mixum-power.log`);
+`power --print` previews and `power --remove` uninstalls. The hook runs as root; point
+`MIXUM_CONFIG_DIR` at the user's `~/.mixum`, and run `connect` first so remote and
+token_path are configured.
+
+Recommended file transfer usage for agents:
 
 ```sh
-# 主机 → 节点；stdout 只打印远端路径，便于 agent 解析
+# host → node; stdout prints only the remote path, easy for an agent to parse
 path=$(mixum-ctl file put ./input.bin --name input.bin)
 mixum-ctl task submit "处理 $path" --agent shell --param cmd="cat $path"
 
-# 节点 → 主机
+# node → host
 mixum-ctl file get "$path" --out ./result.bin
 ```
 
-`file.put` 默认落到 `workRoot/transfers/<name>`，返回绝对路径；`--json`
-可拿到结构化结果。Tauri 窗口文件拖入走同一条通道，上传后把远端路径作为
-文本注入目标窗口。
+`file.put` defaults to `workRoot/transfers/<name>` and returns the absolute path;
+`--json` gives a structured result. Drag-and-drop into a Tauri window uses the same
+channel; after upload the remote path is injected into the target window as text.
 
-本地视图默认监听 `127.0.0.1:7602`。管理页（`/`）每 2s 轮询窗口列表，点击后在**独立弹出窗口**打开 `/view/<id>`——每个容器窗口一个独立视图：标题栏显示窗口标题与接管状态（badge），`display.attach` 以 fps 30 订阅 png（损伤门控下静态窗口零流量，attach 强制出首帧），按协议 27 字节帧头绘制全帧与 damage 补丁，首帧后按内容尺寸 resize，断线 1s 自动重连。视图页支持**接管与输入注入**：`接管/释放` 按钮走 `display.takeover`（agent 持有时强制接管需确认），user 模式下鼠标（motion/button/滚轮）与键盘（keysym+修饰键，F5/F11/F12 放行浏览器）经 `display.input` 注入，坐标按 canvas 缩放映射到物理像素；画布内点击后可用**宿主系统输入法**输入中文等非 ASCII 文本：页面用一个定位到点击处的隐藏输入框接收组合结果，`compositionend` 后以 `display.input {type:"text"}` 提交，mixcomp 经 text-input-v3 的 `commit_string` 交给焦点窗口（组合与候选在宿主完成，容器内无需安装输入法；仅覆盖实现 text-input-v3 的 Wayland 原生应用，XWayland/X11 客户端走 XIM，暂不覆盖）；上行控制信封经流 WS 的白名单通道转发（仅 `display.input`/`display.takeover`/`display.list`/`audio.attach`/`audio.detach`，服务端持完整凭据，快照等高权限 op 不放行）。`display record` 把指定窗口的 JPEG 逐帧保存为 `frame-0000.jpg` 等序列。控制台窗口工具栏的「音频」按钮通过 `audio.attach` 订阅容器音频（s16le 48kHz 双声道，20ms 一块），用 WebAudio 排队播放；再次点击「静音」或离开画布会 `audio.detach`。容器内需要有音频服务与采集命令（服务端 `audioCommand`，如 `parec`）。dist 镜像由 `pulseaudio-mixum.service` 提供 null sink `mixum`，默认 `audioCommand` 从 `mixum.monitor` 采集；视图页同样有「音频」按钮与音量滑杆。客户端用音频时间戳推进播放时钟：默认 60ms 提前量，按 PTS 步长递增，落后/积压超过 500ms 或时间戳异常时重置调度点；工具栏另有 A/V 偏移滑杆（-200~+200ms）用于对齐画面。badges 显示累计帧数、当前提前量与丢帧数。
+## Local viewer
 
-安全边界：只连接 TLS 1.3；自签证书不依赖系统 CA，而是指纹固定；TOFU 文件与配置文件不应放到共享目录；视图服务只绑定回环地址，生产环境不要将 7602 暴露到局域网。
+The local viewer listens on `127.0.0.1:7602` by default. The admin page (`/`) polls
+the window list every 2 s; clicking a window opens `/view/<id>` in a **separate
+popup** — one independent view per container window. The title bar shows the window
+title and takeover state badge; `display.attach` subscribes to png at fps 30 (with
+damage gating, a static window has zero traffic; attach forces a first frame), draws
+full frames and damage patches using the protocol's 27-byte frame header, resizes to
+the content size after the first frame, and reconnects automatically within 1 s after
+a disconnect. The view page supports **takeover and input injection**: the
+takeover/release button goes through `display.takeover` (force takeover of an
+agent-owned window needs confirmation); in user mode, mouse (motion/button/wheel) and
+keyboard (keysym + modifiers; F5/F11/F12 stay with the browser) are injected through
+`display.input`, with coordinates mapped from the canvas scale to physical pixels.
+
+## IME and text input
+
+After clicking inside the canvas, the **host system IME** can be used for Chinese and
+other non-ASCII text: the page positions a hidden input at the click point, receives
+the composition result, and on `compositionend` submits
+`display.input {type:"text"}`. mixcomp hands it to the focused window through
+text-input-v3's `commit_string` (composition and candidates happen on the host; no IME
+is needed inside the container). This only covers Wayland-native apps that implement
+text-input-v3; XWayland/X11 clients use XIM and are not covered yet.
+
+Uplink control envelopes go through the stream WS's allowlisted channel (only
+`display.input`/`display.takeover`/`display.list`/`audio.attach`/`audio.detach`; the
+server holds the full credential, and high-privilege ops such as snapshots are not
+allowed). `display record` saves the selected window's JPEG frames as
+`frame-0000.jpg`, etc.
+
+## Audio
+
+The console window toolbar's audio button subscribes to container audio through
+`audio.attach` (s16le 48 kHz stereo, 20 ms chunks) and queues it in WebAudio; clicking
+mute again or leaving the canvas sends `audio.detach`. The container needs an audio
+service and a capture command (server `audioCommand`, e.g. `parec`). The dist image
+provides a null sink `mixum` via `pulseaudio-mixum.service`, and the default
+`audioCommand` captures from `mixum.monitor`; the view page also has an audio button
+and volume slider. The client advances its playback clock from audio timestamps:
+60 ms lead by default, stepping by PTS; if it falls behind/accumulates more than
+500 ms or timestamps are abnormal, it resets the scheduling point. The toolbar also
+has an A/V offset slider (-200 to +200 ms) to align picture and sound. Badges show
+cumulative frames, current lead and dropped frames.
+
+## Security boundary
+
+TLS 1.3 only; self-signed certificates rely on fingerprint pinning, not the system CA;
+TOFU and config files must not live in a shared directory; the view service binds to
+loopback only, and port 7602 must not be exposed to the LAN in production.

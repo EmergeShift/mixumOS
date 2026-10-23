@@ -278,7 +278,7 @@ mixumOS/
 | [协议 v1](docs/protocol.md) | Envelope、ops、令牌、二进制帧 |
 | [快照](docs/snapshots.md) | CAS、树语义、CRIU、基准 |
 | [Apple Container](docs/apple-container.md) | 内核安装、实测数字、如何切回 |
-| [主机集成](docs/host-integration.md) | `mixum-ctl`、电力钩子、本地查看器、音频/输入法 |
+| [主机集成](docs/host-integration.zh-CN.md) | `mixum-ctl`、电力钩子、本地查看器、音频/输入法 |
 | [后端形态](docs/backends.zh-CN.md) | Docker、WSL 2、nvx、Kubernetes |
 | [安全](docs/security.zh-CN.md) | 威胁模型与每一条防线 |
 | [迁移](docs/migration.zh-CN.md) | `.mart` 包与跨设备恢复 |

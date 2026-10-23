@@ -15,9 +15,9 @@ linked below.
 
 ## Coverage (2026-10-24)
 
-- English default: 10 of 21 pages (`agent-bridge`, `agent-driver`, `architecture`,
-  `backends`, `clipboard`, `console`, `macOS verification`, `migration`,
-  `poc-criu-wayland`, `security`).
+- English default: 11 of 21 pages (`agent-bridge`, `agent-driver`, `architecture`,
+  `backends`, `clipboard`, `console`, `host-integration`, `macOS verification`,
+  `migration`, `poc-criu-wayland`, `security`).
 - Architecture translation is still pending; the remaining pages are Chinese or
   mixed. The map below is the queue, not a claim that the work is done.
 
@@ -35,7 +35,7 @@ linked below.
 | [CRIU feasibility](docs/criu-feasibility.md) | research | pending | [中文](docs/criu-feasibility.md) |
 | [distro](docs/distro.md) | current | pending | [中文](docs/distro.md) |
 | [gateway](docs/gateway.md) | design | pending | [中文](docs/gateway.md) |
-| [host-integration](docs/host-integration.md) | current | pending | [中文](docs/host-integration.md) |
+| [host-integration](docs/host-integration.md) | current | [English](docs/host-integration.md) | [中文](docs/host-integration.zh-CN.md) |
 | [macOS verification](docs/macos-verification.md) | current | [English](docs/macos-verification.md) | [中文](docs/macos-verification.zh-CN.md) |
 | [migration](docs/migration.md) | partial | [English](docs/migration.md) | [中文](docs/migration.zh-CN.md) |
 | [CRIU + Wayland PoC](docs/poc-criu-wayland.md) | PoC | [English](docs/poc-criu-wayland.md) | [中文](docs/poc-criu-wayland.zh-CN.md) |
