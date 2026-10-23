@@ -115,7 +115,17 @@ impl Criu {
         let mut cmd = Command::new(&self.binary);
         cmd.args(["restore", "--images-dir"])
             .arg(dir.as_ref())
-            .args(["-v4", "-o", "restore.log", "--shell-job", "--ext-unix-sk"]);
+            .args([
+                "-v4",
+                "-o",
+                "restore.log",
+                "--shell-job",
+                "--ext-unix-sk",
+                // Detach restored tasks; otherwise CRIU waits for the restored
+                // process (e.g. a long-running agent task) and the MAP RPC
+                // times out even though restore already succeeded.
+                "-d",
+            ]);
         run(cmd)
     }
 }
