@@ -105,6 +105,14 @@ fi
 echo "==> [container] pacstrap $ARCH:base 组件 + mixum-base + foot"
 pacstrap "$TARGET" "${PKGS[@]}"
 
+# CRIU must be built inside the target rootfs: compel/parasite is sensitive to
+# the build host glibc, and the rolling Arch builder produces a binary that
+# crashes in the mixumOS target. The target also gets the runtime libraries.
+if [ "$ARCH" = "aarch64" ]; then
+	echo "==> [container] build patched CRIU inside target rootfs"
+	bash /build/mixumos/dist/os/build-criu-target.sh "$TARGET" "$ARCH"
+fi
+
 # ---- 仓库与 pacman.conf 烤进镜像(v1 分发:仓库随镜像内置,离线可升) ----
 install -d "$TARGET/srv/mixum/repo"
 cp -a "$REPO"/. "$TARGET/srv/mixum/repo/"
