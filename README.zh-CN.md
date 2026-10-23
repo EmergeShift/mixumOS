@@ -274,7 +274,7 @@ mixumOS/
 
 | 从这里开始 | 回答什么问题 |
 |---|---|
-| [架构](docs/architecture.md) | 有哪些部件，为什么这样拆 |
+| [架构](docs/architecture.zh-CN.md) | 有哪些部件，为什么这样拆 |
 | [协议 v1](docs/protocol.md) | Envelope、ops、令牌、二进制帧 |
 | [快照](docs/snapshots.md) | CAS、树语义、CRIU、基准 |
 | [Apple Container](docs/apple-container.md) | 内核安装、实测数字、如何切回 |
@@ -312,7 +312,7 @@ cargo test --workspace
 cd ../console && npm ci && npm run build
 ```
 
-平台相关工作应落在后端 crate，而不是共享代码。改令牌或快照路径之前，请先读[架构](docs/architecture.md)和[安全](docs/security.zh-CN.md)。协议语义的 RFC 流程在 MAP 仓库。
+平台相关工作应落在后端 crate，而不是共享代码。改令牌或快照路径之前，请先读[架构](docs/architecture.zh-CN.md)和[安全](docs/security.zh-CN.md)。协议语义的 RFC 流程在 MAP 仓库。
 
 ## 许可证
 

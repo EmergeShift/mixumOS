@@ -1,159 +1,183 @@
-# mixumOS 总体架构
+> English translation of the Chinese document. Original: [architecture.zh-CN.md](architecture.zh-CN.md). Technical review pending.
 
-> 状态:设计定稿(2026-10-04)。
-> 本文档回答:mixumOS 是什么、由什么组成、每个组件用什么语言、为什么。
+# mixumOS architecture
 
-## 一句话定义
+> Status: design finalized (2026-10-04).
+> This page answers: what mixumOS is, what it is made of, which language each
+> component uses, and why.
 
-mixumOS 是一个基于 Arch Linux 的 **Agent OS 发行版**:它把容器变成 agent 的
-运行环境,把 agent 的每一次操作变成可回退、可分叉、可迁移的系统事件,
-把 agent 操作的 GUI 以原生窗口的形式流到用户的手机或电脑上。
+## One-sentence definition
 
-## 两条铁律
+mixumOS is an **agent operating-system distribution** based on Arch Linux: it turns
+a container into an agent's runtime, turns every agent action into a system event
+that can be rolled back, forked or migrated, and streams the GUI the agent operates
+as native windows to the user's phone or computer.
 
-1. **发行版,不是一堆二进制。** 所有组件以 PKGBUILD 打包进自有 pacman 仓库,
-   镜像(组装的 rootfs / OCI)是发行版的产物而不是发行版本身。
-   依赖库出安全更新时升一个 so,而不是重编整个世界。
-2. **agent 是一等公民。** 我们的 agent 用 Rust 写,runner 的核心也是 Rust,
-   agent 以 crate 形式嵌入 runner,共享类型与生命周期;
-   外部第三方 agent 走 external 桥协议(见 agent-bridge.md)。
+## Two hard rules
 
-## 组件总览
+1. **A distribution, not a pile of binaries.** Every component is packaged with a
+   PKGBUILD into our own pacman repository; the image (assembled rootfs / OCI) is an
+   output of the distribution, not the distribution itself. When a library gets a
+   security update we bump one shared object instead of rebuilding the world.
+2. **The agent is a first-class citizen.** Our agent is written in Rust and the
+   runner core is Rust too; the agent embeds into the runner as a crate and shares
+   types and lifecycle. Third-party agents use the external bridge protocol (see
+   `agent-bridge.md`).
+
+## Component overview
 
 ```
-┌─────────────────────────── 用户侧 ───────────────────────────┐
-│  iOS / Android(PWA 控制台)   macOS / 桌面(mixum-ctl + 控制台)  │
+┌─────────────────────────── user side ────────────────────────┐
+│  iOS / Android (PWA console)   macOS / desktop (mixum-ctl + console) │
 └──────────────┬────────────────────────────┬─────────────────┘
-               │ WSS(TLS 1.3 + 能力令牌)      │
+               │ WSS (TLS 1.3 + capability token) │
 ┌──────────────▼────────────────────────────▼─────────────────┐
-│                      mixum-gateway(云端)                      │
-│            k8s Ingress / operator(MixumTask CRD)              │
+│                      mixum-gateway (cloud)                    │
+│            k8s Ingress / operator (MixumTask CRD)             │
 └──────────────┬──────────────────────────────────────────────┘
-               │ 调度(arm64 / x86_64 节点池)
+               │ scheduling (arm64 / x86_64 node pools)
 ┌──────────────▼──────────────────────────────────────────────┐
-│                     容器:mixumOS rootfs                       │
+│                     container: mixumOS rootfs                 │
 │                                                              │
-│  mixum-agentd(Rust)         mixcomp(C,wlroots 0.18)          │
-│  ├─ 任务引擎(AgentDriver)     ├─ 每窗口隔离捕获(client buffer)  │
-│  ├─ 快照引擎(块+树+CRIU)     ├─ virtual-pointer/keyboard 注入  │
-│  ├─ 显示 broker(接管状态机)  └─ Unix 控制通道 ↕ 上行帧/下行输入  │
-│  └─ WSS 服务端(协议见 protocol.md)                             │
+│  mixum-agentd (Rust)        mixcomp (C, wlroots 0.18)        │
+│  ├─ task engine (AgentDriver)  ├─ per-window isolated capture (client buffer) │
+│  ├─ snapshot engine (block+tree+CRIU) ├─ virtual-pointer/keyboard injection │
+│  ├─ display broker (takeover state machine) └─ Unix control channel ↕ upstream frames/downstream input │
+│  └─ WSS server (protocol in protocol.md)                      │
 │                                                              │
-│  pacman 仓库:pkgs/mixum-agentd  pkgs/mixcomp  pkgs/mixum-ctl   │
+│  pacman repo: pkgs/mixum-agentd  pkgs/mixcomp  pkgs/mixum-ctl  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## 语言分工(及理由)
+## Language split (and why)
 
-| 组件 | 语言 | 理由 |
-|------|------|------|
-| mixum-agentd(核心守护进程) | **Rust** | 与 agent 同生态,agent 以 crate 嵌入;tokio 承载 ws/进程管理/流;发行版组件正统(动态链接、走 pacman) |
-| mixcomp(Wayland 合成器) | **C** | 必须贴 wlroots C API;wlroots 生态最成熟;魔改点在 C 层收敛为一个可审计的目录 |
-| mixum-ctl(主机 CLI) | **Rust** | 与 agentd 同 workspace,共享 protocol crate |
-| 控制台(PWA) | **TypeScript** | 浏览器端唯一正解;iOS/Android 直接用 |
-| 云端 operator | **Rust** | 与核心同 workspace;k8s 交互用 kube-rs |
-| 协议/SDK | **TS + Rust crate** | 客户端两端的形态 |
+| Component | Language | Why |
+|---|---|---|
+| mixum-agentd (core daemon) | **Rust** | Same ecosystem as the agent; the agent embeds as a crate; tokio carries ws/process management/streams; a proper distro component (dynamic linking, packaged by pacman) |
+| mixcomp (Wayland compositor) | **C** | Must sit directly on the wlroots C API; the wlroots ecosystem is the most mature; the modifications are contained in one auditable directory |
+| mixum-ctl (host CLI) | **Rust** | Same workspace as agentd, shares the protocol crate |
+| Console (PWA) | **TypeScript** | The only sensible browser-side answer; iOS/Android use it directly |
+| Cloud operator | **Rust** | Same workspace as the core; kube-rs for k8s |
+| Protocol/SDK | **TS + Rust crates** | The two client shapes |
 
-**Go 参考实现的定位(已于 2026-10-16 移除)。** wire 协议、快照树语义
-(回退/fork/分叉)、接管状态机、跨节点同步协议最初由 Go 参考实现以单测
-和容器 e2e 锁定行为,并充当 Rust 重写的可执行规格;Rust 实现落地后参考
-实现完成使命移除,其锁定的行为由 Rust 单测与 `tests/cross-protocol/`
-回归向量(令牌/快照,预生成)承接。
+**The Go reference implementation (removed 2026-10-16).** The wire protocol,
+snapshot-tree semantics (rollback/fork), takeover state machine and cross-node sync
+were first locked by the Go reference implementation's unit tests and container e2e,
+and served as the executable spec for the Rust rewrite. Once the Rust implementation
+landed, the reference implementation had done its job and was removed; the behavior
+is now carried by Rust unit tests and the `tests/cross-protocol/` regression vectors
+(tokens/snapshots, pre-generated).
 
-## 关键数据流
+## Key data flows
 
-### 任务流(用户发指令 → agent 跑)
+### Task flow (user instruction → agent runs)
 
-1. 用户在控制台/手机发出指令,选择 runner(本地容器或云端);
-2. mixum-agentd 收到 `task.submit`,先打任务前置无感快照(冻结所有任务进程,
-   打包工作区,毫秒级),再交给 AgentDriver;
-3. AgentDriver(嵌入的 agent crate 或 external 桥)通过 Sandbox 执行命令、
-   打开 GUI 应用;
-4. GUI 应用的窗口经 mixcomp 隔离捕获,帧流推到用户端,光标位置随帧头映射;
-   display broker 支持多个 comp 连接(mixcomp 与 B compositor 可并存),窗口
-   记录 owner,`stream.start/stop`、`display.input` 和视频帧都按 owner 路由;
-5. 过程事件(task.event)实时推送,用户随时接管(display.takeover);
-6. 任务结束:状态与产物落盘,失败可按策略自动回退到前置快照。
+1. The user sends an instruction from the console/phone and picks a runner (local
+   container or cloud).
+2. mixum-agentd receives `task.submit`, takes a transparent pre-task snapshot
+   (freeze all task processes, pack the workspace, millisecond scale), then hands
+   off to the AgentDriver.
+3. The AgentDriver (embedded agent crate or external bridge) executes commands and
+   opens GUI apps through the Sandbox.
+4. GUI windows are isolated and captured by mixcomp; frames stream to the user, with
+   cursor position mapped in the frame header. The display broker supports multiple
+   comp connections (mixcomp and a B compositor can coexist), records the owner per
+   window, and routes `stream.start/stop`, `display.input` and video frames by owner.
+5. Process events (`task.event`) stream in real time; the user can take over at any
+   point (`display.takeover`).
+6. When the task ends, state and artifacts are persisted; on failure it can roll
+   back to the pre-task snapshot according to policy.
 
-### 快照流(跨设备迁移)
+### Snapshot flow (cross-device migration)
 
-1. mac 盒盖前,mixum-ctl 的电力钩子触发 hybrid 快照(disk + CRIU 内存);
-2. 快照以内容寻址块存储,只推远端缺失的块(zstd 压缩 + 去重);
-3. 云端容器导入节点,挂进自己的快照树(origin 标记来源),任务继续跑;
-4. 用户下次打开 mac,反向 pull 即可回到本地。
+1. Before the Mac lid closes, mixum-ctl's power hook triggers a hybrid snapshot
+   (disk + CRIU memory).
+2. The snapshot is stored as content-addressed blocks; only blocks missing on the
+   remote are pushed (zstd compression + dedup).
+3. The cloud container imports the node into its own snapshot tree (origin marks the
+   source) and the task continues.
+4. The next time the user opens the Mac, a reverse pull brings it back locally.
 
-## 目录结构
+## Directory layout
 
 ```
 mixumos/
-├── docs/                  设计文档(本目录)
-├── rust/                  Rust workspace(核心,重写主战场)
+├── docs/                  design documents (this directory)
+├── rust/                  Rust workspace (core; the main rewrite)
 │   └── crates/
-│       ├── mixum-protocol 协议层:envelope/ops/能力令牌/帧头
-│       ├── mixum-snapshot 快照引擎:块存储/树 DAG/CRIU/同步
-│       ├── mixum-agentd   容器内守护进程(任务引擎/显示 broker/WSS)
-│       ├── mixum-ctl      主机侧 CLI(电力钩子/快照推送)
-│       └── mixum-operator 云端 k8s operator(后置)
-├── mixcomp/               C/wlroots 合成器(见 wayland-magic.md)
-├── dist/                  发行版构建(见 distro.md)
-│   ├── pkgs/              PKGBUILD(mixum-agentd / mixcomp / mixum-ctl
-│   │                      / mixum-base / wlroots0.18 自建)
-│   ├── repo/              pacman 仓库工具
-│   └── os/                rootfs 与镜像构建(pacstrap + OCI 打包脚本;
-│                          mkosi 以等价脚本替代,可启动磁盘镜像后置)
-├── console/               PWA 控制台(后置)
-├── cloud/                 k8s 清单(后置)
+│       ├── mixum-protocol protocol layer: envelope/ops/capability tokens/frame header
+│       ├── mixum-snapshot snapshot engine: block store/tree DAG/CRIU/sync
+│       ├── mixum-agentd   in-container daemon (task engine/display broker/WSS)
+│       ├── mixum-ctl      host CLI (power hook/snapshot push)
+│       └── mixum-operator cloud k8s operator (later)
+├── mixcomp/               C/wlroots compositor (see wayland-magic.md)
+├── dist/                  distro build (see distro.md)
+│   ├── pkgs/              PKGBUILD (mixum-agentd / mixcomp / mixum-ctl
+│   │                      / mixum-base / wlroots0.18 built locally)
+│   ├── repo/              pacman repository tools
+│   └── os/                rootfs and image build (pacstrap + OCI packaging;
+│                          mkosi is replaced by equivalent scripts; bootable disk images later)
+├── console/               PWA console (later)
+├── cloud/                 k8s manifests (later)
 ├── tests/
-│   ├── integration/       容器 e2e(Rust 版)
-│   └── cross-protocol/    交叉回归向量(令牌/快照,JSON)
-└── proto/v1/              协议的机器可读形态(JSON Schema,后置)
+│   ├── integration/       container e2e (Rust)
+│   └── cross-protocol/    cross regression vectors (tokens/snapshots, JSON)
+└── proto/v1/              machine-readable protocol forms (JSON Schema, later)
 ```
 
-## 非目标(v1 明确不做)
+## Non-goals (explicitly out of scope for v1)
 
-- 多用户/多租户隔离(v1 单用户多设备;租户模型在 gateway 层后置);
-- 图形协议的 H.264/AV1 硬编(v1 用 JPEG,WebCodecs 升级路径已留);
-- 非容器形态(裸机安装器);Windows/macOS 作为容器宿主(只作为客户端)。
+- Multi-user / multi-tenant isolation (v1 is single-user, multi-device; the tenant
+  model is later in the gateway layer);
+- H.264/AV1 hardware encoding for the graphics protocol (v1 uses JPEG; the WebCodecs
+  upgrade path is left open);
+- Non-container shapes (bare-metal installer); Windows/macOS as container hosts
+  (they are clients only).
 
-## Rust 实现记录
+## Rust implementation record
 
-`rust/crates/mixum-agentd` 已按本文件与 `docs/protocol.md` 落地守护进程：
-WSS（TLS 1.3）、能力令牌握手、请求路由、50/s（突发 100）限速、任务引擎、
-external 行分隔 JSON 桥、窗口 broker,均使用协议 crate 的类型。
-快照后端已接入 `rust/crates/mixum-snapshot`（目录 CAS + 树,经
-`real-snapshot` 特性装配,缺省内存桩保证分支可独立构建）；跨节点同步
-（协议 §6）已实现:push.import 对账、0x03 块流哈希校验落 CAS、commit
-落树与远端根标记,推送端为 wss 客户端（自签证书跳过校验,同
-原 Go client.go 行为）。
+`rust/crates/mixum-agentd` implements the daemon described here and in
+`docs/protocol.md`: WSS (TLS 1.3), capability-token handshake, request routing,
+50/s (burst 100) rate limiting, task engine, external line-delimited JSON bridge and
+window broker, all using the protocol crate's types. The snapshot backend is wired
+to `rust/crates/mixum-snapshot` (directory CAS + tree, assembled via the
+`real-snapshot` feature; a default in-memory stub keeps branches independently
+buildable). Cross-node sync (protocol §6) is implemented: `push.import`
+reconciliation, 0x03 block-stream hash verification into CAS, commit into the tree
+with a remote-root marker, and a WSS client on the push side (self-signed
+certificate verification skipped, same as the old Go `client.go`).
 
-Go 参考实现已移除(2026-10-16),下表保留为行为溯源对照:
+The Go reference implementation was removed (2026-10-16); the table below remains as
+a behavior-provenance map:
 
-| 行为 | 原 Go 参考实现 | Rust 实现 | 差异 |
-|------|-------------|-----------|------|
-| envelope、令牌、视频帧头 | `reference/internal/wire`、`auth` | `mixum-protocol` | |
-| 任务状态与事件 | `reference/internal/task` | `mixum-agentd::task` | |
-| 快照树 | `reference/internal/snap` | `mixum-snapshot` 适配（`RealSnapshotEngine`） | |
-| 跨节点同步 | `handlers_snap.go`、`client.go` | `mixum-agentd::sync` | `snap.pull` 同原参考实现不设处理器（拉取=反向调用对方 push） |
-| 显示控制通道 | `reference/internal/display` | `mixum-agentd::display` | |
-| 管理 REST／指标 | 后置能力 | 未实现 | 任务书明确排除 |
+| Behavior | Old Go reference | Rust implementation | Difference |
+|---|---|---|---|
+| envelope, tokens, video frame header | `reference/internal/wire`, `auth` | `mixum-protocol` | |
+| task state and events | `reference/internal/task` | `mixum-agentd::task` | |
+| snapshot tree | `reference/internal/snap` | `mixum-snapshot` adapter (`RealSnapshotEngine`) | |
+| cross-node sync | `handlers_snap.go`, `client.go` | `mixum-agentd::sync` | `snap.pull` has no handler, same as the old reference (pull = reverse call to the peer's push) |
+| display control channel | `reference/internal/display` | `mixum-agentd::display` | |
+| admin REST/metrics | later capability | not implemented | explicitly excluded by the task |
 
-装配语义:`--config` 支持空格与等号两种形式,
-空配置文件回退默认值;快照引擎 dataDir=`dataDir/snapshots`、
-root=`workRoot`、skip=`.mixum`;bootstrap 管理令牌 10 年;
-快照冻结回调冻结全部任务进程组。
+Assembly semantics: `--config` accepts both space and equals forms; an empty config
+falls back to defaults; the snapshot engine dataDir=`dataDir/snapshots`,
+root=`workRoot`, skip=`.mixum`; the bootstrap admin token lasts 10 years; the
+snapshot freeze callback freezes all task process groups.
 
-验证记录（2026-10-05）:
+Verification record (2026-10-05):
 
-- e2e:`tests/integration/Dockerfile.e2e-rust`（mixum-agentd + mixcomp +
-  foot,musl arm64）,容器内 Go e2eclient 全链路通过——握手/系统信息
-  （backend=directory）/窗口流 ≥3 帧/任务/快照树/回退/fork。原版
-  e2eclient 在有窗口时 task.submit 超时为其自身并发读缺陷（已在
-  wayland-magic.md §8.7 记录,Go 服务端同样复现）,修复版客户端
-  （单读循环）对 Rust 与 Go 服务端均 `E2E PASS`;
-- 真实文件回退:容器内落文件 → snap.create（chunks=1,size=19）→
-  回退 genesis → 文件消失;
-- 跨实现推送:Rust 推送端把 Rust 引擎创建的节点推入 Go 参考容器,
-  节点出现在 Go 树上（id/分支保持,根节点无远端根标记）;双节点
-  回环见 `rust/crates/mixum-agentd/tests/sync_loopback.rs`;
-- 单元测试 42 项（含真实引擎）＋协议 crate 18 项全绿;clippy
-  `-D warnings` 双配置干净。
+- e2e: `tests/integration/Dockerfile.e2e-rust` (mixum-agentd + mixcomp + foot,
+  musl arm64), the in-container Go e2eclient passed the full path — handshake/
+  system info (backend=directory)/window stream ≥3 frames/task/snapshot tree/
+  rollback/fork. The original e2eclient's task.submit timeout with a window present
+  was its own concurrent-read defect (recorded in `wayland-magic.md` §8.7; the Go
+  server reproduces it too), and the fixed client (single read loop) reports
+  `E2E PASS` against both Rust and Go servers;
+- real-file rollback: create a file in the container → snap.create (chunks=1,
+  size=19) → roll back to genesis → file disappears;
+- cross-implementation push: the Rust pusher pushes a node created by the Rust
+  engine into the Go reference container; the node appears in the Go tree (id/branch
+  preserved; root has no remote-root marker); the two-node loopback is in
+  `rust/crates/mixum-agentd/tests/sync_loopback.rs`;
+- 42 unit tests (including the real engine) + 18 protocol-crate tests all green;
+  clippy `-D warnings` clean in both configurations.
