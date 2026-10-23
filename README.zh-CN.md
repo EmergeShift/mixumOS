@@ -1,6 +1,6 @@
 <div align="center">
   <img src="brand/logo-lockup-horizontal.svg" alt="mixumOS" width="440">
-  <h3>可回退、可分叉、可迁移的 Agent 操作系统。</h3>
+  <h3>一个还在早期、尝试让 agent 能回退、分叉和迁移的操作系统。</h3>
   <p>基于 Arch Linux 的 AI agent 操作系统：容器化工作区、类 Git 的快照树、<br/>以原生窗口流到任意设备的 GUI，以及可在机器之间迁移的工作状态。</p>
   <p>
     <a href="https://github.com/EmergeShift/mixumOS/releases"><img alt="Release" src="https://img.shields.io/github/v/release/EmergeShift/mixumOS?include_prereleases&amp;label=release"></a>
@@ -28,16 +28,16 @@ mixumOS 是 alpha。它能启动、快照、串流窗口、在机器之间搬状
 
 只会调用工具的 agent，本质上仍是别人进程里的客人。真正干活需要一台**计算机**：工作区、shell、应用、桌面，以及把这一切撤销、检查、搬走的能力。
 
-今天的沙箱给你一个容器和一份日志，但没有给你：
+我们在让 agent 真正干活时，反复遇到同样的缺口。对我们最重要的几个：
 
 - **可逆性。** 一条错误的 `rm -rf`、一次做到一半的重构、一个把系统搞坏的包升级——没有“退回去”这个选项。
 - **真正的桌面。** agent 打开了浏览器，你拿到的是截图流，而不是一个可以接管的窗口。
 - **迁移能力。** 工作被钉死在一台机器上；合上笔记本就等于杀掉任务。
 - **可带走的记忆。** agent 学到的东西随容器一起消失。
 
-mixumOS 把工作区当成**事件溯源的文件系统**：每个任务开始前自动打快照，每个快照是树上的一个节点，整棵树可以 fork、回退，或推到另一台机器——与此同时，agent 的 GUI 一直以原生窗口流到你的设备。
+我们的尝试是把工作区当成**事件溯源的文件系统**：每个任务开始前自动打快照，每个快照是树上的一个节点，整棵树可以 fork、回退，或推到另一台机器——与此同时，agent 的 GUI 一直以原生窗口流到你的设备。
 
-## 你得到什么
+## 目前能做什么
 
 | 能力 | 实际意味着什么 |
 |---|---|
@@ -190,7 +190,7 @@ main:  genesis ── n1 ── n2 ── n3
                           └── restore(n2) 后继续工作 ── n4   （并行时间线）
 ```
 
-## 实测数字，不是承诺
+## 我们实际测到的数字
 
 以下数字都测自参考机器，且可用仓库内脚本复现。它们是中位数而不是最好成绩；你的硬件和缓存状态会带来差异。
 
@@ -215,6 +215,12 @@ main:  genesis ── n1 ── n2 ── n3
 - **无遥测。** OS、节点和 CLI 都不回传数据。唯一可选的统计在 MixumART 桌面端，且默认关闭。
 
 完整[威胁模型](docs/security.md)与生态级 [TRUST 承诺](https://github.com/EmergeShift/Mixum-Agent-Protocol/blob/main/TRUST.md)。
+
+## 我们可能错在哪
+
+我们不确定快照树是不是所有 agent 工作流都合适的抽象，不确定 CRIU 能不能做到跨内核开箱即用，也不确定“原生窗口流”一定比浏览器桌面更好。我们还是一个很小的团队，控制台和文档有时会落后于引擎。
+
+如果你做过沙箱、快照系统或 agent 运行时，欢迎直接告诉我们这套设计哪里会坏——包括“这层就选错了”。开个 issue 就行，读资料的事我们来。
 
 ## 状态与路线图
 
@@ -301,7 +307,7 @@ cd ../console && npm ci && npm run build
 
 ## 许可证
 
-[Apache-2.0](LICENSE)。`mixcomp` 是基于未修改的 wlroots 0.18.2 tarball 自研的合成器；运行时库遵循各自许可（wlroots/wayland MIT、libxkbcommon MIT、json-c MIT、libjpeg-turbo IJG/BSD-3、zstd BSD）。镜像内的 Arch/ALARM 基础系统遵循上游许可。
+[Apache-2.0](LICENSE)。`kernel/` 目录与内核二进制是 **GPL-2.0**——见 [`kernel/NOTICE`](kernel/NOTICE) 和[源码提供说明](SOURCE_OFFER.md)。`mixcomp` 是基于未修改的 wlroots 0.18.2 tarball 自研的合成器；运行时库遵循各自许可（wlroots/wayland MIT、libxkbcommon MIT、json-c MIT、libjpeg-turbo IJG/BSD-3、zstd BSD）。镜像内的 Arch/ALARM 基础系统遵循上游许可。
 
 ---
 

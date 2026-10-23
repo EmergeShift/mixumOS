@@ -17,6 +17,8 @@ substitute for the license text shipped by each upstream project.
 | libpng | libpng / zlib | |
 | xorg-xwayland | MIT | optional X11 backend |
 | Saira Condensed, IBM Plex Mono | SIL OFL 1.1 | brand outlines only; no font files are shipped |
+| Rust crates | MIT / Apache-2.0 / BSD / ISC / Unicode-3.0; a few MPL-2.0 (option-ext) | see `rust/Cargo.lock`; MPL notices retained |
+| Console build deps | MIT / ISC / Apache-2.0; `caniuse-lite` data is CC-BY-4.0 | see `console/package-lock.json` |
 
 ## In release images and kernel binaries
 

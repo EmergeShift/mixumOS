@@ -1,6 +1,6 @@
 <div align="center">
   <img src="brand/logo-lockup-horizontal.svg" alt="mixumOS" width="440">
-  <h3>The agent OS that can rewind, fork, and move.</h3>
+  <h3>An early attempt at an agent OS that can rewind, fork, and move.</h3>
   <p>An Arch-based operating system for AI agents: containerized workspaces, git-like snapshot trees,<br/>native GUI windows streamed to any device, and state that travels between machines.</p>
   <p>
     <a href="https://github.com/EmergeShift/mixumOS/releases"><img alt="Release" src="https://img.shields.io/github/v/release/EmergeShift/mixumOS?include_prereleases&amp;label=release"></a>
@@ -32,16 +32,16 @@ The docs site is under construction at https://docs.emergeshift.com/mixumos.
 
 An agent that can only call tools is still a guest in someone else's process. Real work needs a **computer**: a workspace, a shell, applications, a desktop — and the ability to undo, inspect, and relocate all of it.
 
-Today's sandboxes give you a container and a log. They do not give you:
+We kept running into the same gaps when we tried to let agents do real work in containers. The ones that mattered most to us:
 
 - **Reversibility.** A bad `rm -rf`, a half-finished refactor, a broken package upgrade — there is no "go back".
 - **A real desktop.** The agent opens a browser; you get a screenshot stream, not a window you can take over.
 - **Mobility.** Your work is pinned to one machine. Closing the laptop means killing the task.
 - **Portable memory.** What the agent learned dies with the container.
 
-mixumOS treats the workspace as an **event-sourced filesystem**. Every task starts with a snapshot, every snapshot is a node in a tree, and the whole tree can be forked, restored, or pushed to another machine — while the agent's GUI keeps streaming as native windows.
+Our attempt is to treat the workspace as an **event-sourced filesystem**. Every task starts with a snapshot, every snapshot is a node in a tree, and the whole tree can be forked, restored, or pushed to another machine — while the agent's GUI keeps streaming as native windows.
 
-## What you get
+## What it does today
 
 | Capability | What it means in practice |
 |---|---|
@@ -194,7 +194,7 @@ main:  genesis ── n1 ── n2 ── n3
                           └── restore(n2) + work ── n4   (parallel timeline)
 ```
 
-## Measured, not promised
+## What we measured
 
 All numbers below were measured on the reference machine and are reproducible from the repository. They are medians, not best cases; your hardware and cache state will differ.
 
@@ -219,6 +219,17 @@ The full methodology, including caveats about small-file workloads, is in [docs/
 - **No telemetry.** The OS, the node and the CLI do not phone home. The only optional analytics live in the MixumART desktop app and are off by default.
 
 Read the full [threat model](docs/security.md) and the ecosystem-wide [TRUST commitments](https://github.com/EmergeShift/Mixum-Agent-Protocol/blob/main/TRUST.md).
+
+## Where we could be wrong
+
+We are not sure the snapshot tree is the right abstraction for every agent
+workflow, that CRIU can be made turnkey across kernels, or that streaming native
+windows beats a browser-based desktop. We are also a small team, so parts of the
+console and docs lag behind the engine.
+
+If you have built sandboxes, snapshot systems or agent runtimes, we would like to
+know where this design breaks — including "this is the wrong layer". Opening an
+issue is enough; we will do the reading.
 
 ## Status and roadmap
 
@@ -306,10 +317,10 @@ Platform-specific work belongs in the backend crate, not in shared code. See the
 
 ## License
 
-[Apache-2.0](LICENSE). `mixcomp` is an original compositor built on the unmodified wlroots 0.18.2 tarball; runtime libraries keep their own licenses (wlroots/wayland MIT, libxkbcommon MIT, json-c MIT, libjpeg-turbo IJG/BSD-3, zstd BSD). The Arch/ALARM base system inside the images keeps its upstream licenses.
+[Apache-2.0](LICENSE). The `kernel/` directory and the kernel binaries are **GPL-2.0** — see [`kernel/NOTICE`](kernel/NOTICE) and the [source offer](SOURCE_OFFER.md). `mixcomp` is an original compositor built on the unmodified wlroots 0.18.2 tarball; runtime libraries keep their own licenses (wlroots/wayland MIT, libxkbcommon MIT, json-c MIT, libjpeg-turbo IJG/BSD-3, zstd BSD). The Arch/ALARM base system inside the images keeps its upstream licenses.
 
 ---
 
 <div align="center">
-  <sub>Built with Rust, wlroots, Arch Linux, and an unreasonable amount of respect for undo.</sub>
+  <sub>Built with Rust, wlroots and Arch Linux, by a small team that really wants undo to work.</sub>
 </div>
