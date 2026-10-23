@@ -20,7 +20,7 @@ linked below.
 | [agent-bridge](docs/agent-bridge.md) | current | pending | [中文](docs/agent-bridge.md) |
 | [agent-driver](docs/agent-driver.md) | current | [English](docs/agent-driver.md) | [中文](docs/agent-driver.zh-CN.md) |
 | [apple-container](docs/apple-container.md) | current | pending | [中文](docs/apple-container.md) |
-| [architecture](docs/architecture.md) | current | translation in progress | [中文](docs/architecture.md) |
+| [architecture](docs/architecture.md) | current | pending | [中文](docs/architecture.md) |
 | [backends](docs/backends.md) | partial | pending | [中文](docs/backends.md) |
 | [clipboard](docs/clipboard.md) | design | [English](docs/clipboard.md) | [中文](docs/clipboard.zh-CN.md) |
 | [console](docs/console.md) | current | [English](docs/console.md) | [中文](docs/console.zh-CN.md) |
