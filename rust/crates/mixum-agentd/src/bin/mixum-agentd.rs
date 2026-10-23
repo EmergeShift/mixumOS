@@ -118,6 +118,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 快照 metadata 需要同步读取窗口表，restore 后还要重放 GUI。
     let broker = Broker::new("/run/mixum/display.sock");
 
+    // CRIU requires a writable sysctl namespace. This is opt-in: only
+    // environments created with --memory-snapshots carry the capabilities.
+    if std::env::var("MIXUM_MEMORY_SNAPSHOTS").ok().as_deref() == Some("1") {
+        match std::process::Command::new("mount")
+            .args(["-o", "remount,rw", "/proc/sys"])
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => eprintln!("memory snapshots: remount /proc/sys exited with {status}"),
+            Err(error) => eprintln!("memory snapshots: remount /proc/sys failed: {error}"),
+        }
+    }
+
     // 快照引擎:git 式树 + 内容寻址块存储 + CRIU 探测。
     #[cfg(feature = "real-snapshot")]
     let (snapshots, sync_backend) = {
