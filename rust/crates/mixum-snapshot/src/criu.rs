@@ -30,7 +30,13 @@ impl Criu {
 
     #[cfg(target_os = "linux")]
     pub fn probe() -> Option<Self> {
-        for candidate in ["criu", "/usr/sbin/criu", "/usr/bin/criu"] {
+        let override_path = std::env::var("MIXUM_CRIU_BIN").ok();
+        let candidates = override_path.iter().map(String::as_str).chain([
+            "criu",
+            "/usr/sbin/criu",
+            "/usr/bin/criu",
+        ]);
+        for candidate in candidates {
             if Command::new(candidate)
                 .arg("--version")
                 .output()
@@ -85,20 +91,18 @@ impl Criu {
         for pid in &pids {
             cmd.args(["--tree", &pid.to_string()]);
         }
-        cmd.arg("--images-dir")
-            .arg(dir.as_ref())
-            .args([
-                "--shell-job",
-                // GUI 快照必须把 Wayland 连接两端都包含进来；外部 unix socket
-                // 由 --ext-unix-sk 放行，幽灵文件上限放大以容纳 wlroots shm。
-                "--ext-unix-sk",
-                "--file-locks",
-                "--ghost-limit",
-                "2147483648",
-                "-v4",
-                "-o",
-                "dump.log",
-            ]);
+        cmd.arg("--images-dir").arg(dir.as_ref()).args([
+            "--shell-job",
+            // GUI 快照必须把 Wayland 连接两端都包含进来；外部 unix socket
+            // 由 --ext-unix-sk 放行，幽灵文件上限放大以容纳 wlroots shm。
+            "--ext-unix-sk",
+            "--file-locks",
+            "--ghost-limit",
+            "2147483648",
+            "-v4",
+            "-o",
+            "dump.log",
+        ]);
         if leave_running {
             cmd.arg("--leave-running");
         }
@@ -114,13 +118,28 @@ impl Criu {
 }
 
 fn run(mut cmd: Command) -> Result<(), CriuError> {
-    let output = cmd.output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(CriuError::Command(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
+    let mut child = cmd.spawn()?;
+    let timeout = std::env::var("MIXUM_CRIU_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(120);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(CriuError::Command(format!("criu exited with {status}")))
+            };
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CriuError::Command(format!(
+                "criu exceeded {timeout}s (MIXUM_CRIU_TIMEOUT_SECS)"
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
