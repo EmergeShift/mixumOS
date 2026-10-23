@@ -7,6 +7,9 @@
 //! - 审计只记录命令与结果，不记录环境变量中的秘密。
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -15,7 +18,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mixum_protocol::envelope::{new_id, Envelope};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, Mutex};
 
@@ -24,6 +28,10 @@ use crate::server::SessionStore;
 const REQUEST_TTL: Duration = Duration::from_secs(120);
 const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 const OUTPUT_LIMIT: usize = 64 * 1024;
+/// 审批后固定使用的 PATH；程序解析只在这几个 root 目录里做。
+const TRUSTED_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// 本 broker 不提供 root shell，也不允许借 wrapper 间接起 shell。
+const FORBIDDEN_PROGRAMS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "fish", "busybox", "env"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +54,18 @@ pub struct Outcome {
 struct Pending {
     request: Value,
     tx: oneshot::Sender<Decision>,
+}
+
+/// 审批时固化的执行计划：审批人看到的路径/哈希就是随后执行的路径/哈希。
+/// 可执行文件与整条祖先目录链必须 root 所有且不可被非 root 写入,
+/// 因此审批后内容不会被同 uid 的 agent 替换。
+#[derive(Debug, Clone)]
+struct ExecPlan {
+    program: String,
+    resolved: PathBuf,
+    sha256: String,
+    args: Vec<String>,
+    cwd: PathBuf,
 }
 
 pub struct PrivilegeBroker {
@@ -73,21 +93,20 @@ impl PrivilegeBroker {
         reason: &str,
         task_id: &str,
     ) -> Result<Outcome, String> {
-        if program.trim().is_empty() || program.contains('\0') {
-            return Err("program 为空或非法".into());
-        }
-        if args.iter().any(|arg| arg.contains('\0')) {
-            return Err("参数含 NUL".into());
-        }
+        // 先把程序解析成 root 所有的绝对路径并计算哈希；审批人看到的
+        // resolved/sha256 就是随后实际执行的对象。
+        let plan = prepare_execution(program, args, cwd)?;
         let id = new_id();
         let created_at = now_ms();
-        let risk = classify(program, args);
+        let risk = classify(&plan.resolved.to_string_lossy(), &plan.args);
         let event = json!({
             "id": id,
             "taskId": task_id,
-            "program": program,
-            "args": args,
-            "cwd": cwd,
+            "program": plan.program,
+            "resolved": plan.resolved.to_string_lossy(),
+            "sha256": plan.sha256,
+            "args": plan.args,
+            "cwd": plan.cwd.to_string_lossy(),
             "reason": reason,
             "risk": risk,
             "createdAt": created_at,
@@ -124,7 +143,7 @@ impl PrivilegeBroker {
                 }
             ));
         }
-        let outcome = self.execute(&event).await;
+        let outcome = self.execute(&plan).await;
         self.audit(&id, &event, "executed", Some(&decision.reason))
             .await;
         outcome
@@ -151,53 +170,56 @@ impl PrivilegeBroker {
             .map_err(|_| "审批请求已关闭".to_string())
     }
 
-    async fn execute(&self, event: &Value) -> Result<Outcome, String> {
-        let program = event
-            .get("program")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "缺少 program".to_string())?;
-        let args: Vec<String> = event
-            .get("args")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let cwd = event
-            .get("cwd")
-            .and_then(Value::as_str)
-            .unwrap_or("/var/lib/mixum/work");
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.args(&args)
-            .current_dir(cwd)
+    async fn execute(&self, plan: &ExecPlan) -> Result<Outcome, String> {
+        let mut cmd = tokio::process::Command::new(&plan.resolved);
+        cmd.args(&plan.args)
+            .current_dir(&plan.cwd)
             .env_clear()
-            .env(
-                "PATH",
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            )
+            .env("PATH", TRUSTED_PATH)
             .env("HOME", "/root")
             .env("USER", "root")
             .env("LOGNAME", "root")
             .env("SHELL", "/bin/sh")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = cmd
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        set_process_group(&mut cmd);
+        let mut child = cmd
             .spawn()
             .map_err(|error| format!("启动 root 命令: {error}"))?;
-        let output = tokio::time::timeout(EXEC_TIMEOUT, child.wait_with_output())
-            .await
-            .map_err(|_| "root 命令超时".to_string())?
-            .map_err(|error| format!("root 命令失败: {error}"))?;
-        Ok(Outcome {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: truncate(&output.stdout),
-            stderr: truncate(&output.stderr),
-        })
+        // process_group(0) 让 pid 同时是进程组 id；超时要连同子孙一起杀。
+        let pgid = child.id();
+        let mut stdout = child.stdout.take().ok_or("缺少 stdout 管道")?;
+        let mut stderr = child.stderr.take().ok_or("缺少 stderr 管道")?;
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let (a, b) = tokio::join!(
+                read_capped(&mut stdout, &mut out, OUTPUT_LIMIT),
+                read_capped(&mut stderr, &mut err, OUTPUT_LIMIT),
+            );
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((status, out, err, a?, b?))
+        });
+        match tokio::time::timeout(EXEC_TIMEOUT, collector).await {
+            Ok(joined) => {
+                let (status, out, err, out_overflow, err_overflow) = joined
+                    .map_err(|error| format!("root 命令任务失败: {error}"))?
+                    .map_err(|error| format!("root 命令失败: {error}"))?;
+                Ok(Outcome {
+                    exit_code: status.code().unwrap_or(-1),
+                    stdout: render(&out, out_overflow),
+                    stderr: render(&err, err_overflow),
+                })
+            }
+            Err(_) => {
+                if let Some(pgid) = pgid {
+                    kill_group(pgid);
+                }
+                Err("root 命令超时（已终止进程组）".into())
+            }
+        }
     }
 
     async fn audit(&self, id: &str, event: &Value, result: &str, reason: Option<&str>) {
@@ -323,14 +345,130 @@ fn classify(program: &str, args: &[String]) -> &'static str {
     }
 }
 
-fn truncate(bytes: &[u8]) -> String {
-    let slice = if bytes.len() > OUTPUT_LIMIT {
-        &bytes[..OUTPUT_LIMIT]
+fn prepare_execution(program: &str, args: &[String], cwd: &str) -> Result<ExecPlan, String> {
+    if program.trim().is_empty() || program.contains('\0') {
+        return Err("program 为空或非法".into());
+    }
+    if args.iter().any(|arg| arg.contains('\0')) {
+        return Err("参数含 NUL".into());
+    }
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    if FORBIDDEN_PROGRAMS.contains(&name) {
+        return Err(format!("不允许通过 sudo 启动 {name}（不提供 root shell）"));
+    }
+    let resolved = resolve_program(program)?;
+    let sha256 = hash_file(&resolved)?;
+    let cwd = PathBuf::from(cwd);
+    if !cwd.is_absolute() {
+        return Err("cwd 必须是绝对路径".into());
+    }
+    let cwd = fs::canonicalize(&cwd).map_err(|error| format!("cwd 不可用: {error}"))?;
+    if !cwd.is_dir() {
+        return Err("cwd 不是目录".into());
+    }
+    Ok(ExecPlan {
+        program: program.to_owned(),
+        resolved,
+        sha256,
+        args: args.to_vec(),
+        cwd,
+    })
+}
+
+/// 只接受命令名（在固定 PATH 中查找）或绝对路径；相对路径随任务 cwd
+/// 变化，等于让 agent 决定执行哪个文件。
+fn resolve_program(program: &str) -> Result<PathBuf, String> {
+    let candidate = if Path::new(program).is_absolute() {
+        PathBuf::from(program)
+    } else if program.contains('/') {
+        return Err("程序路径必须是绝对路径".into());
     } else {
-        bytes
+        TRUSTED_PATH
+            .split(':')
+            .map(|dir| Path::new(dir).join(program))
+            .find(|path| path.is_file())
+            .ok_or_else(|| format!("找不到命令: {program}"))?
     };
-    let mut text = String::from_utf8_lossy(slice).into_owned();
-    if bytes.len() > OUTPUT_LIMIT {
+    let resolved =
+        fs::canonicalize(&candidate).map_err(|error| format!("解析可执行文件失败: {error}"))?;
+    ensure_trusted(&resolved)?;
+    Ok(resolved)
+}
+
+/// 文件本身及整条祖先目录链都必须是 root 所有、对 group/other 不可写。
+fn ensure_trusted(path: &Path) -> Result<(), String> {
+    for current in path.ancestors() {
+        let metadata = fs::metadata(current)
+            .map_err(|error| format!("读取 {} 失败: {error}", current.display()))?;
+        if current == path && !metadata.is_file() {
+            return Err("可执行文件不是普通文件".into());
+        }
+        if metadata.uid() != 0 {
+            return Err(format!("{} 不属于 root", current.display()));
+        }
+        if metadata.mode() & 0o022 != 0 {
+            return Err(format!("{} 可被非 root 写入", current.display()));
+        }
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| format!("打开可执行文件失败: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("读取可执行文件失败: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn set_process_group(command: &mut tokio::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.as_std_mut().process_group(0);
+}
+
+fn kill_group(pgid: u32) {
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+    let _ = killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL);
+}
+
+/// 持续排空管道但只保留前 `limit` 字节，避免子进程因管道写满而卡死；
+/// 超限部分丢弃并在结果里标记截断。
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    limit: usize,
+) -> std::io::Result<bool> {
+    let mut chunk = [0u8; 16 * 1024];
+    let mut overflow = false;
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(overflow);
+        }
+        let space = limit.saturating_sub(buffer.len());
+        let take = read.min(space);
+        buffer.extend_from_slice(&chunk[..take]);
+        if take < read {
+            overflow = true;
+        }
+    }
+}
+
+fn render(bytes: &[u8], overflow: bool) -> String {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if overflow {
         text.push_str("\n…(截断)");
     }
     text
@@ -352,6 +490,30 @@ mod tests {
         assert_eq!(classify("npm", &["i".into(), "-g".into()]), "package");
         assert_eq!(classify("rm", &["-rf".into()]), "destructive");
         assert_eq!(classify("curl", &[]), "network");
+    }
+
+    #[test]
+    fn pins_executable_to_root_owned_absolute_path() {
+        let plan = prepare_execution("id", &["-u".into()], "/tmp").expect("id should resolve");
+        assert!(plan.resolved.is_absolute());
+        assert_eq!(plan.program, "id");
+        assert_eq!(plan.sha256.len(), 64);
+        assert_eq!(plan.cwd, PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn rejects_shells_relative_paths_and_untrusted_files() {
+        assert!(prepare_execution("sh", &["-c".into(), "id".into()], "/tmp").is_err());
+        assert!(prepare_execution("env", &["id".into()], "/tmp").is_err());
+        assert!(prepare_execution("./id", &[], "/tmp").is_err());
+        assert!(prepare_execution("id", &[], "relative/dir").is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("writable");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(prepare_execution(path.to_str().unwrap(), &[], "/tmp").is_err());
     }
 }
 
