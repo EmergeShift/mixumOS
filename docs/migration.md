@@ -1,32 +1,36 @@
-# 跨设备迁移（`.mart` migration）
+> English translation of the Chinese document. Original: [migration.zh-CN.md](migration.zh-CN.md). Technical review pending.
 
-> 状态：设计稿。目标是把“换设备继续干活”做成 MixumART 里的一个动作，而不是让用户手动拖文件。
+# Cross-device migration (`.mart` migration)
 
-## 1. 迁移的是什么
+> Status: design draft, with partial implementation. The goal is to make "switch
+> devices and keep working" one action inside MixumART, not a manual file drag.
 
-一个 mixumOS 节点由四层组成，迁移按层处理：
+## 1. What is migrated
 
-| 层 | 是否迁移 | 载体 |
+A mixumOS node has four layers, handled separately:
+
+| Layer | Migrated? | Carrier |
 |---|---|---|
-| 工作区文件 | ✅ | `.mart`（MAP 快照格式） |
-| 快照树 / 节点元数据 | ✅ | `migration.json`（树节点、origin、kernel/arch、guiSessions） |
-| 容器定义（镜像、env、端口、cmd） | ✅ | `migration.json` 的 `container` 段 |
-| 进程内存（CRIU） | ❌ 跨设备 | 同机同内核才考虑；跨设备不做 |
-| GUI 窗口 | ✅ 重放 | `guiSessions` → 目标端重新拉起应用 |
+| Workspace files | ✅ | `.mart` (MAP snapshot format) |
+| Snapshot tree / node metadata | ✅ | `migration.json` (tree nodes, origin, kernel/arch, guiSessions) |
+| Container definition (image, env, ports, cmd) | ✅ | the `container` section of `migration.json` |
+| Process memory (CRIU) | ❌ cross-device | only considered on the same machine/kernel; not cross-device |
+| GUI windows | ✅ replay | `guiSessions` → relaunch the app on the target |
 
-**迁移不是“活容器搬家”**：目标是“用同一个镜像重建容器 + 恢复工作区 + 重放窗口”。
+**Migration is not "moving a live container"**: the goal is "recreate the container
+from the same image + restore the workspace + replay the windows".
 
-## 2. 迁移包
+## 2. Migration bundle
 
-`MigrationBundle`（MixumART 内部管理，用户不需要手工解包）：
+`MigrationBundle` (managed inside MixumART; users do not unpack it by hand):
 
 ```
-migration.json          # 元数据（见下）
-workspace.mart          # 工作区文件快照（MAP .mart v1）
-image.oci.tar           # 可选：目标无法直接 pull 时携带 OCI layout
+migration.json          # metadata (see below)
+workspace.mart          # workspace file snapshot (MAP .mart v1)
+image.oci.tar           # optional: OCI layout when the target cannot pull directly
 ```
 
-`migration.json`：
+`migration.json`:
 
 ```json
 {
@@ -48,7 +52,7 @@ image.oci.tar           # 可选：目标无法直接 pull 时携带 OCI layout
   "snapshot": {
     "node": "01J...",
     "branch": "main",
-    "label": "迁移点",
+    "label": "migration point",
     "kernel": "6.18.35-mixum-micro",
     "arch": "arm64",
     "createdAt": 1760000000000,
@@ -69,121 +73,144 @@ image.oci.tar           # 可选：目标无法直接 pull 时携带 OCI layout
 }
 ```
 
-`.mart` 只装文件（MAP 规范明确不含压缩/加密/CRIU）；树与容器定义放在 `migration.json`。
-需要单文件离线搬运时，MixumART 可以把两者打成一个 `tar.zst`，但**默认走 API 流式传输**。
+`.mart` carries only files (the MAP spec explicitly has no compression/encryption/
+CRIU); the tree and container definition live in `migration.json`. For single-file
+offline transfer MixumART can pack both into a `tar.zst`, but **the default is API
+streaming**.
 
-## 3. 协议扩展
+## 3. Protocol extension
 
-复用现有文件传输（`file.put` + `FILE` 二进制帧 + `file.put.commit`；`file.get`），
-新增两个 op（未进 MAP v1 前作为 mixumOS 扩展，字段保持向后兼容）：
+Reuse the existing file transfer (`file.put` + `FILE` binary frames +
+`file.put.commit`; `file.get`). Add two ops (a mixumOS extension until they enter MAP
+v1; fields stay backward-compatible):
 
 ### `snap.export`
 
-请求：
+Request:
 
 ```json
 { "node": "01J...", "format": "mart" }
 ```
 
-应答：
+Reply:
 
 ```json
 { "file": "mixum-01J....mart", "size": 12345678, "sha256": "..." }
 ```
 
-文件落在 `work_root/transfers/`，客户端用 `file.get` 下载；导出时把 CAS 的 zstd 块
-解压为 `.mart` 的原始块（块哈希都是明文 SHA-256，可直接复用）。
+The file lands in `work_root/transfers/`; the client downloads it with `file.get`.
+Export decompresses CAS zstd blocks into the `.mart` raw blocks (block hashes are
+plain SHA-256 and can be reused).
 
 ### `snap.import`
 
-请求：
+Request:
 
 ```json
 { "file": "mixum-01J....mart", "origin": "mac-studio" }
 ```
 
-应答：
+Reply:
 
 ```json
 { "node": "01J...", "branch": "main", "chunks": 42, "bytes": 12345678 }
 ```
 
-导入校验：magic/版本/头部长度/rkyv 清单/每个块哈希；缺失块写入本地 CAS，
-节点挂到当前 head（或指定 parent），然后由调用方触发 `snap.restore`。
+Import validates magic/version/header length/rkyv manifest/every block hash; missing
+blocks are written to the local CAS, the node is attached to the current head (or a
+specified parent), and the caller then triggers `snap.restore`.
 
-## 4. 端到端流程（MixumART 视角）
+## 4. End-to-end flow (from MixumART's point of view)
 
-### 导出
+### Export
 
-1. 连接源环境（WSS），确认 agentd 版本支持 `snap.export`；
-2. 选择快照节点 → `snap.export {format:"mart"}`；
-3. `file.get` 流式下载 `.mart` 到 MixumART 缓存（带 SHA-256 校验）；
-4. 收集容器定义（镜像 digest、env、ports、mounts、cmd）与 `guiSessions`；
-5. 生成 `migration.json`，两者组成 bundle（默认只在本机缓存，不上传第三方）。
+1. Connect to the source environment (WSS) and confirm agentd supports `snap.export`.
+2. Choose a snapshot node → `snap.export {format:"mart"}`.
+3. `file.get` streams `.mart` into the MixumART cache (with SHA-256 verification).
+4. Collect the container definition (image digest, env, ports, mounts, cmd) and
+   `guiSessions`.
+5. Build `migration.json`; the two form a bundle (cached locally by default, not
+   uploaded to a third party).
 
-### 导入
+### Import
 
-1. 用户选择目标 runtime（Apple Container / Docker / WSL2）；
-2. 确保镜像在目标可用：按 digest pull；失败则用 bundle 里的 `image.oci.tar` 导入；
-3. 按 `container` 段创建容器（复用现有 `CreateSpec`）；
-4. 启动容器，等待 agentd READY；
-5. `file.put` 上传 `.mart` → `snap.import` → `snap.restore {node}`；
-6. 目标端按 `guiSessions` 重放窗口（Task 5）；
-7. MixumART 切换连接档案到新环境，窗口页重新 attach。
+1. The user chooses the target runtime (Apple Container / Docker / WSL2).
+2. Make the image available on the target: pull by digest; on failure import
+   `image.oci.tar` from the bundle.
+3. Create the container from the `container` section (reusing the existing
+   `CreateSpec`).
+4. Start the container and wait for agentd READY.
+5. `file.put` the `.mart`, then `snap.import`, then `snap.restore {node}`.
+6. Replay windows on the target from `guiSessions` (Task 5).
+7. MixumART switches its connection profile to the new environment and re-attaches
+   the window page.
 
-### 失败与回滚
+### Failure and rollback
 
-- 镜像不可用：保留源环境，提示“目标缺少镜像”，不创建半成品容器；
-- arch 不一致：`snap.restore` 会拒绝（当前 arch 强校验）；提示需要同架构或重建；
-- `.mart` 校验失败：丢弃临时文件，源与目标都不改；
-- restore 失败：目标容器保留在“已创建”状态，允许重试或删除；
-- 导入是幂等的：同块不重复写；同节点 id 已存在时返回既有节点。
+- Image unavailable: keep the source environment, report "target is missing the
+  image", and do not create a half-built container.
+- Arch mismatch: `snap.restore` refuses (the current arch is strictly checked);
+  report that the same architecture or a rebuild is required.
+- `.mart` verification failure: drop the temporary file; neither side changes.
+- Restore failure: the target container stays in the "created" state and can be
+  retried or removed.
+- Import is idempotent: identical blocks are not rewritten; an existing node id
+  returns the existing node.
 
-## 5. 安全
+## 5. Security
 
-- `.mart` 只含工作区文件；不包含令牌、证书、`admin-token`；
-- 传输走 WSS（TLS 1.3 + 能力令牌），文件 SHA-256 全链校验；
-- 路径穿越：`.mart` 清单路径拒绝 `..`/绝对路径（MAP 规范）；
-- 目标端导入前校验 magic/版本/长度上限，避免 zip-bomb 式头部；
-- 可选：`.mart` 的加密层是 MAP 的后续工作，v1 不假装支持。
+- `.mart` contains workspace files only; no tokens, certificates or `admin-token`.
+- Transfer is WSS (TLS 1.3 + capability token); file SHA-256 is verified end to end.
+- Path traversal: the `.mart` manifest rejects `..` and absolute paths (MAP spec).
+- The target validates magic/version/length limits before import to avoid zip-bomb
+  style headers.
+- Optional: encryption of `.mart` is future MAP work; v1 does not pretend to support it.
 
-## 6. 兼容性
+## 6. Compatibility
 
-- 同架构 + 同镜像：完整支持（文件 + 树 + 会话）；
-- 跨架构：只能迁移源码/数据，不能迁移二进制与进程；`arch` 检查会拒绝；
-- 内核不同：disk 快照已放开（PR #39），memory/hybrid 仍拒绝；
-- Docker Desktop：可作为源/目标，但没有 CRIU；
-- `.mart` 版本：v1；未来压缩/加密通过 header version 演进，导入端拒绝未知版本。
+- Same arch + same image: fully supported (files + tree + sessions).
+- Cross-arch: only source/data can move, not binaries or processes; the `arch` check
+  refuses.
+- Different kernel: disk snapshots are allowed (PR #39); memory/hybrid are still
+  refused.
+- Docker Desktop: usable as source/target, but has no CRIU.
+- `.mart` version: v1; future compression/encryption evolves through the header
+  version, and the importer rejects unknown versions.
 
-## 7. 实现拆分
+## 7. Implementation split
 
-| 仓库 | 内容 |
+| Repository | Content |
 |---|---|
-| `mixumos` | `mixum-mart` crate（pack/open/verify/import）、`snap.export`/`snap.import`、CAS 桥接、测试 |
-| `MixumART` | `migration.json` 生成、bundle 缓存、传输编排、目标端容器创建/restore、UI 动作 |
-| `MAP` | `.mart` 规范与 SDK（`map-snapshot`）；mixumOS 以固定的 MAP 版本为准 |
+| `mixumos` | `mixum-mart` crate (pack/open/verify/import), `snap.export`/`snap.import`, CAS bridge, tests |
+| `MixumART` | `migration.json` generation, bundle cache, transfer orchestration, target container create/restore, UI action |
+| `MAP` | `.mart` spec and SDK (`map-snapshot`); mixumOS follows a fixed MAP version |
 
-## 8. 验收
+## 8. Acceptance
 
-1. 单测：`.mart` roundtrip、缺块导入、坏哈希拒绝、路径穿越拒绝；
-2. 集成：同机两个容器之间 export→import→restore，文件一致、树一致；
-3. 跨 runtime：WSL2（同架构）→ Apple Container，窗口按清单重开；
-4. 失败注入：目标缺镜像、arch 不一致、`.mart` 截断；
-5. 性能：1 GB 工作区导出/导入时间、峰值内存、传输去重率。
+1. Unit: `.mart` roundtrip, missing-block import, bad-hash rejection, path traversal
+   rejection.
+2. Integration: export→import→restore between two containers on the same machine;
+   files and tree match.
+3. Cross-runtime: WSL2 (same arch) → Apple Container; windows reopen from the manifest.
+4. Failure injection: target missing image, arch mismatch, truncated `.mart`.
+5. Performance: 1 GB workspace export/import time, peak memory, transfer dedup ratio.
 
-## 9. 实现进度（2026-10-22）
+## 9. Implementation progress (2026-10-22)
 
-- **mixumOS**：`mixum-mart` 桥 + `snap.export` / `snap.import` 已实现；
-  `.mart` 往返、损坏拒绝、transfer 路径穿越都有测试。
-- **MixumART**：
-  - `file.get` 流式下载、`snap.export/import` 调用；
-  - 快照行「导出」、迁移包缓存列表、导入；
-  - **源环境 → 目标环境直接迁移**（导出→下载→上传→导入，不落盘手工文件）；
-  - 导出时自动读取源容器 `container inspect`，生成
-    `<node>.migration.json`（镜像引用 + `@sha256` digest、env、ports、command、
-    来源节点/分支、`.mart` 校验和）。
-- **未完成**：
-  - 目标端按 `migration.json` 自动创建/启动容器（目前目标环境需已存在）；
-  - `guiSessions` 采集与重放；
-  - mounts 的 inspect（Apple Container 当前返回空，Docker/WSL2 待接）；
-  - 跨设备时 `.mart` 仍需两端 MixumART 能直连各自 agentd。
+- **mixumOS**: the `mixum-mart` bridge + `snap.export` / `snap.import` are
+  implemented; `.mart` roundtrip, corruption rejection and transfer path traversal
+  all have tests.
+- **MixumART**:
+  - `file.get` streaming download and `snap.export/import` calls;
+  - snapshot-row "Export", migration bundle cache list, import;
+  - **source environment → target environment direct migration** (export→download→
+    upload→import, no manual files on disk);
+  - on export, read the source container with `container inspect` and generate
+    `<node>.migration.json` (image reference + `@sha256` digest, env, ports,
+    command, source node/branch, `.mart` checksum).
+- **Not done**:
+  - the target does not yet create/start the container from `migration.json` (the
+    target environment must already exist);
+  - `guiSessions` collection and replay;
+  - mounts inspection (Apple Container currently returns empty; Docker/WSL2 pending);
+  - cross-device `.mart` still needs both MixumART sides to reach their own agentd.

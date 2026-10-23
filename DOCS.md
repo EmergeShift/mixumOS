@@ -36,7 +36,7 @@ linked below.
 | [gateway](docs/gateway.md) | design | pending | [中文](docs/gateway.md) |
 | [host-integration](docs/host-integration.md) | current | pending | [中文](docs/host-integration.md) |
 | [macOS verification](docs/macos-verification.md) | current | [English](docs/macos-verification.md) | [中文](docs/macos-verification.zh-CN.md) |
-| [migration](docs/migration.md) | current | pending | [中文](docs/migration.md) |
+| [migration](docs/migration.md) | partial | [English](docs/migration.md) | [中文](docs/migration.zh-CN.md) |
 | [CRIU + Wayland PoC](docs/poc-criu-wayland.md) | PoC | [English](docs/poc-criu-wayland.md) | [中文](docs/poc-criu-wayland.zh-CN.md) |
 | [protocol](docs/protocol.md) | current | pending | [中文](docs/protocol.md) |
 | [security](docs/security.md) | current | [English](docs/security.md) | [中文](docs/security.zh-CN.md) |
@@ -56,6 +56,8 @@ These pages describe work that is not in the current build:
 - **CRIU feasibility / CRIU + Wayland PoC** — controlled experiments, not a
   turnkey migration path; cross-device restore is still open.
 - **backends / nvx** — nvx is an early script, not a supported backend.
+- **migration** — export/import and `.mart` verification are implemented; target
+  container creation from `migration.json` and `guiSessions` replay are still open.
 - **roadmap** — a plan, not a claim about today.
 
 If a page says a feature exists, the code or tests should be the tie-breaker.
