@@ -99,6 +99,21 @@ try {
 }
 console.log(`4MiB+1 拒绝:${oversizedRejected ? "是" : "否(异常)"}`);
 
+// 控制字符 3MiB:JSON 转义后 18MiB,超过 comp 控制帧上限,必须拒绝且不断链。
+let escapedRejected = false;
+try {
+  await s.call("display.clipboard.set", {
+    window: win,
+    text: "\u0001".repeat(3 * 1024 * 1024),
+  });
+} catch {
+  escapedRejected = true;
+}
+const afterEscape = await s.call("display.list", {});
+console.log(
+  `转义超限拒绝:${escapedRejected ? "是" : "否(异常)"},连接存活:${Array.isArray(afterEscape.windows) ? "是" : "否"}`,
+);
+
 // 2. 上行:容器 wl-copy → display.clipboard 推送。
 const up = `mixum-clip-up-${crypto.randomUUID().slice(0, 8)}`;
 sh(`printf %s "${up}" | wl-copy`);
@@ -185,6 +200,8 @@ const ok =
   received?.window === win &&
   emptyRejected &&
   oversizedRejected &&
+  escapedRejected &&
+  Array.isArray(afterEscape.windows) &&
   maxAccepted &&
   routedA?.window === winA &&
   routedB?.window === winB &&
