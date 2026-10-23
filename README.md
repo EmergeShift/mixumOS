@@ -12,9 +12,21 @@
   <p><a href="README.zh-CN.md">简体中文</a> · <strong>English</strong></p>
 </div>
 
-> **Status: v0.1.5, pre-1.0.** Runs on Apple Silicon today; the x86_64 build path exists but is not part of the 0.1.5 release. Interfaces can still move before 1.0; the honest limitations are listed [below](#status-and-roadmap).
+> **Status: v0.1.5, alpha.** This is an early build of an operating system, not a finished distro. Apple Silicon is the validated path in this release; x86_64 builds exist but are not shipped. Interfaces will move, docs are incomplete, and several pieces are still being filled in. The honest limitations are listed [below](#status-and-roadmap).
 
 ---
+
+## Alpha, honestly
+
+mixumOS is an alpha. It boots, snapshots, streams windows and moves state between
+machines, but it is not a daily-driver OS yet: the console is early, CRIU is not
+turnkey, x86_64 is not in this image, and some docs are ahead of the code.
+
+We are a small, unfunded team. We would rather show the seams now than pretend
+they are not there. If something breaks, open an issue with the command, the
+version and the log; "it did not work" is still useful — we will ask for the rest.
+
+The docs site is under construction at https://docs.emergeshift.com/mixumos.
 
 ## Why another operating system?
 
