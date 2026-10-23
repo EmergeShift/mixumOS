@@ -10,7 +10,7 @@ set -euo pipefail
 
 ARCHS="${ARCHS:-aarch64}"
 # 代理仅显式提供时启用(MIXUM_PROXY);缺省直连——CN 镜像(TUNA/USTC)直连最优。
-# 旧默认 http://192.168.5.2:7897 是特定开发机地址,换机即全量 502(2026-10-18)
+# 旧默认是某台开发机的代理地址,换机即全量 502(2026-10-18);不要提交具体 IP
 PROXY="${MIXUM_PROXY:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # git-bash:Windows 形式路径(git -C 与 docker -v 都要);Linux 无 cygpath 原样保留

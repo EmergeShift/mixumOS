@@ -31,7 +31,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: mixumos.example.com # 部署时替换
+    - host: mixumos.emergeshift.com # node WSS ingress; docs live at docs.emergeshift.com/mixumos (under construction, #75)
       http:
         paths:
           - path: /
