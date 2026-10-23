@@ -1,0 +1,107 @@
+// 剪贴板 e2e:console 会话 ↔ 容器 Wayland 选区双向同步。
+// 下行 display.clipboard.set → 容器 wl-paste 读到;
+// 上行容器 wl-copy → display.clipboard.changed 事件推到会话;
+// 归属:agent 持有窗口时下行被拒(与 input 同规);空串拒绝。
+// 用法: node tests/integration/clipboard-e2e.mjs <token> [port] [container]
+import { execFileSync } from "node:child_process";
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+const token = process.argv[2];
+const port = process.argv[3] ?? 17601;
+const container = process.argv[4] ?? "mixum-clip";
+if (!token) { console.error("用法: node clipboard-e2e.mjs <token> [port] [container]"); process.exit(2); }
+const URL_ = `wss://127.0.0.1:${port}/ws`;
+
+function sh(cmd) {
+  // docker exec 不继承 entrypoint 的 env，手动补 Wayland 环境。
+  return execFileSync("docker", ["exec", container, "sh", "-c",
+    `export XDG_RUNTIME_DIR=/run/mixum WAYLAND_DISPLAY=wayland-0; ${cmd}`],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).replace(/\r?\n$/, "");
+}
+
+function frame(op, payload) {
+  return JSON.stringify({ v: 1, id: crypto.randomUUID(), op, ts: Date.now(), ...(payload ? { payload } : {}) });
+}
+
+const s = {
+  ws: null,
+  pending: new Map(),
+  clips: [],
+  async connect() {
+    this.ws = new WebSocket(URL_);
+    this.ws.addEventListener("message", (ev) => {
+      if (typeof ev.data !== "string") return;
+      const env = JSON.parse(ev.data);
+      const w = this.pending.get(env.replyTo);
+      if (w) { this.pending.delete(env.replyTo); w(env); return; }
+      if (env.op === "display.clipboard.changed") {
+        this.clips.push({ window: env.payload?.window, text: env.payload?.text ?? "" });
+      }
+    });
+    await new Promise((res, rej) => {
+      this.ws.addEventListener("open", res, { once: true });
+      this.ws.addEventListener("error", () => rej(new Error("连接失败")), { once: true });
+    });
+    this.call = this.call.bind(this);
+    const h = await this.call("hello", { token, client: "clipboard-e2e/0.1" });
+    if (!h) throw new Error("握手失败");
+  },
+  call(op, payload) {
+    return new Promise((res, rej) => {
+      const raw = frame(op, payload);
+      const id = JSON.parse(raw).id;
+      const t = setTimeout(() => rej(new Error(`超时 ${op}`)), 15000);
+      this.pending.set(id, (env) => {
+        clearTimeout(t);
+        env.op.endsWith(".err") ? rej(new Error(env.payload?.message)) : res(env.payload);
+      });
+      this.ws.send(raw);
+    });
+  },
+  close() { try { this.ws.close(); } catch { /* noop */ } },
+};
+
+await s.connect();
+await s.call("display.windows", {}); // 同时开通剪贴板推送
+const list = await s.call("display.list", {});
+const win = list.windows[0].id;
+
+// 1. 下行:console → 容器选区 → wl-paste 可读。
+const down = `mixum-clip-down-${crypto.randomUUID().slice(0, 8)}`;
+await s.call("display.clipboard.set", { window: win, text: down });
+await new Promise((r) => setTimeout(r, 1200));
+const pasted = sh("wl-paste --no-newline 2>&1 || wl-paste 2>&1");
+console.log(`下行:发送 ${JSON.stringify(down)} → wl-paste ${JSON.stringify(pasted)}`);
+
+let emptyRejected = false;
+try {
+  await s.call("display.clipboard.set", { window: win, text: "" });
+} catch {
+  emptyRejected = true;
+}
+console.log(`空串拒绝:${emptyRejected ? "是" : "否(异常)"}`);
+
+// 2. 上行:容器 wl-copy → display.clipboard 推送。
+const up = `mixum-clip-up-${crypto.randomUUID().slice(0, 8)}`;
+sh(`printf %s "${up}" | wl-copy`);
+let received = null;
+for (let i = 0; i < 50 && !received; i++) {
+  await new Promise((r) => setTimeout(r, 100));
+  received = s.clips.find((item) => item.text === up) ?? null;
+}
+console.log(`上行:wl-copy ${JSON.stringify(up)} → 事件 ${s.clips.length} 条${received ? `,命中 ${JSON.stringify(received)}` : ""}`);
+
+// 3. 归属:用户接管(claim)后与 input 同规放行;agent 持有拒绝由
+//    display.rs 单测覆盖(容器内无运行中任务,不重复构造)。
+await s.call("display.takeover", { window: win, action: "claim", force: true });
+let userOk = false;
+try {
+  await s.call("display.clipboard.set", { window: win, text: "user-owned-sync" });
+  userOk = true;
+} catch { /* 拒绝即失败 */ }
+await s.call("display.takeover", { window: win, action: "release" });
+console.log(`归属:user 接管下下行${userOk ? "放行(与 input 同规)" : "被拒(异常)"}`);
+s.close();
+
+const ok = pasted === down && received?.text === up && received?.window === win && emptyRejected && userOk;
+console.log(ok ? "PASS 剪贴板:下行入选区/上行出事件/归属同规/空串拒绝" : "FAIL 剪贴板双向同步不符");
+process.exit(ok ? 0 : 1);

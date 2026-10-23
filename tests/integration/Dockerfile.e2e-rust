@@ -33,7 +33,7 @@ RUN apk add --no-cache \
 	make build-base pkgconf wlroots-dev json-c-dev libxkbcommon-dev \
 	libjpeg-turbo-dev libpng-dev wayland-protocols openh264-dev \
 	wlroots json-c libjpeg-turbo libpng libxkbcommon openh264 \
-	foot font-noto mesa-egl mesa-gles bash
+	foot font-noto mesa-egl mesa-gles bash wl-clipboard
 
 # mixcomp 源码内构建（协议头由 Makefile 用 wayland-scanner 现场生成）
 WORKDIR /opt/mixcomp

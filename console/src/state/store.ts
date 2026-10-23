@@ -255,3 +255,39 @@ client.onWindowPush = (w) => {
     return { windows }
   })
 }
+
+// ---------- 剪贴板同步（console ↔ 容器选区，回声抑制） ----------
+// 双向各记最近一轮文本：容器推来的文本若正是刚推过去的（回声）则不写
+// 浏览器；浏览器读到的文本若与两端已知一致则不重发，失败时保留重试机会。
+let clipLastSent = '' // 最近一次成功推给容器的文本
+let clipLastFromRemote = '' // 最近一次容器推来的文本
+
+client.onClipboard = (_window, text) => {
+  clipLastFromRemote = text
+  if (!text || text === clipLastSent) return
+  navigator.clipboard?.writeText(text).catch(() => {
+    /* 无剪贴板权限或文档非焦点：静默（用户可手动复制） */
+  })
+}
+
+async function pushClipboard(): Promise<void> {
+  if (!client.connected) return
+  try {
+    const text = await navigator.clipboard?.readText()
+    if (!text || text === clipLastSent || text === clipLastFromRemote) return
+    const s = useStore.getState()
+    const win = s.activeWindow ?? s.windows[0]?.id
+    if (win == null) return
+    await client.clipboardSet(win, text)
+    clipLastSent = text
+  } catch {
+    /* 无剪贴板权限：静默 */
+  }
+}
+
+window.addEventListener('focus', () => {
+  void pushClipboard()
+})
+document.addEventListener('paste', () => {
+  void pushClipboard()
+})

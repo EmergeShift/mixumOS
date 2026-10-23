@@ -673,6 +673,7 @@ impl Session {
             ops::op::DISPLAY_CLIPBOARD => self.display_clipboard(&env).await,
             ops::op::PRIVILEGE_DECISION => self.privilege_decision(&env).await,
             ops::op::PRIVILEGE_LIST => self.privilege_list(&env).await,
+            ops::op::DISPLAY_CLIPBOARD_SET => self.display_clipboard_set(&env).await,
             ops::op::AUDIO_ATTACH => self.audio_attach(&env).await,
             ops::op::AUDIO_DETACH => self.audio_detach(&env).await,
             ops::op::FILE_PUT => self.file_put(&env).await,
@@ -1573,24 +1574,49 @@ impl Session {
             return;
         }
         let mut windows = self.server.broker.subscribe_windows();
+        let mut clipboard = self.server.broker.subscribe_clipboard();
+        let claims = self.claims.clone();
         let sessions = self.server.sessions.clone();
         let session_id = self.id.clone();
         tokio::spawn(async move {
             loop {
-                match windows.recv().await {
-                    Ok(window) => {
-                        let envelope = Envelope::new(
+                let (op, payload) = tokio::select! {
+                    event = windows.recv() => match event {
+                        Ok(window) => (
                             ops::op::DISPLAY_WINDOWS,
-                            Some(serde_json::to_value(window).unwrap_or(Value::Null)),
-                        );
-                        if !sessions.push(&session_id, envelope).await {
-                            break;
+                            serde_json::to_value(window).unwrap_or(Value::Null),
+                        ),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            eprintln!("窗口事件积压,丢弃 {skipped} 条");
+                            continue;
                         }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        eprintln!("窗口事件积压,丢弃 {skipped} 条");
-                    }
-                    Err(_) => break,
+                        Err(_) => break,
+                    },
+                    event = clipboard.recv() => match event {
+                        Ok(value) => {
+                            // 剪贴板比画面敏感:在 display.view 之外再按窗口 ACL 过滤。
+                            let window = value
+                                .get("window")
+                                .and_then(Value::as_u64)
+                                .unwrap_or_default() as u32;
+                            let allowed = claims.as_ref().is_some_and(|claims| {
+                                mixum_protocol::token::window_allowed(claims, window)
+                            });
+                            if !allowed {
+                                continue;
+                            }
+                            (ops::op::DISPLAY_CLIPBOARD_CHANGED, value)
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            eprintln!("剪贴板事件积压,丢弃 {skipped} 条");
+                            continue;
+                        }
+                        Err(_) => break,
+                    },
+                };
+                let envelope = Envelope::new(op, Some(payload));
+                if !sessions.push(&session_id, envelope).await {
+                    break;
                 }
             }
         });
@@ -1759,6 +1785,54 @@ impl Session {
             _ => String::new(),
         };
         self.reply(env, json!({"text": text})).await;
+    }
+    /// 下行剪贴板:console → 窗口所属 comp 的 Wayland 选区。
+    async fn display_clipboard_set(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::DisplayInput).await {
+            return;
+        }
+        let p = payload_value(env);
+        let Some(id) = p
+            .get("window")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            self.err(env, ErrCode::BadRequest, "缺少 window").await;
+            return;
+        };
+        let Some(text) = p.get("text").and_then(Value::as_str) else {
+            self.err(env, ErrCode::BadRequest, "缺少 text").await;
+            return;
+        };
+        if text.is_empty() || text.len() > crate::display::MAX_CLIPBOARD_BYTES {
+            self.err(env, ErrCode::BadRequest, "text 长度须为 1..=4MiB")
+                .await;
+            return;
+        }
+        if !self
+            .server
+            .authorizer
+            .window_allowed(self.claims.as_ref().unwrap(), id)
+        {
+            self.err(env, ErrCode::Forbidden, "令牌未授权该窗口")
+                .await;
+            return;
+        }
+        // 与 input 同规:agent 持有窗口时拒绝。
+        if self.server.broker.window_mode(id).await.as_deref() == Some("agent") {
+            self.err(env, ErrCode::Conflict, "agent 正持有输入,无法写入剪贴板")
+                .await;
+            return;
+        }
+        let text = p.get("text").and_then(Value::as_str).unwrap_or_default();
+        match self.server.broker.clipboard_set(id, text).await {
+            Ok(()) => self.reply(env, json!({"ok": true})).await,
+            Err(DisplayError::NotFound(_)) => {
+                self.err(env, ErrCode::NotFound, &format!("窗口不存在: {id}"))
+                    .await;
+            }
+            Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
+        }
     }
     async fn require(&mut self, env: &Envelope, cap: Cap) -> bool {
         match self.claims.as_ref() {

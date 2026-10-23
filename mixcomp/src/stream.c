@@ -96,6 +96,7 @@ bool stream_connect(struct mixcomp_server *s) {
 	s->rx_have = 0;
 	s->sock_ready = true;
 	wlr_log(WLR_INFO, "已连接 mixumd 控制通道: %s", s->sock_path);
+	stream_send_capabilities(s);
 	return true;
 }
 
@@ -130,7 +131,41 @@ void stream_send_window(struct mixcomp_server *s, struct mixcomp_window *w,
 	json_object_put(root);
 }
 
-// stream.info —— 编码能力回告:mixumd 据此统一订阅者编码并广播 window 事件。
+// stream_send_capabilities —— 控制通道就绪后上报 comp 能力。
+// agentd 记录 clipboard 标记；未声明的 comp 收到 clipboard.set 回 conflict。
+void stream_send_capabilities(struct mixcomp_server *s) {
+	if (!s->sock_ready) {
+		return;
+	}
+	json_object *root = json_object_new_object();
+	json_object_object_add(root, "type", json_object_new_string("capabilities"));
+	json_object_object_add(root, "clipboard", json_object_new_boolean(1));
+	const char *str = json_object_to_json_string(root);
+	rec_send_rc rc = rec_send(s->sock_fd, REC_CONTROL, str, strlen(str));
+	if (rc == REC_SEND_FATAL) {
+		stream_mark_dead(s);
+	}
+	json_object_put(root);
+}
+
+// stream_send_clipboard —— 上行容器剪贴板：JSON 控制消息 type=clipboard。
+void stream_send_clipboard(struct mixcomp_server *s, uint32_t window_id,
+		const char *text) {
+	if (!s->sock_ready) {
+		return;
+	}
+	json_object *root = json_object_new_object();
+	json_object_object_add(root, "type", json_object_new_string("clipboard"));
+	json_object_object_add(root, "id", json_object_new_int(window_id));
+	json_object_object_add(root, "text", json_object_new_string(text));
+	const char *str = json_object_to_json_string(root);
+	rec_send_rc rc = rec_send(s->sock_fd, REC_CONTROL, str, strlen(str));
+	if (rc == REC_SEND_FATAL) {
+		stream_mark_dead(s);
+	}
+	json_object_put(root);
+}
+
 static void stream_send_info(struct mixcomp_server *s, int id,
 		const char *codec) {
 	if (!s->sock_ready) {
@@ -686,6 +721,15 @@ void stream_poll_control(struct mixcomp_server *s) {
 								w->h264_idr_pending = false;
 							}
 #endif
+						}
+					} else if (strcmp(t, "clipboard.set") == 0) {
+						json_object *jtext = NULL;
+						const char *text = "";
+						if (json_object_object_get_ex(root, "text", &jtext)) {
+							text = json_object_get_string(jtext);
+						}
+						if (text != NULL && text[0] != '\0') {
+							clipboard_set(s, text);
 						}
 					} else if (strcmp(t, "snapshot.freeze") == 0) {
 						// 先停捕获节拍，再给每个在推流的窗口补一个状态帧。
