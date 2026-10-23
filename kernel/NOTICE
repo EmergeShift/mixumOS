@@ -1,0 +1,10 @@
+The Linux kernel binaries produced from this directory
+(`linux-mixum-micro`, `linux-mixum`) are licensed under GPL-2.0.
+
+The build scripts, configuration fragments and documentation authored in this
+directory are licensed under Apache-2.0, the same as the rest of the repository.
+
+Kernel patches placed in `patches/` are derivative works of the Linux kernel and
+must be GPL-2.0. `patches/` is currently empty.
+
+See `../LICENSE`, `../THIRD_PARTY_NOTICES.md` and `../SOURCE_OFFER.md`.
