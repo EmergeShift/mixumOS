@@ -15,10 +15,11 @@ linked below.
 
 ## Coverage (2026-10-24)
 
-- English default: 18 of 21 pages (`agent-bridge`, `agent-driver`, `apple-container`,
-  `architecture`, `backends`, `clipboard`, `console`, `distro`, `host-integration`,
-  `macOS verification`, `migration`, `poc-criu-wayland`, `release-notes-0.1.4`,
-  `release-notes-0.1.5`, `roadmap`, `security`, `snapshots`, `wayland-magic`).
+- English default: 19 of 21 pages (`agent-bridge`, `agent-driver`, `apple-container`,
+  `architecture`, `backends`, `clipboard`, `console`, `distro`, `gateway`,
+  `host-integration`, `macOS verification`, `migration`, `poc-criu-wayland`,
+  `release-notes-0.1.4`, `release-notes-0.1.5`, `roadmap`, `security`, `snapshots`,
+  `wayland-magic`).
 - Architecture translation is still pending; the remaining pages are Chinese or
   mixed. The map below is the queue, not a claim that the work is done.
 
@@ -35,7 +36,7 @@ linked below.
 | [console](docs/console.md) | current | [English](docs/console.md) | [中文](docs/console.zh-CN.md) |
 | [CRIU feasibility](docs/criu-feasibility.md) | research | pending | [中文](docs/criu-feasibility.md) |
 | [distro](docs/distro.md) | current | [English](docs/distro.md) | [中文](docs/distro.zh-CN.md) |
-| [gateway](docs/gateway.md) | design | pending | [中文](docs/gateway.md) |
+| [gateway](docs/gateway.md) | design + M1–M3 implemented | [English](docs/gateway.md) | [中文](docs/gateway.zh-CN.md) |
 | [host-integration](docs/host-integration.md) | current | [English](docs/host-integration.md) | [中文](docs/host-integration.zh-CN.md) |
 | [macOS verification](docs/macos-verification.md) | current | [English](docs/macos-verification.md) | [中文](docs/macos-verification.zh-CN.md) |
 | [migration](docs/migration.md) | partial | [English](docs/migration.md) | [中文](docs/migration.zh-CN.md) |

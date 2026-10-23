@@ -1,202 +1,234 @@
-# gateway:云端枢纽设计(多容器路由、设备配对、令牌分发)
+> English translation of the Chinese document. Original: [gateway.zh-CN.md](gateway.zh-CN.md). Technical review pending.
 
-> **状态：设计定稿，未实现。** 里程碑见 §9；当前代码没有 gateway。
-> **Status: design, not implemented.** See §9 for milestones; there is no gateway code yet.
-状态:设计定稿(2026-10-18),未实现。实施里程碑见 §9。
+# gateway: cloud hub design (multi-container routing, device pairing, token issuance)
 
-## 1. 定位与拓扑
+> **Status: design finalized; M1–M3 implemented (see §9); single- and dual-replica
+> e2e pass.** v1 remains single-user/self-hosted; multi-tenancy, persistent
+> revocation, end-to-end encryption and node-side signature verification are not done.
 
-录音愿景"手机发指令 → 云端 agent 开 Chrome → mac 上看到独立原生窗口"
-缺一块枢纽:客户端(手机/mac 控制台)在公网,节点(mixumd+mixcomp 容器)
-在容器/NAT 后面,互不可达。gateway 是唯一的公网 WSS 入口:
+## 1. Positioning and topology
+
+The recording vision — "phone sends an instruction → cloud agent opens Chrome → a
+separate native window appears on the Mac" — is missing a hub: clients (phone/Mac
+console) are on the public internet, while nodes (mixumd + mixcomp containers) sit
+behind containers/NAT and cannot reach each other. gateway is the only public WSS
+entry point:
 
 ```
-手机 PWA ──┐                      ┌── WSS 出站注册 ── mixumd 节点 A(云端容器)
-           ├── WSS/TLS ── gateway ┼── WSS 出站注册 ── mixumd 节点 B(家里机器)
-mac PWA ───┘                      └── WSS 出站注册 ── mixumd 节点 C(k8s Pod,阶段5)
+phone PWA ──┐                      ┌── WSS outbound registration ── mixumd node A (cloud container)
+            ├── WSS/TLS ── gateway ┼── WSS outbound registration ── mixumd node B (home machine)
+Mac PWA ────┘                      └── WSS outbound registration ── mixumd node C (k8s Pod, stage 5)
 ```
 
-三条设计红线:
+Three design red lines:
 
-1. **节点出站连接**:容器在 NAT 后,一律由 mixumd 主动向 gateway 发起
-   WSS 注册,gateway 不反连;
-2. **mixumd 协议零破坏**:gateway 只做信封路由,业务语义(task.* /
-   snap.* / display.*)原样透传,mixumd 不知道客户端存在;
-3. **gateway 不做业务决策**:回退/fork/接管全部发生在节点侧,gateway
-   只管「这条信封该去哪」。
+1. **Nodes connect outbound**: containers are behind NAT; mixumd always initiates the
+   WSS registration to gateway; gateway never dials back.
+2. **No mixumd protocol breakage**: gateway only routes envelopes; business semantics
+   (task.* / snap.* / display.*) pass through unchanged; mixumd does not know clients
+   exist.
+3. **gateway makes no business decisions**: rollback/fork/takeover all happen on the
+   node; gateway only answers "where should this envelope go".
 
-## 2. 身份与令牌(签发根上移)
+## 2. Identity and tokens (issuance root moves up)
 
-现状:mixumd 自签 ed25519 令牌(`mixum1.*`,claims=sub/caps/iat/exp/jti
-/taskId/windowIds)。gateway 成为**令牌签发根**,mixumd 的引导令牌退役:
+Today mixumd self-signs ed25519 tokens (`mixum1.*`, claims=sub/caps/iat/exp/jti/
+taskId/windowIds). gateway becomes the **token issuance root**; mixumd's bootstrap
+token is retired:
 
-| 令牌 | sub | caps | 用途 |
-|------|-----|------|------|
-| 用户令牌 | `user:<id>` | 用户全量能力 | 人持有的主凭据,由 gateway 引导流程签发 |
-| 节点令牌 | `node:<name>` | `gateway.route` | mixumd 注册出站连接用,只此一用 |
-| 设备令牌 | `device:<id>` | 用户能力子集 | 经设备配对签发给手机/mac,可吊销 |
+| Token | sub | caps | Use |
+|---|---|---|---|
+| user token | `user:<id>` | full user capabilities | the human's primary credential, issued by gateway bootstrap |
+| node token | `node:<name>` | `gateway.route` | mixumd registers its outbound connection; this one use only |
+| device token | `device:<id>` | a subset of user capabilities | issued to phone/Mac via device pairing; revocable |
 
-- 签名算法/前缀不变(ed25519 + `mixum1.*`),gateway 侧验签即可;
-- 节点令牌限制 `sub` 前缀,gateway 注册通道只认 `node:*`;节点向
-  mixumd 本机 socket 转发信封时仍需 mixumd 本地校验(令牌透传或本地
-  引导令牌,v1 用后者:gateway→节点连接视为可信内网,节点侧不二次
-  验签,详见 §7 安全边界);
-- 吊销:gateway 维护 jti 撤销表(内存,v1;持久化留给 k8s 阶段)。
+- Signature algorithm/prefix unchanged (ed25519 + `mixum1.*`); gateway verifies.
+- Node tokens are limited to the `sub` prefix; the gateway registration channel only
+  accepts `node:*`. When a node forwards envelopes to the local mixumd socket, mixumd
+  still does local verification (token passthrough or local bootstrap token; v1 uses
+  the latter: gateway→node is treated as a trusted internal network, no second
+  verification on the node; see §7 security boundary).
+- Revocation: gateway keeps a jti revocation table (in memory for v1; persistence is
+  left to the k8s stage).
 
-## 3. 节点注册与保活
+## 3. Node registration and keepalive
 
-新增 gateway op(v1 不入 protocol.md 主表,单独 §gateway):
+New gateway ops (not in the protocol.md main table for v1; a separate §gateway):
 
-| op | 方向 | 载荷 | 应答 |
-|----|------|------|------|
-| `gateway.register` | 节点→gw | `{ name, token(节点令牌), version }` | `{ lease: <秒> }` |
-| `gateway.heartbeat` | 节点→gw | `{}` | `{ ok: true }` |
+| op | direction | payload | reply |
+|---|---|---|---|
+| `gateway.register` | node→gw | `{ name, token(node token), version }` | `{ lease: <seconds> }` |
+| `gateway.heartbeat` | node→gw | `{}` | `{ ok: true }` |
 
-- 节点侧改动(**mixumd 唯一新增**):`--gateway <url>` 参数 + 出站
-  relay 模块——把 gateway 当成一条"额外可信客户端连接"接入既有
-  Session 分发,不需要理解 gateway 语义;
-- 保活:lease 内无 heartbeat 视为离线;指数退避重连(复用 console
-  客户端同款策略),避免 k8s 滚动更新时的注册风暴;
-- 重名:`gateway.register` 遇到同名在线节点拒绝(旧连接先注销才可
-  重入),防止误配的容器顶掉同名生产节点;
-- gateway 只保留节点在线表(name → 连接句柄 + 版本 + 最后心跳),
-  v1 内存态,不持久化。
+- Node-side change (**the only new mixumd surface**): a `--gateway <url>` flag plus an
+  outbound relay module — it plugs gateway in as an "extra trusted client connection"
+  into the existing Session distribution, without understanding gateway semantics.
+- Keepalive: no heartbeat within the lease means offline; exponential-backoff
+  reconnect (same policy as the console client) avoids a registration storm during
+  k8s rolling updates.
+- Duplicate names: `gateway.register` rejects a same-name online node (the old
+  connection must unregister before re-entry), so a misconfigured container cannot
+  displace a same-name production node.
+- gateway only keeps an online table (name → connection handle + version + last
+  heartbeat); v1 is in memory, not persisted.
 
-## 4. 客户端信封路由
+## 4. Client envelope routing
 
-客户端(手机/mac PWA)连 gateway 后,信封加一个可选字段:
+After a client (phone/Mac PWA) connects to gateway, the envelope gains an optional
+field:
 
 ```json
 { "v": 1, "id": "...", "op": "task.submit", "node": "home-01", "payload": {...} }
 ```
 
-- envelope 加 `node: String`(serde default 空串 + skip_serializing,
-  纯增量,mixumd 忽略之);gateway 按原始 JSON 区分「字段缺省」与「字段
-  存在但非法」:node 名与注册名同规则(**1..=64 字符、不含冒号**),
-  空串/null/非字符串/超长等一律返回 `bad_request`,不静默降级为自动路由;
-- **无 node 字段**:单节点时路由到唯一在线节点;多节点时返回
-  `bad_request`("请指定 node")——不做隐式默认,避免歧义;
-- **请求-应答关联**:gateway 维护 `replyTo → (客户端会话, 原节点)`,
-  节点应答回填转发;节点离线时未决请求统一回 `internal` 错误;
-- **订阅类 op**(task.events / display.windows):订阅与客户端会话
-  绑定,事件按来源节点原样转发;
-- **二进制帧**(0x01 video):gateway 不解析,按「客户端已附流的
-  窗口表 → 来源节点」转发;附流时记下 (client, windowId) → node,
-  帧反向寻址;多节点同名窗口 id 冲突在 attach 时即按节点隔离;
-- **背压**:沿用节点的每订阅者有界队列语义,gateway 转发队列亦
-  有界(64),溢出丢弃保实时——帧流实时性优先原则不变。
+- envelope adds `node: String` (serde default empty string + skip_serializing, purely
+  additive; mixumd ignores it). gateway uses the raw JSON to distinguish "field
+  absent" from "field present but invalid": node names follow the registration rules
+  (**1..=64 characters, no colon**); empty string/null/non-string/too long all return
+  `bad_request`, never silently falling back to automatic routing.
+- **No node field**: with one node, route to the only online node; with multiple
+  nodes, return `bad_request` ("please specify node") — no implicit default, avoiding
+  ambiguity.
+- **Request/reply correlation**: gateway keeps `replyTo → (client session, origin
+  node)` and forwards node replies back; when a node is offline, pending requests get a
+  uniform `internal` error.
+- **Subscription ops** (task.events / display.windows): subscriptions bind to the
+  client session; events are forwarded as-is from the origin node.
+- **Binary frames** (0x01 video): gateway does not parse them; it forwards by the
+  "client's attached-window table → origin node". On attach it records
+  (client, windowId) → node; frames are addressed in reverse. Same-name window id
+  conflicts across nodes are isolated per node at attach time.
+- **Backpressure**: reuse the node's per-subscriber bounded queue semantics; the
+  gateway forwarding queue is also bounded (64), dropping on overflow to preserve
+  real time — the frame-stream real-time-first principle is unchanged.
 
-## 5. 设备配对
+## 5. Device pairing
 
-手机/mac 新设备首次使用的凭据引导:
+Credential bootstrap for a new phone/Mac:
 
-| op | 方向 | 载荷 | 说明 |
-|----|------|------|------|
-| `gateway.pair.create` | 用户令牌→gw | `{}` | 生成 6 位配对码,5 分钟有效 |
-| `gateway.pair.claim` | 无凭据→gw | `{ code, deviceName }` | 换设备令牌(`{ token, deviceId }`) |
+| op | direction | payload | Notes |
+|---|---|---|---|
+| `gateway.pair.create` | user token→gw | `{}` | generate a 6-digit pairing code, valid 5 minutes |
+| `gateway.pair.claim` | no credential→gw | `{ code, deviceName }` | exchange for a device token (`{ token, deviceId }`) |
 
-- 流程:用户在已信任设备点「添加设备」得配对码 → 新设备输码 →
-  gateway 签发 `device:<id>` 令牌(能力 = 用户能力子集,缺省不含
-  `admin`/`snap.push`)→ 新设备持久化到 localStorage;
-- 设备列表与吊销:`gateway.device.list/revoke`(用户令牌),吊销进
-  jti 撤销表;
-- v1 配对码单次使用、5 分钟过期;按来源 IP 限速(10 次失败/分钟,
-  不含 ephemeral port),超限返回 `conflict`;
-- 首条消息与令牌校验失败按语义返回错误码:`bad_request`(请求非法)、
-  `forbidden`(令牌/名不匹配)、`conflict`(重名注册、限流)、
-  `not_found`(节点离线)、`internal`(转发链路异常、租约/后端故障)。
+- Flow: the user taps "add device" on a trusted device to get a pairing code → the new
+  device enters it → gateway issues a `device:<id>` token (capabilities = a subset of
+  the user's, excluding `admin`/`snap.push` by default) → the new device persists it in
+  localStorage.
+- Device list and revocation: `gateway.device.list/revoke` (user token); revocation
+  enters the jti revocation table.
+- v1 pairing codes are single-use and expire in 5 minutes; rate-limited by source IP
+  (10 failures/minute, excluding ephemeral ports); over the limit returns `conflict`.
+- The first message and token verification failures return semantic codes:
+  `bad_request` (invalid request), `forbidden` (token/name mismatch), `conflict`
+  (duplicate-name registration, rate limit), `not_found` (node offline), `internal`
+  (forwarding/lease/backend failure).
 
-## 6. 安全边界(诚实清单)
+## 6. Security boundary (honest list)
 
-- **gateway 可见明文**:TLS 在 gateway 终结,信封与帧内容对 gateway
-  透明可见。前提是自托管——gateway 与节点同属用户信任域。端到端
-  加密(客户端与节点协商会话密钥,gateway 纯转发密文)列为 v2 演进;
-- **节点侧二次验签缺失**:gateway→节点连接按可信内网对待(节点
-  socket 仅监听本机/容器内网)。v2 可给节点配本地验证:gateway 转发
-  时附带原始令牌,节点自验;
-- 限速:配对入口按来源 IP 10 次失败/分钟;其他未认证连接暂无通用限速(v1);
-- 审计:配对成功/失败、设备吊销、令牌吊销、节点注册落 stdout 日志(v1)。
+- **gateway sees plaintext**: TLS terminates at gateway, so envelopes and frame content
+  are visible to it. The premise is self-hosting — gateway and nodes belong to the
+  same user trust domain. End-to-end encryption (client and node negotiate a session
+  key; gateway forwards ciphertext only) is a v2 evolution.
+- **No second signature verification on the node**: gateway→node is treated as a
+  trusted internal network (the node socket listens only on localhost/container
+  network). v2 can add local verification: gateway forwards the original token and the
+  node verifies it.
+- Rate limiting: pairing entry is limited by source IP to 10 failures/minute; other
+  unauthenticated connections have no general rate limit in v1.
+- Audit: pairing success/failure, device revocation, token revocation and node
+  registration go to stdout logs (v1).
 
-## 7. 与 k8s operator 的衔接(阶段 5)
+## 7. Relationship with the k8s operator (stage 5)
 
-gateway 的节点注册表就是 operator 的对账目标:
+gateway's node registry is the operator's reconciliation target:
 
-- 节点 = MixumTask CRD 的实例,operator 创建 Pod 时以节点令牌注入,
-  Pod 起 mixumd `--gateway` 自动注册;
-- gateway v1 内存态注册表 → 阶段 5 换 k8s API/etcd 后端(接口预留
-  `NodeRegistry` trait,内存实现为默认);
-- 快照卷挂载:节点启动时挂预置快照卷,复用既有 snap.pull 语义。
+- a node = a MixumTask CRD instance; when the operator creates a Pod it injects a node
+  token, and the Pod's mixumd `--gateway` registers automatically;
+- gateway v1's in-memory registry → stage 5 swaps in a k8s API/etcd backend (the
+  `NodeRegistry` trait is reserved; the in-memory implementation is the default);
+- snapshot volume mounts: the node mounts a pre-provisioned snapshot volume at startup,
+  reusing the existing snap.pull semantics.
 
-## 8. 客户端改动(console PWA)
+## 8. Client changes (console PWA)
 
-- Settings 增加「节点」选择(从 `gateway.node.list` 拉取;单节点
-  隐藏选择器);
-- 配对入口:「添加设备」(生成配对码)与首启「输码接入」;
-- 信封统一带当前选中节点(无选择时不带,单节点场景自动路由);
-- 无 gateway 直连 mixumd 的既有用法**保持不变**(协议不识别 node
-  字段即忽略)。
+- Settings gains a "node" selector (from `gateway.node.list`; hidden when there is one
+  node).
+- Pairing entry: "add device" (generate a code) and first-run "enter code".
+- Envelopes carry the currently selected node (absent when none is selected; automatic
+  routing in the single-node case).
+- Existing direct-to-mixumd use **stays unchanged** (the protocol ignores an unknown
+  node field).
 
-## 9. 实施里程碑
+## 9. Implementation milestones
 
-- **M1(✅ 2026-10-18 落地)**:gateway 二进制(crate `mixum-gateway`,
-  复用 mixum-protocol)+ 节点出站注册 + envelope.node 路由(文本与
-  二进制)+ 用户/节点令牌签发(bootstrap 管理令牌打印于启动日志,
-  `gateway.token.issue` 签发,`gateway.node.list` 查询);e2e 双节点
-  拓扑全链路通过(tests/integration/gateway-e2e.mjs:注册/令牌/任务
-  提交/事件流隔离/窗口表隔离/帧按附流路由)。M1 传输为明文 ws(TLS
-  于 M2 补);mixumd 新增 `--gateway/--gateway-name/--gateway-token`
-  出站 relay(rust/crates/mixum-agentd/src/gateway.rs)。
+- **M1 (✅ landed 2026-10-18)**: gateway binary (`mixum-gateway` crate, reusing
+  mixum-protocol) + node outbound registration + `envelope.node` routing (text and
+  binary) + user/node token issuance (bootstrap admin token printed at startup,
+  `gateway.token.issue`, `gateway.node.list`); e2e two-node topology full chain passed
+  (`tests/integration/gateway-e2e.mjs`: registration/token/task submit/event-stream
+  isolation/window-table isolation/frame routing by attachment). M1 transport is
+  plaintext ws (TLS in M2); mixumd adds `--gateway/--gateway-name/--gateway-token`
+  outbound relay (`rust/crates/mixum-agentd/src/gateway.rs`).
 
-### 9.1 节点通道私有约定(gateway ↔ mixumd relay,非公有协议)
+### 9.1 Node channel private convention (gateway ↔ mixumd relay, not public protocol)
 
-- gateway 为每条客户端连接分配 `gatewaySession`;relay 按会话开一条
-  到本机 mixumd 的回环明文 WS(127.0.0.1,复用
-  server.serve_plain_listener)——mixumd 的订阅/广播是会话级的,按
-  会话开回环天然隔离多客户端;
-- gateway→节点文本:信封 + `gatewaySession` 字段;
-  `gateway.session.open/close` 控制会话生命周期(relay 幂等处理);
-- 节点→gateway 文本:同上带 `gatewaySession`,gateway 剥离后回送
-  客户端;二进制:`u32 LE 会话 id 长度 + 会话 id 字节 + 原始帧`;
-- 会话在首次路由到某节点时惰性开启(重复 open 由 relay 幂等忽略),
-  客户端断开或节点重连时关闭(客户端按既有语义重连/重订阅)。
-- **M2(✅ 2026-10-18 落地)**:设备配对(`gateway.pair.create/claim`,
-  6 位码 5 分钟单次)+ 设备注册表(`gateway.device.list/revoke`,
-  jti 撤销表即时生效)+ gateway TLS(`--listen wss://`,自签证书
-  持久化于 --data-dir,TOFU;relay 侧用 --gateway-fingerprint 固定,
-  缺省首次 TOFU 落盘 dataDir/gateway-fingerprint)
-  + console 节点选择器与配对/设备管理 UI(Settings 内);e2e 扩展
-  配对/设备 hello/吊销失效三断言;
-- **M3a(✅ 2026-10-19 落地)**:注册表抽成 `NodeRegistry`
-  (`register/remove/get/online/renew`)+ `MemoryRegistry` 默认实现。注册表
-  只存元数据,出站 socket 留在 `Gateway::local`;`Gateway::with_options`
-  注入后端、实例名与 mesh 地址。M1/M2 行为不变,gateway-e2e 15 项回归通过。
-- **M3a'(✅ 2026-10-19 落地)**:k8s Lease 后端——每节点一条
-  `coordination.k8s.io/v1` Lease(`holderIdentity`=副本实例,注解存
-  node/owner/ownerAddr/version/since);同名未过期拒绝,过期租约可接管;
-  relay 每 20s `gateway.heartbeat` 续约(60s 租约)。部署清单见
-  `cloud/k8s/60-gateway.yaml`(2 副本 + RBAC + headless mesh Service,
-  副本共享 identity Secret 作为签发根)。
+- gateway assigns a `gatewaySession` to each client connection; the relay opens a
+  loopback plaintext WS to the local mixumd per session (127.0.0.1, reusing
+  `server.serve_plain_listener`) — mixumd subscriptions/broadcasts are session-scoped,
+  so per-session loopback naturally isolates multiple clients.
+- gateway→node text: envelope + `gatewaySession`; `gateway.session.open/close` control
+  the session lifecycle (relay is idempotent).
+- node→gateway text: same with `gatewaySession`; gateway strips it before returning to
+  the client. Binary: `u32 LE session-id length + session-id bytes + raw frame`.
+- A session opens lazily on first routing to a node (duplicate opens ignored
+  idempotently by the relay) and closes when the client disconnects or the node
+  reconnects (clients reconnect/re-subscribe per existing semantics).
+- **M2 (✅ landed 2026-10-18)**: device pairing (`gateway.pair.create/claim`, 6-digit
+  code, 5 minutes, single-use) + device registry (`gateway.device.list/revoke`, jti
+  revocation effective immediately) + gateway TLS (`--listen wss://`, self-signed cert
+  persisted in --data-dir, TOFU; relay pins with `--gateway-fingerprint`, default
+  first-use TOFU to `dataDir/gateway-fingerprint`) + console node selector and
+  pairing/device UI (in Settings); e2e adds pairing/device hello/revocation-invalid
+  assertions.
+- **M3a (✅ landed 2026-10-19)**: registry extracted into `NodeRegistry`
+  (`register/remove/get/online/renew`) + `MemoryRegistry` default. The registry stores
+  metadata only; the outbound socket stays in `Gateway::local`; `Gateway::with_options`
+  injects the backend, instance name and mesh address. M1/M2 behavior unchanged;
+  gateway-e2e 15 regressions pass.
+- **M3a' (✅ landed 2026-10-19)**: k8s Lease backend — one
+  `coordination.k8s.io/v1` Lease per node (`holderIdentity`=replica instance; annotations
+  store node/owner/ownerAddr/version/since); same-name unexpired leases are rejected,
+  expired ones can be taken over; the relay renews every 20 s
+  (`gateway.heartbeat`, 60 s lease). Manifest at `cloud/k8s/60-gateway.yaml`
+  (2 replicas + RBAC + headless mesh Service; replicas share the identity Secret as the
+  issuance root).
 
-> 部署注意:副本必须共享 **identity**(同一签发根),但每个副本必须使用
-> **独立、可写的 data-dir**。identity 与 state 建议分开挂载:identity
-> Secret 只读,`--data-dir` 每 Pod 一个 emptyDir/PVC。M3 的 revoked/devices/
-> pairs 仍是每 Pod 本地状态,跨副本吊销/配对不保证;详见 docs/security.md。`data-dir/gateway-state.json` 含本副本的 bootstrap jti,
-> bootstrap 启动轮换会撤销旧 jti;若多个副本共享 data-dir,后启动的副本会
-> 吊销先启动副本刚签发的 bootstrap 令牌。`gateway-m3-e2e` 用“独立 state +
-> 复制 identity 文件”复现这一点。
-- **M3b(✅ 2026-10-19 落地)**:副本间私有 WS mesh——`mesh.hello` 共享 token
-  鉴权,`mesh.text/binary/close` 按 `ms-<发起实例>-<序号>` 会话转发;节点只连
-  owner,客户端可连任意副本。`tests/integration/gateway-m3-e2e.mjs` 验证:
-  共享 Lease 注册表、B→A 与 A→B 双向任务/事件流、节点掉线跨副本清理。
+> Deployment note: replicas must share **identity** (same issuance root) but each
+> replica must use an **independent, writable data-dir**. Mount identity and state
+> separately: identity Secret read-only, `--data-dir` per Pod as emptyDir/PVC. M3's
+> revoked/devices/pairs remain per-Pod local state; cross-replica revocation/pairing is
+> not guaranteed; see docs/security.md. `data-dir/gateway-state.json` contains the
+> replica's bootstrap jti; bootstrap startup rotation revokes the old jti; if several
+> replicas share a data-dir, a later-starting replica revokes the bootstrap token a
+> earlier replica just issued. `gateway-m3-e2e` reproduces this with "independent state
+> + copied identity file".
+- **M3b (✅ landed 2026-10-19)**: inter-replica private WS mesh — `mesh.hello` shared
+  token auth, `mesh.text/binary/close` forwarded per `ms-<origin-instance>-<seq>`
+  session; nodes connect only to their owner, clients may connect to any replica.
+  `tests/integration/gateway-m3-e2e.mjs` verifies the shared Lease registry, B→A and
+  A→B bidirectional task/event streams, and cross-replica dropped-node cleanup.
 
-测试计划:`gateway-e2e.mjs` 单副本 M1/M2 全链(注册/令牌/路由/隔离/帧/
-配对/吊销);`gateway-m3-e2e.mjs` 双副本 + kind Lease(共享注册表、双向
-跨副本路由、掉线清理)。两者均已落地并通过。
+Test plan: `gateway-e2e.mjs` single-replica M1/M2 full chain
+(registration/token/routing/isolation/frames/pairing/revocation);
+`gateway-m3-e2e.mjs` dual-replica + kind Lease (shared registry, bidirectional
+cross-replica routing, dropped-node cleanup). Both have landed and pass.
 
-## 10. 开放问题
+## 10. Open questions
 
-1. 多 gateway 副本下注册表共享(v1 单实例,k8s 阶段解决);
-2. 节点令牌泄漏的应急:revoke + 重签发流程(人工,v1);
-3. 帧转发的 gateway 内存水位(多客户端多窗口并发)——M1 以单用户
-   自托管规模为目标,不做跨用户多租户;
-4. 配对码 UI 在手表等窄设备上的形态(后置)。
+1. Registry sharing with multiple gateway replicas (v1 single instance; k8s stage
+   solves it).
+2. Emergency response to a leaked node token: revoke + reissue process (manual, v1).
+3. gateway memory watermark for frame forwarding (many clients/windows) — M1 targets
+   single-user self-hosted scale; no cross-user multi-tenancy.
+4. Pairing-code UI on narrow devices such as watches (later).
