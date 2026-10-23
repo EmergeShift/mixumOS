@@ -311,7 +311,13 @@ static void inject_key(struct mixcomp_server *s, struct mixcomp_window *w,
 	s->focus_window = w;
 	uint32_t key = raw_key;
 	if (key == 0 && keysym_name != NULL) {
-		key = keycode_for_keysym(keysym_name);
+		/* xkb keymap lookup 在部分键位上拿不到 Return，显式映射主回车。 */
+		if (strcasecmp(keysym_name, "Return") == 0 ||
+				strcasecmp(keysym_name, "Enter") == 0) {
+			key = KEY_ENTER;
+		} else {
+			key = keycode_for_keysym(keysym_name);
+		}
 	}
 	if (key == 0) {
 		return;

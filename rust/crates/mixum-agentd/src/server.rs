@@ -11,12 +11,12 @@ use mixum_protocol::envelope::{new_id, Envelope};
 use mixum_protocol::ops::{self, Cap, ErrCode};
 use mixum_protocol::token::Claims;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -40,7 +40,9 @@ const SESSION_TTL: Duration = Duration::from_secs(3600);
 #[allow(clippy::result_large_err)]
 fn accept_with_subprotocol<S>(
     stream: S,
-) -> impl std::future::Future<Output = Result<WebSocketStream<S>, Box<tokio_tungstenite::tungstenite::Error>>>
+) -> impl std::future::Future<
+    Output = Result<WebSocketStream<S>, Box<tokio_tungstenite::tungstenite::Error>>,
+>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -48,7 +50,12 @@ where
 
     // 回调错误类型为 tungstenite 约定的 Response<Option<String>>;
     // 未请求任何已知子协议的客户端不报错、仅不回子协议头。
-    let cb = |req: &Request, resp: Response| -> Result<Response, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse> {
+    let cb = |req: &Request,
+              resp: Response|
+     -> Result<
+        Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
         let offered: Vec<String> = req
             .headers()
             .get("sec-websocket-protocol")
@@ -209,9 +216,9 @@ impl SessionStore {
     /// 会话是否存在且未过期(并刷新活跃时间)。
     pub async fn touch(&self, id: &str) -> Option<Claims> {
         let mut records = self.records.lock().await;
-        let expired = records.get(id).is_some_and(|record| {
-            record.tx.is_none() && record.last_seen.elapsed() > self.ttl
-        });
+        let expired = records
+            .get(id)
+            .is_some_and(|record| record.tx.is_none() && record.last_seen.elapsed() > self.ttl);
         if expired {
             records.remove(id);
             return None;
@@ -233,9 +240,10 @@ impl SessionStore {
         tx: mpsc::Sender<Message>,
     ) -> Option<Claims> {
         let mut records = self.records.lock().await;
-        if records.get(id).is_some_and(|record| {
-            record.tx.is_none() && record.last_seen.elapsed() > self.ttl
-        }) {
+        if records
+            .get(id)
+            .is_some_and(|record| record.tx.is_none() && record.last_seen.elapsed() > self.ttl)
+        {
             records.remove(id);
             return None;
         }
@@ -265,12 +273,12 @@ impl SessionStore {
             "heartbeat": 30,
         });
         let _ = tx
-            .send(Message::Text(request.reply(Some(response)).to_json().into()))
+            .send(Message::Text(
+                request.reply(Some(response)).to_json().into(),
+            ))
             .await;
         for envelope in replay {
-            let _ = tx
-                .send(Message::Text(envelope.to_json().into()))
-                .await;
+            let _ = tx.send(Message::Text(envelope.to_json().into())).await;
         }
         claims
     }
@@ -292,6 +300,30 @@ impl SessionStore {
             let _ = tx.send(Message::Text(envelope.to_json().into())).await;
         }
         true
+    }
+
+    /// 向所有持有 admin 能力的在线会话推送一条事件；只用于审批类请求。
+    pub async fn broadcast_admin(&self, mut envelope: Envelope) {
+        let mut records = self.records.lock().await;
+        for record in records.values_mut() {
+            let admin = record
+                .claims
+                .as_ref()
+                .is_some_and(|claims| mixum_protocol::token::has_cap(claims, Cap::Admin));
+            if !admin {
+                continue;
+            }
+            let Some(tx) = &record.tx else {
+                continue;
+            };
+            record.seq += 1;
+            envelope.seq = record.seq;
+            if record.ring.len() >= self.capacity {
+                record.ring.pop_front();
+            }
+            record.ring.push_back(envelope.clone());
+            let _ = tx.send(Message::Text(envelope.to_json().into())).await;
+        }
     }
 
     /// 标记 task.events 已订阅;返回 true 表示本次是首次(需要启动订阅泵)。
@@ -344,6 +376,8 @@ pub struct Server {
     sessions: Arc<SessionStore>,
     /// 容器音频采集（audio.attach 的首个订阅者启动 capture 进程）。
     audio: Arc<crate::audio::AudioHub>,
+    /// 单条 sudo 请求的审批与 root 执行。
+    privilege: Arc<crate::privilege::PrivilegeBroker>,
     /// 真实快照引擎就绪时提供跨节点同步;内存桩下为 None。
     #[cfg(feature = "real-snapshot")]
     pub sync: Option<Arc<crate::sync::SyncBackend>>,
@@ -361,6 +395,9 @@ impl Server {
             std::path::Path::new(&config.data_dir).join("memory"),
         ));
         let audio = crate::audio::AudioHub::new(config.audio_command.clone());
+        let sessions = Arc::new(SessionStore::new(SESSION_RING_CAPACITY));
+        let privilege =
+            crate::privilege::PrivilegeBroker::new(Arc::clone(&sessions), config.data_dir.clone());
         Arc::new(Self {
             config,
             authorizer,
@@ -369,10 +406,15 @@ impl Server {
             snapshots,
             memory,
             audio,
-            sessions: Arc::new(SessionStore::new(SESSION_RING_CAPACITY)),
+            privilege,
+            sessions,
             #[cfg(feature = "real-snapshot")]
             sync: None,
         })
+    }
+
+    pub fn privilege(&self) -> Arc<crate::privilege::PrivilegeBroker> {
+        Arc::clone(&self.privilege)
     }
 
     pub async fn serve_plain(
@@ -629,6 +671,8 @@ impl Session {
             ops::op::DISPLAY_TAKEOVER => self.display_takeover(&env).await,
             ops::op::DISPLAY_INPUT => self.display_input(&env).await,
             ops::op::DISPLAY_CLIPBOARD => self.display_clipboard(&env).await,
+            ops::op::PRIVILEGE_DECISION => self.privilege_decision(&env).await,
+            ops::op::PRIVILEGE_LIST => self.privilege_list(&env).await,
             ops::op::AUDIO_ATTACH => self.audio_attach(&env).await,
             ops::op::AUDIO_DETACH => self.audio_detach(&env).await,
             ops::op::FILE_PUT => self.file_put(&env).await,
@@ -974,8 +1018,7 @@ impl Session {
                     .await
             }
             Err(InputReplyError::Conflict) => {
-                self.err(env, ErrCode::Conflict, "该输入请求已答复")
-                    .await
+                self.err(env, ErrCode::Conflict, "该输入请求已答复").await
             }
         }
     }
@@ -1071,11 +1114,8 @@ impl Session {
             .get("limit")
             .and_then(Value::as_u64)
             .map(|value| value as usize);
-        self.reply(
-            env,
-            self.server.memory.list(provider, kind, cursor, limit),
-        )
-        .await;
+        self.reply(env, self.server.memory.list(provider, kind, cursor, limit))
+            .await;
     }
     async fn mem_import(&mut self, env: &Envelope) {
         if !self.require(env, Cap::MemWrite).await {
@@ -1122,6 +1162,23 @@ impl Session {
         }
         let p = payload_value(env);
         let kind = p.get("kind").and_then(Value::as_str).unwrap_or("disk");
+        let mut tags = std::collections::BTreeMap::new();
+        if let Some(base) = std::env::var("MIXUM_BASE").ok().filter(|v| !v.is_empty()) {
+            tags.insert("base".into(), base);
+        }
+        if let Some(digest) = std::env::var("MIXUM_BASE_DIGEST")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            tags.insert("baseDigest".into(), digest);
+        }
+        if let Some(extra) = p.get("tags").and_then(Value::as_object) {
+            for (key, value) in extra {
+                if let Some(value) = value.as_str() {
+                    tags.insert(key.clone(), value.to_owned());
+                }
+            }
+        }
         match self
             .server
             .snapshots
@@ -1134,7 +1191,16 @@ impl Session {
             )
             .await
         {
-            Ok(node) => self.reply(env, serde_json::to_value(node).unwrap()).await,
+            Ok(mut node) => {
+                if !tags.is_empty() {
+                    if let Err(error) = self.server.snapshots.annotate(&node.id, &tags).await {
+                        self.err(env, ErrCode::Internal, &error.to_string()).await;
+                        return;
+                    }
+                    node.tags = tags;
+                }
+                self.reply(env, serde_json::to_value(node).unwrap()).await
+            }
             Err(e) => self.err(env, ErrCode::Internal, &e.to_string()).await,
         }
     }
@@ -1152,7 +1218,34 @@ impl Session {
             return;
         }
         let p = payload_value(env);
-        match self.server.snapshots.restore(p.get("node").and_then(Value::as_str).unwrap_or_default(), p.get("strategy").and_then(Value::as_str).unwrap_or("inplace"), p.get("label").and_then(Value::as_str)).await { Ok(r) => self.reply(env, json!({"restoredTo":r.restored_to,"newBranch":r.new_branch,"newNode":r.new_node})).await, Err(e) => self.err(env, ErrCode::SnapshotInvalid, &e.to_string()).await }
+        let node = p.get("node").and_then(Value::as_str).unwrap_or_default();
+        // A base image is part of the filesystem contract: refuse to restore a
+        // snapshot recorded against a different base instead of silently mixing
+        // package trees.
+        if let (Ok(current), Ok(tree)) = (
+            std::env::var("MIXUM_BASE_DIGEST"),
+            self.server.snapshots.tree().await,
+        ) {
+            if let Some(required) = tree
+                .nodes
+                .iter()
+                .find(|item| item.id == node)
+                .and_then(|item| item.tags.get("baseDigest"))
+            {
+                if !current.is_empty() && required != &current {
+                    self.err(
+                        env,
+                        ErrCode::SnapshotInvalid,
+                        &format!(
+                            "快照属于 base {required}，当前 base 是 {current}；请先切回同一 base"
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+        match self.server.snapshots.restore(node, p.get("strategy").and_then(Value::as_str).unwrap_or("inplace"), p.get("label").and_then(Value::as_str)).await { Ok(r) => self.reply(env, json!({"restoredTo":r.restored_to,"newBranch":r.new_branch,"newNode":r.new_node})).await, Err(e) => self.err(env, ErrCode::SnapshotInvalid, &e.to_string()).await }
     }
     /// 导出节点为 `.mart`，文件落在 work_root/transfers，客户端用 file.get 下载。
     async fn snap_export(&mut self, env: &Envelope) {
@@ -1175,12 +1268,14 @@ impl Session {
         }
         let name = format!("mixum-{safe}.mart");
         let Some(path) = transfer_path(&self.server.config.work_root, &name) else {
-            self.err(env, ErrCode::Internal, "无法定位 transfers 目录").await;
+            self.err(env, ErrCode::Internal, "无法定位 transfers 目录")
+                .await;
             return;
         };
         if let Some(dir) = path.parent() {
             if let Err(error) = tokio::fs::create_dir_all(dir).await {
-                self.err(env, ErrCode::Internal, &format!("创建传输目录: {error}")).await;
+                self.err(env, ErrCode::Internal, &format!("创建传输目录: {error}"))
+                    .await;
                 return;
             }
         }
@@ -1212,10 +1307,7 @@ impl Session {
             self.err(env, ErrCode::NotFound, "迁移文件不存在").await;
             return;
         }
-        let origin = p
-            .get("origin")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let origin = p.get("origin").and_then(Value::as_str).unwrap_or("unknown");
         match self.server.snapshots.import_mart(&path, origin).await {
             Ok(node) => self.reply(env, json!({"node": node})).await,
             Err(error) => {
@@ -1421,10 +1513,7 @@ impl Session {
             .get("codec")
             .and_then(Value::as_str)
             .unwrap_or(crate::display::CODEC_JPEG);
-        let quality = payload
-            .get("quality")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
+        let quality = payload.get("quality").and_then(Value::as_u64).unwrap_or(0) as u32;
         match self
             .server
             .broker
@@ -1568,6 +1657,43 @@ impl Session {
             Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
         }
     }
+    async fn privilege_list(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::Admin).await {
+            return;
+        }
+        let pending = self.server.privilege.list().await;
+        self.reply(env, json!({"requests": pending})).await;
+    }
+
+    async fn privilege_decision(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::Admin).await {
+            return;
+        }
+        let p = payload_value(env);
+        let id = p.get("id").and_then(Value::as_str).unwrap_or_default();
+        if id.is_empty() {
+            self.err(env, ErrCode::BadRequest, "缺少 id").await;
+            return;
+        }
+        let decision = crate::privilege::Decision {
+            approve: p.get("approve").and_then(Value::as_bool).unwrap_or(false),
+            reason: p
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            scope: p
+                .get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or("once")
+                .to_owned(),
+        };
+        match self.server.privilege.decide(id, decision).await {
+            Ok(()) => self.reply(env, json!({"ok": true})).await,
+            Err(error) => self.err(env, ErrCode::Conflict, &error).await,
+        }
+    }
+
     async fn audio_attach(&mut self, env: &Envelope) {
         if !self.require(env, Cap::DisplayView).await {
             return;
@@ -1673,10 +1799,14 @@ impl Session {
             }
         };
         if request.size > 4 * 1024 * 1024 * 1024 {
-            self.err(env, ErrCode::BadRequest, "文件超过 4GiB 上限").await;
+            self.err(env, ErrCode::BadRequest, "文件超过 4GiB 上限")
+                .await;
             return;
         }
-        let Some(name) = Path::new(&request.name).file_name().and_then(|n| n.to_str()) else {
+        let Some(name) = Path::new(&request.name)
+            .file_name()
+            .and_then(|n| n.to_str())
+        else {
             self.err(env, ErrCode::BadRequest, "文件名无效").await;
             return;
         };
@@ -1687,7 +1817,8 @@ impl Session {
         }
         let dir = Path::new(&self.server.config.work_root).join("transfers");
         if let Err(error) = tokio::fs::create_dir_all(&dir).await {
-            self.err(env, ErrCode::Internal, &format!("创建传输目录: {error}")).await;
+            self.err(env, ErrCode::Internal, &format!("创建传输目录: {error}"))
+                .await;
             return;
         }
         let mut final_path = dir.join(&name);
@@ -1755,12 +1886,16 @@ impl Session {
         }
         if let Some(mut file) = upload.file.take() {
             if let Err(error) = file.flush().await {
-                self.err(env, ErrCode::Internal, &format!("flush 上传: {error}")).await;
+                self.err(env, ErrCode::Internal, &format!("flush 上传: {error}"))
+                    .await;
                 return;
             }
         }
         let digest = upload.sha256.clone().finalize();
-        let hex = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let hex = digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         if let Some(expected) = request.sha256.as_deref() {
             if !expected.eq_ignore_ascii_case(&hex) {
                 self.err(env, ErrCode::BadRequest, "sha256 不匹配").await;
@@ -1768,7 +1903,8 @@ impl Session {
             }
         }
         if let Err(error) = tokio::fs::rename(&upload.temp, &upload.final_path).await {
-            self.err(env, ErrCode::Internal, &format!("提交上传: {error}")).await;
+            self.err(env, ErrCode::Internal, &format!("提交上传: {error}"))
+                .await;
             return;
         }
         upload.committed = true;
@@ -1796,8 +1932,12 @@ impl Session {
         };
         if offset != upload.received || upload.received + data.len() as u64 > upload.size {
             self.file_uploads.remove(&transfer);
-            self.send_raw(error_envelope(None, ErrCode::BadRequest, "文件块偏移/大小错误"))
-                .await;
+            self.send_raw(error_envelope(
+                None,
+                ErrCode::BadRequest,
+                "文件块偏移/大小错误",
+            ))
+            .await;
             return;
         }
         let Some(file) = upload.file.as_mut() else {
@@ -1806,9 +1946,11 @@ impl Session {
         };
         if let Err(error) = file.write_all(data).await {
             self.file_uploads.remove(&transfer);
-            self.send_raw(
-                error_envelope(None, ErrCode::Internal, &format!("写上传: {error}")),
-            )
+            self.send_raw(error_envelope(
+                None,
+                ErrCode::Internal,
+                &format!("写上传: {error}"),
+            ))
             .await;
             return;
         }
@@ -1845,7 +1987,8 @@ impl Session {
             }
         };
         let Some(path) = self.safe_work_file(&request.path) else {
-            self.err(env, ErrCode::Forbidden, "路径不在 work_root 内").await;
+            self.err(env, ErrCode::Forbidden, "路径不在 work_root 内")
+                .await;
             return;
         };
         let Ok(metadata) = tokio::fs::metadata(&path).await else {
@@ -2040,7 +2183,10 @@ mod tests {
         {
             let mut records = store.records.lock().await;
             let old = Instant::now() - SESSION_TTL - Duration::from_secs(1);
-            records.get_mut(&connected).expect("connected session").last_seen = old;
+            records
+                .get_mut(&connected)
+                .expect("connected session")
+                .last_seen = old;
             records
                 .get_mut(&disconnected)
                 .expect("disconnected session")
@@ -2060,10 +2206,7 @@ mod tests {
     #[test]
     fn transfer_path_stays_inside_transfers() {
         let path = transfer_path("/var/lib/mixum/work", "../../etc/passwd").unwrap();
-        assert_eq!(
-            path,
-            PathBuf::from("/var/lib/mixum/work/transfers/passwd")
-        );
+        assert_eq!(path, PathBuf::from("/var/lib/mixum/work/transfers/passwd"));
         assert!(transfer_path("/var/lib/mixum/work", "").is_none());
     }
 }

@@ -76,6 +76,9 @@ pub struct SnapNode {
     pub arch: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gui_sessions: Vec<mixum_protocol::GuiSession>,
+    /// 扩展元数据：base/baseDigest/origin 等；旧客户端可忽略。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tags: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

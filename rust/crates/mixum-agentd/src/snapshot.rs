@@ -35,6 +35,14 @@ pub trait SnapshotEngine: Send + Sync {
         branch: Option<&str>,
         auto: bool,
     ) -> Result<SnapNode, SnapshotError>;
+    /// Merge extension metadata (base digest, provenance) into one node.
+    async fn annotate(
+        &self,
+        _node: &str,
+        _tags: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), SnapshotError> {
+        Ok(())
+    }
     async fn restore(
         &self,
         node: &str,
@@ -49,11 +57,15 @@ pub trait SnapshotEngine: Send + Sync {
 
     /// 导出节点为 `.mart`，返回文件大小。默认不支持。
     async fn export_mart(&self, _node: &str, _out: &Path) -> Result<u64, SnapshotError> {
-        Err(SnapshotError::Invalid("当前快照后端不支持 .mart 导出".into()))
+        Err(SnapshotError::Invalid(
+            "当前快照后端不支持 .mart 导出".into(),
+        ))
     }
     /// 从 `.mart` 导入节点，返回新节点 id。默认不支持。
     async fn import_mart(&self, _file: &Path, _origin: &str) -> Result<String, SnapshotError> {
-        Err(SnapshotError::Invalid("当前快照后端不支持 .mart 导入".into()))
+        Err(SnapshotError::Invalid(
+            "当前快照后端不支持 .mart 导入".into(),
+        ))
     }
 
     /// sys.info 的 snapshotBackend 字段(对齐 reference 的 BackendName)。
@@ -156,11 +168,26 @@ impl SnapshotEngine for MemorySnapshotEngine {
             kernel: None,
             arch: None,
             gui_sessions: Vec::new(),
+            tags: std::collections::BTreeMap::new(),
         };
         state.branch = branch;
         state.head = node.id.clone();
         state.nodes.insert(node.id.clone(), node.clone());
         Ok(node)
+    }
+
+    async fn annotate(
+        &self,
+        node: &str,
+        tags: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), SnapshotError> {
+        let mut state = self.inner.lock().await;
+        let entry = state
+            .nodes
+            .get_mut(node)
+            .ok_or_else(|| SnapshotError::NotFound(node.to_owned()))?;
+        entry.tags.extend(tags.clone());
+        Ok(())
     }
 
     async fn restore(
@@ -327,6 +354,7 @@ impl RealSnapshotEngine {
             kernel: (!node.kernel.is_empty()).then_some(node.kernel),
             arch: (!node.arch.is_empty()).then_some(node.arch),
             gui_sessions: node.gui_sessions,
+            tags: node.tags,
         }
     }
 
@@ -363,6 +391,19 @@ impl RealSnapshotEngine {
 #[cfg(feature = "real-snapshot")]
 #[async_trait]
 impl SnapshotEngine for RealSnapshotEngine {
+    async fn annotate(
+        &self,
+        node: &str,
+        tags: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), SnapshotError> {
+        let engine = self.engine.lock().expect("快照引擎锁");
+        engine
+            .tree
+            .set_tags(node, tags)
+            .map(|_| ())
+            .map_err(Self::map_tree_error)
+    }
+
     async fn create(
         &self,
         kind: &str,
@@ -526,6 +567,29 @@ fn compositor_pids() -> Vec<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn memory_engine_annotates_base_tags() {
+        let engine = MemorySnapshotEngine::new();
+        let node = engine
+            .create("disk", Some("tagged"), None, None, false)
+            .await
+            .unwrap();
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert("base".into(), "node22:v1".into());
+        tags.insert("baseDigest".into(), "sha256:abc".into());
+        engine.annotate(&node.id, &tags).await.unwrap();
+        let tree = engine.tree().await.unwrap();
+        let found = tree.nodes.iter().find(|item| item.id == node.id).unwrap();
+        assert_eq!(
+            found.tags.get("base").map(String::as_str),
+            Some("node22:v1")
+        );
+        assert_eq!(
+            found.tags.get("baseDigest").map(String::as_str),
+            Some("sha256:abc")
+        );
+    }
 
     #[tokio::test]
     async fn memory_engine_keeps_head_and_fork() {

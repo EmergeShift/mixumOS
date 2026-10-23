@@ -39,6 +39,12 @@ pub fn load_or_create_identity(
             use rand::RngCore;
             rand::thread_rng().fill_bytes(&mut seed);
             std::fs::write(&seed_path, seed)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&seed_path, std::fs::Permissions::from_mode(0o600));
+            }
             seed.to_vec()
         }
     };
@@ -49,6 +55,11 @@ pub fn load_or_create_identity(
         let cert = rcgen::generate_simple_self_signed(names)?;
         std::fs::write(&cert_path, cert.cert.pem())?;
         std::fs::write(&key_path, cert.key_pair.serialize_pem())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
     }
     ensure_crypto_provider();
     let cert_bytes = std::fs::read(&cert_path)?;
