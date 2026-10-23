@@ -15,8 +15,8 @@ linked below.
 
 ## Coverage (2026-10-24)
 
-- English default: 12 of 21 pages (`agent-bridge`, `agent-driver`, `apple-container`,
-  `architecture`, `backends`, `clipboard`, `console`, `host-integration`,
+- English default: 13 of 21 pages (`agent-bridge`, `agent-driver`, `apple-container`,
+  `architecture`, `backends`, `clipboard`, `console`, `distro`, `host-integration`,
   `macOS verification`, `migration`, `poc-criu-wayland`, `security`).
 - Architecture translation is still pending; the remaining pages are Chinese or
   mixed. The map below is the queue, not a claim that the work is done.
@@ -33,7 +33,7 @@ linked below.
 | [clipboard](docs/clipboard.md) | design | [English](docs/clipboard.md) | [中文](docs/clipboard.zh-CN.md) |
 | [console](docs/console.md) | current | [English](docs/console.md) | [中文](docs/console.zh-CN.md) |
 | [CRIU feasibility](docs/criu-feasibility.md) | research | pending | [中文](docs/criu-feasibility.md) |
-| [distro](docs/distro.md) | current | pending | [中文](docs/distro.md) |
+| [distro](docs/distro.md) | current | [English](docs/distro.md) | [中文](docs/distro.zh-CN.md) |
 | [gateway](docs/gateway.md) | design | pending | [中文](docs/gateway.md) |
 | [host-integration](docs/host-integration.md) | current | [English](docs/host-integration.md) | [中文](docs/host-integration.zh-CN.md) |
 | [macOS verification](docs/macos-verification.md) | current | [English](docs/macos-verification.md) | [中文](docs/macos-verification.zh-CN.md) |

@@ -282,7 +282,7 @@ mixumOS/
 | [后端形态](docs/backends.zh-CN.md) | Docker、WSL 2、nvx、Kubernetes |
 | [安全](docs/security.zh-CN.md) | 威胁模型与每一条防线 |
 | [迁移](docs/migration.zh-CN.md) | `.mart` 包与跨设备恢复 |
-| [发行版构建](docs/distro.md) | 包、仓库、镜像构建与踩坑 |
+| [发行版构建](docs/distro.zh-CN.md) | 包、仓库、镜像构建与踩坑 |
 | [控制台](console/README.md) | PWA 架构与本地开发 |
 | [0.1.5 发布说明](docs/release-notes-0.1.5.md) | 当前版本改了什么 |
 | [路线图](docs/roadmap.md) | 阶段与完成标准 |
