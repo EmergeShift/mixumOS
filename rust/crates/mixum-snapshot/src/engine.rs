@@ -296,8 +296,14 @@ impl Engine {
             }
             Ok(())
         };
-        if let Some(freeze) = self.freeze.as_mut() {
-            freeze(&mut action)?;
+        // Memory-only restore has nothing to clear on disk; pre-freezing the
+        // cgroup makes CRIU block when it moves the restored task back in.
+        if node.disk.is_some() {
+            if let Some(freeze) = self.freeze.as_mut() {
+                freeze(&mut action)?;
+            } else {
+                action()?;
+            }
         } else {
             action()?;
         }
