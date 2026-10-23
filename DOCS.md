@@ -13,6 +13,13 @@ linked below.
 - **research / PoC** — experiment notes, not a product promise.
 - **plan / historical** — roadmap or release notes, not current behavior.
 
+## Coverage (2026-10-24)
+
+- English default: 7 of 21 pages (`agent-bridge`, `agent-driver`, `backends`,
+  `clipboard`, `console`, `macOS verification`, `security`).
+- Architecture translation is still pending; the remaining pages are Chinese or
+  mixed. The map below is the queue, not a claim that the work is done.
+
 ## Pages
 
 | Page | Status | English | 中文 |
