@@ -15,9 +15,9 @@ linked below.
 
 ## Coverage (2026-10-24)
 
-- English default: 11 of 21 pages (`agent-bridge`, `agent-driver`, `architecture`,
-  `backends`, `clipboard`, `console`, `host-integration`, `macOS verification`,
-  `migration`, `poc-criu-wayland`, `security`).
+- English default: 12 of 21 pages (`agent-bridge`, `agent-driver`, `apple-container`,
+  `architecture`, `backends`, `clipboard`, `console`, `host-integration`,
+  `macOS verification`, `migration`, `poc-criu-wayland`, `security`).
 - Architecture translation is still pending; the remaining pages are Chinese or
   mixed. The map below is the queue, not a claim that the work is done.
 
@@ -27,7 +27,7 @@ linked below.
 |---|---|---|---|
 | [agent-bridge](docs/agent-bridge.md) | current | [English](docs/agent-bridge.md) | [中文](docs/agent-bridge.zh-CN.md) |
 | [agent-driver](docs/agent-driver.md) | current | [English](docs/agent-driver.md) | [中文](docs/agent-driver.zh-CN.md) |
-| [apple-container](docs/apple-container.md) | current | pending | [中文](docs/apple-container.md) |
+| [apple-container](docs/apple-container.md) | current | [English](docs/apple-container.md) | [中文](docs/apple-container.zh-CN.md) |
 | [architecture](docs/architecture.md) | current | [English](docs/architecture.md) | [中文](docs/architecture.zh-CN.md) |
 | [backends](docs/backends.md) | partial | [English](docs/backends.md) | [中文](docs/backends.zh-CN.md) |
 | [clipboard](docs/clipboard.md) | design | [English](docs/clipboard.md) | [中文](docs/clipboard.zh-CN.md) |

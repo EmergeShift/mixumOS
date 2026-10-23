@@ -66,7 +66,7 @@ container system start
 
 - 临时容器共享内核、镜像 blob 与 APFS clonefile 块。完整节点（agentd + mixcomp）实测常驻 **≈38 MiB** 内存；同镜像再起一个容器，物理磁盘净增 **0 MB**。
 - M1 上热启动实测 **≈1.0 s**。
-- 自研 guest 内核 [`linux-mixum-micro`](kernel/README.md)（kata 6.18.35 基底）开启 CRIU、Landlock、FUSE、vsock/9p，并带 `-mixum-micro` 指纹。阅读 [内核说明](docs/apple-container.md) 后，用 `kernel/scripts/install-apple-container.sh` 安装——它是**宿主级全局设置**，会影响机器上每一个 Apple Container。
+- 自研 guest 内核 [`linux-mixum-micro`](kernel/README.md)（kata 6.18.35 基底）开启 CRIU、Landlock、FUSE、vsock/9p，并带 `-mixum-micro` 指纹。阅读 [内核说明](docs/apple-container.zh-CN.md) 后，用 `kernel/scripts/install-apple-container.sh` 安装——它是**宿主级全局设置**，会影响机器上每一个 Apple Container。
 
 #### 切换 guest 内核，以及切回去
 
@@ -95,7 +95,7 @@ container system kernel set --binary /tmp/vmlinux-original
 | **同机进程级回退（CRIU restore）** | ❌ | ✅（需容器内安装 `criu`） |
 | Landlock / FUSE / cgroup freezer / diag socket | 取决于原内核配置 | ✅ |
 
-切回原内核**不会**丢失磁盘快照、`.mart` 迁移或窗口流；丢的是基于 CRIU 的 memory/hybrid 能力，切回 `linux-mixum-micro` 后恢复。细节与实测见 [docs/apple-container.md](docs/apple-container.md)。
+切回原内核**不会**丢失磁盘快照、`.mart` 迁移或窗口流；丢的是基于 CRIU 的 memory/hybrid 能力，切回 `linux-mixum-micro` 后恢复。细节与实测见 [docs/apple-container.zh-CN.md](docs/apple-container.zh-CN.md)。
 
 Linux 上同一个节点可以跑在 Docker，或直接跑在 Arch 上；Windows 上发行版 rootfs 可直接导入 WSL 2。完整矩阵见 [backends](docs/backends.zh-CN.md)。
 
@@ -251,7 +251,7 @@ main:  genesis ── n1 ── n2 ── n3
 
 - v0.1.5 只发布 **aarch64** 镜像；x86_64 构建通路已验证，但不在本次发布资产中。
 - 在 CRIU 打包问题解决前，memory/hybrid 快照还不是开箱即用。磁盘快照、迁移和 GUI 重放不依赖 CRIU。
-- Apple Container 的内核是**宿主级**设置，切换会影响机器上所有容器；[Apple Container 指南](docs/apple-container.md)写明了如何切回以及会失去什么。
+- Apple Container 的内核是**宿主级**设置，切换会影响机器上所有容器；[Apple Container 指南](docs/apple-container.zh-CN.md)写明了如何切回以及会失去什么。
 - 项目明确不追求“单一静态二进制”的 unikernel 叙事；这是一个发行版，依赖与安全更新交给 pacman。
 
 分阶段计划见 [docs/roadmap.md](docs/roadmap.md)。
@@ -277,7 +277,7 @@ mixumOS/
 | [架构](docs/architecture.zh-CN.md) | 有哪些部件，为什么这样拆 |
 | [协议 v1](docs/protocol.md) | Envelope、ops、令牌、二进制帧 |
 | [快照](docs/snapshots.md) | CAS、树语义、CRIU、基准 |
-| [Apple Container](docs/apple-container.md) | 内核安装、实测数字、如何切回 |
+| [Apple Container](docs/apple-container.zh-CN.md) | 内核安装、实测数字、如何切回 |
 | [主机集成](docs/host-integration.zh-CN.md) | `mixum-ctl`、电力钩子、本地查看器、音频/输入法 |
 | [后端形态](docs/backends.zh-CN.md) | Docker、WSL 2、nvx、Kubernetes |
 | [安全](docs/security.zh-CN.md) | 威胁模型与每一条防线 |
