@@ -36,7 +36,12 @@ const RATE_GLOBAL: usize = 20;
 /// 审批后固定使用的 PATH；程序解析只在这几个 root 目录里做。
 const TRUSTED_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 /// 本 broker 不提供 root shell，也不允许借 wrapper 间接起 shell。
-const FORBIDDEN_PROGRAMS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "fish", "busybox", "env"];
+const FORBIDDEN_PROGRAMS: &[&str] = &[
+    "sh", "bash", "dash", "ash", "zsh", "ksh", "fish", "busybox", "env", "su", "runuser",
+    "setpriv", "chroot", "nsenter", "unshare", "xargs", "find", "awk", "gawk", "mawk",
+    "perl", "python", "python3", "ruby", "node", "nodejs", "php", "lua", "tclsh", "sudo",
+    "doas", "pkexec",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +112,8 @@ struct ExecPlan {
     sha256: String,
     args: Vec<String>,
     cwd: PathBuf,
+    cwd_dev: u64,
+    cwd_ino: u64,
 }
 
 pub struct PrivilegeBroker {
@@ -278,6 +285,14 @@ impl PrivilegeBroker {
     }
 
     async fn execute(&self, plan: &ExecPlan) -> Result<Outcome, String> {
+        // 审批等待期间 cwd 可能被 rename/替换成 symlink;按 dev/inode 重新确认。
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::metadata(&plan.cwd).map_err(|error| format!("cwd 不可用: {error}"))?;
+            if meta.dev() != plan.cwd_dev || meta.ino() != plan.cwd_ino || !meta.is_dir() {
+                return Err("cwd 在审批期间被替换，拒绝执行".into());
+            }
+        }
         // 审批哈希与 exec 之间仍有路径替换窗口:把已校验字节复制到
         // root-only 目录并执行副本,确保“执行对象”就是哈希覆盖的字节。
         let pin_dir = self
@@ -556,12 +571,19 @@ fn prepare_execution(program: &str, args: &[String], cwd: &str) -> Result<ExecPl
     if !cwd.is_dir() {
         return Err("cwd 不是目录".into());
     }
+    let (cwd_dev, cwd_ino) = {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(&cwd).map_err(|error| format!("cwd 元数据: {error}"))?;
+        (meta.dev(), meta.ino())
+    };
     Ok(ExecPlan {
         program: program.to_owned(),
         resolved,
         sha256,
         args: args.to_vec(),
         cwd,
+        cwd_dev,
+        cwd_ino,
     })
 }
 
@@ -685,7 +707,17 @@ mod tests {
         assert!(plan.resolved.is_absolute());
         assert_eq!(plan.program, "id");
         assert_eq!(plan.sha256.len(), 64);
-        assert_eq!(plan.cwd, PathBuf::from("/tmp"));
+        assert_eq!(plan.cwd, fs::canonicalize("/tmp").unwrap());
+    }
+
+    #[test]
+    fn rejects_shell_bypass_entrypoints() {
+        for program in ["su", "runuser", "setpriv", "chroot", "nsenter", "unshare", "ash", "/bin/ash", "xargs", "find", "awk", "/bin/sh"] {
+            assert!(
+                prepare_execution(program, &[], "/tmp").is_err(),
+                "{program} 不应被批准"
+            );
+        }
     }
 
     #[test]
