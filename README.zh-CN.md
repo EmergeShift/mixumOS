@@ -284,7 +284,7 @@ mixumOS/
 | [迁移](docs/migration.zh-CN.md) | `.mart` 包与跨设备恢复 |
 | [发行版构建](docs/distro.zh-CN.md) | 包、仓库、镜像构建与踩坑 |
 | [控制台](console/README.md) | PWA 架构与本地开发 |
-| [0.1.5 发布说明](docs/release-notes-0.1.5.md) | 当前版本改了什么 |
+| [0.1.5 发布说明](docs/release-notes-0.1.5.zh-CN.md) | 当前版本改了什么 |
 | [路线图](docs/roadmap.zh-CN.md) | 阶段与完成标准 |
 
 设计文档目前以中文为主；英文入口是这份 README 与 MAP 规范。欢迎帮忙翻译，不需要改代码。
