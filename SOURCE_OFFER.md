@@ -8,7 +8,8 @@ require corresponding source when binaries are distributed.
 
 `linux-mixum-micro` and `linux-mixum` are built from the kata-containers
 6.18.35 Linux tree plus the configuration fragments in `kernel/configs/` and any
-patches in `kernel/patches/` (currently none). The kernel source is GPL-2.0.
+patches in `kernel/patches/` (currently none). The kernel source and the
+contents of `kernel/` are GPL-2.0 (see `kernel/NOTICE`).
 
 Corresponding source is available:
 
