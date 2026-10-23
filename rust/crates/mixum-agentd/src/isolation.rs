@@ -447,7 +447,7 @@ mod tests {
             &mut cmd,
             None,
             Some(workspace.path().to_path_buf()),
-            None,
+            Some(&home),
             None,
         );
         let status = cmd.status().expect("spawn sh");
