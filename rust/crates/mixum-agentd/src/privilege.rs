@@ -279,6 +279,10 @@ impl PrivilegeBroker {
 
     async fn execute(&self, plan: &ExecPlan) -> Result<Outcome, String> {
         let mut cmd = tokio::process::Command::new(&plan.resolved);
+        // 固化路径会解开符号链接（Alpine 的 /usr/bin/id -> /bin/busybox）；
+        // 保留原始 argv[0] 才能让 busybox applet 按审批时的名字分发。
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().arg0(&plan.program);
         cmd.args(&plan.args)
             .current_dir(&plan.cwd)
             .env_clear()
