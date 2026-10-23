@@ -97,13 +97,16 @@ if [ "$IS_ALARM" = "1" ] && pacman -Si base | grep -qE '^Depends.*(linux-|linux 
 	echo "==> [container] ALARM base 含内核依赖,改用显式核心清单"
 	PKGS=(filesystem bash coreutils glibc pacman systemd ca-certificates
 		tar gzip sed grep gawk findutils util-linux procps-ng file tzdata
-		mixum-base foot ttf-dejavu)
+		mixum-base foot ttf-dejavu noto-fonts-cjk noto-fonts noto-fonts-emoji)
 else
-	PKGS=(base mixum-base foot ttf-dejavu)
+	PKGS=(base mixum-base foot ttf-dejavu noto-fonts-cjk noto-fonts noto-fonts-emoji)
 fi
 
 echo "==> [container] pacstrap $ARCH:base 组件 + mixum-base + foot"
 pacstrap "$TARGET" "${PKGS[@]}"
+
+# ---- CJK 字体偏好：中文走 Noto Sans/Serif CJK SC，日文走 JP ----
+install -Dm644 /build/mixumos/dist/os/fontconfig-cjk.conf "$TARGET/etc/fonts/local.conf"
 
 # CRIU must be built inside the target rootfs: compel/parasite is sensitive to
 # the build host glibc, and the rolling Arch builder produces a binary that

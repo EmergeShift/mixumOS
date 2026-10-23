@@ -31,7 +31,7 @@ wsl -d "$NAME" -u root -- sh -c \
 	 systemctl enable --now mixumd 2>&1; sleep 2; systemctl is-active mixumd'
 echo "==> (可选)窗口流:安装测试应用与字体,并启用 mixcomp"
 wsl -d "$NAME" -u root -- sh -c \
-	'pacman -Sy --noconfirm --needed foot ttf-dejavu >/dev/null 2>&1 || echo "foot 安装失败(不影响 mixumd)"
+	'pacman -Sy --noconfirm --needed foot ttf-dejavu noto-fonts-cjk noto-fonts noto-fonts-emoji >/dev/null 2>&1 || echo "foot 安装失败(不影响 mixumd)"
 	 systemctl enable --now mixcomp 2>&1 >/dev/null' || true
 
 TOKEN="$(wsl -d "$NAME" -u root -- cat /var/lib/mixum/admin-token 2>/dev/null | tr -d '\r\n')"

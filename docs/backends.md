@@ -32,8 +32,9 @@ WSL 内核(跨内核恢复闸生效)。WSL 形态里 pacman/Arch 官方源可用
 - 窗口流:mixcomp 服务化已随包安装(mixcomp.service,0.1.0-3 起),
   GUI 应用以 mixum 用户连 `WAYLAND_DISPLAY=wayland-0`
   (XDG_RUNTIME_DIR=/run/mixum);**注意 GUI 应用需要字体**
-  (pacman -S ttf-dejavu),缺字体会导致客户端应用启动即退
-  (foot 实测)。**已知限制**:foot 在无 WSLg 的 headless 环境
+  (pacman -S ttf-dejavu noto-fonts-cjk noto-fonts noto-fonts-emoji),
+  缺字体会导致客户端应用启动即退(foot 实测)，缺 CJK 字体时中文/日文
+  会显示成方框。**已知限制**:foot 在无 WSLg 的 headless 环境
   偶发 abort(230),窗口流端到端验证受阻——mixumd/mixcomp 侧
   注册与协商链路正常,待 foot-on-WSL 稳定性跟进或换最小
   Wayland 客户端复验;
