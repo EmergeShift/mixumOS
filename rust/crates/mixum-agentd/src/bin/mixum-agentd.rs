@@ -174,6 +174,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let kill_sandbox = Arc::clone(&sandbox);
         engine.restore_prepare = Some(Box::new(move || {
             kill_sandbox.kill_all();
+            // A previous failed restore may have left the cgroup frozen; CRIU
+            // cannot move a restored task into a frozen cgroup.
+            kill_sandbox.freeze_all(false);
             Ok(())
         }));
         let mut adapter = mixum_agentd::snapshot::RealSnapshotEngine::from_engine(engine);

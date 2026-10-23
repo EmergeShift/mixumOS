@@ -94,6 +94,13 @@ impl CgroupFreezer {
 
 impl Drop for CgroupInner {
     fn drop(&mut self) {
+        // CRIU restore moves the restored task back into the cgroup path
+        // recorded at dump time. Memory-snapshot environments must keep the
+        // (now empty) cgroup directory until a later GC; otherwise restore
+        // blocks forever on the missing unified cgroup.
+        if std::env::var("MIXUM_MEMORY_SNAPSHOTS").ok().as_deref() == Some("1") {
+            return;
+        }
         // 所有句柄都释放后才走到这里；cgroup 仍非空时 remove_dir 失败，留给内核/下次启动。
         let _ = fs::remove_dir(&self.dir);
     }
