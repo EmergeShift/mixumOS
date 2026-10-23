@@ -101,7 +101,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
     // 系统级隔离：cgroup freezer 可用时优先，Landlock 限制文件系统写入。
-    let task_identity = task_identity_from_env();
+    let task_identity = match task_identity_from_env() {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("拒绝启动: {error}（用 MIXUM_TASK_USER 显式指定任务身份）");
+            std::process::exit(1);
+        }
+    };
     let task_uid = task_identity.uid;
     let task_gid = task_identity.gid;
     eprintln!(

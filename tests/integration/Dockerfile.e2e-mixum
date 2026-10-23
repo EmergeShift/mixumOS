@@ -2,6 +2,8 @@
 # mixum-agentd(real-snapshot) + redesign-cli(--agent-bridge) + mixcomp。
 # 基于 Dockerfile.e2e-rust；额外注入 redesign external agent。
 FROM alpine:3.21
+# 测试镜像没有 mixum 用户，显式以 root 跑任务；不再依赖隐式回退。
+ENV MIXUM_TASK_USER=root
 
 RUN apk add --no-cache \
 	make build-base pkgconf wlroots-dev json-c-dev libxkbcommon-dev \

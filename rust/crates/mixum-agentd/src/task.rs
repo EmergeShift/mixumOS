@@ -36,26 +36,26 @@ pub struct TaskIdentity {
 }
 
 impl TaskIdentity {
-    /// 解析用户名；root 直接返回 0/0。找不到用户时返回当前进程身份，
-    /// 避免在开发机（没有 mixum 用户）上把测试跑挂。
-    pub fn resolve(name: &str) -> Self {
+    /// 解析用户名；root 直接返回 0/0。用户不存在返回 None，调用方必须
+    /// 拒绝启动——不能悄悄回退到 agentd 自身身份（root 下会变成 root 任务）。
+    pub fn resolve(name: &str) -> Option<Self> {
         if name == "root" {
-            return Self {
+            return Some(Self {
                 name: "root".into(),
                 uid: 0,
                 gid: 0,
                 home: PathBuf::from("/root"),
-            };
+            });
         }
-        if let Ok(Some(user)) = nix::unistd::User::from_name(name) {
-            return Self {
+        nix::unistd::User::from_name(name)
+            .ok()
+            .flatten()
+            .map(|user| Self {
                 name: user.name,
                 uid: user.uid.as_raw(),
                 gid: user.gid.as_raw(),
                 home: user.dir,
-            };
-        }
-        Self::current()
+            })
     }
 
     pub fn current() -> Self {
@@ -84,9 +84,11 @@ impl TaskIdentity {
 }
 
 /// 任务默认以 mixum 运行；root 容器的 entrypoint 显式设置 MIXUM_TASK_USER=root。
-pub fn task_identity_from_env() -> TaskIdentity {
+/// 用户解析失败时返回错误，由启动流程拒绝运行。
+pub fn task_identity_from_env() -> Result<TaskIdentity, String> {
     let name = std::env::var("MIXUM_TASK_USER").unwrap_or_else(|_| "mixum".into());
-    TaskIdentity::resolve(name.trim())
+    let name = name.trim();
+    TaskIdentity::resolve(name).ok_or_else(|| format!("任务用户不存在: {name}"))
 }
 
 /// 子进程 HOME/USER/LOGNAME 必须指向任务身份，而不是 agentd 的 root 环境。
