@@ -1,10 +1,14 @@
 # mixumOS
 
+[![ci](https://github.com/EmergeShift/mixumOS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/EmergeShift/mixumOS/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Agent OS 发行版:给 AI agent 一个可回退、可分叉、可迁移的操作系统。**
 
 基于 Arch Linux:容器即 agent 运行环境,操作可回退、可分叉、可在设备间
 迁移;agent 操作的 GUI 以独立原生窗口流到手机或电脑,不抢宿主的鼠标键盘。
 
+- 贡献指南:[CONTRIBUTING.md](CONTRIBUTING.md) · 安全策略:[SECURITY.md](SECURITY.md) · 行为准则:[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - 设计文档入口:[docs/architecture.md](docs/architecture.md)
 - 路线图:[docs/roadmap.md](docs/roadmap.md)(ddl 以月计,文档先行)
 - 协议规范:[docs/protocol.md](docs/protocol.md)
