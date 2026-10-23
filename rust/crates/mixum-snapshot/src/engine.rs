@@ -182,45 +182,45 @@ impl Engine {
         if kind == KIND_MEMORY && (self.criu.is_none() || dump_roots.is_empty()) {
             return Err(CriuError::Unavailable.into());
         }
-        let mut action = || {
+        // Disk packing needs the host freeze hook for a consistent tree.
+        // CRIU must run after thawing: it freezes the task tree itself, and a
+        // pre-frozen cgroup/task makes parasite injection hang.
+        let mut disk_action = || {
             if do_disk {
                 let (m, stats) = Manifest::pack_directory(&self.root, &self.store, &self.skip)?;
                 node.size_bytes += stats.bytes_logical;
                 node.chunks += m.chunks().len();
                 node.disk = Some(m);
             }
-            if do_mem && self.criu.is_some() && !dump_roots.is_empty() {
-                let dir = std::env::temp_dir().join(format!(
-                    "mixum-criu-{}-{}",
-                    std::process::id(),
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_default()
-                ));
-                self.criu
-                    .as_ref()
-                    .ok_or(CriuError::Unavailable)?
-                    .dump_roots(&dump_roots, &dir, false)?;
-                let (m, stats) = Manifest::pack_directory(&dir, &self.store, &[])?;
-                node.size_bytes += stats.bytes_logical;
-                node.chunks += m.chunks().len();
-                node.memory = Some(m);
-                let _ = fs::remove_dir_all(dir);
-            }
             Ok(())
         };
-        // CRIU freezes the dumped process tree itself. Pre-freezing it with
-        // SIGSTOP makes the parasite injection hang on the mixum kernel;
-        // only disk (and hybrid) packing needs the host freeze hook.
         if do_disk {
             if let Some(freeze) = self.freeze.as_mut() {
-                freeze(&mut action)?;
+                freeze(&mut disk_action)?;
             } else {
-                action()?;
+                disk_action()?;
             }
         } else {
-            action()?;
+            disk_action()?;
+        }
+        if do_mem && self.criu.is_some() && !dump_roots.is_empty() {
+            let dir = std::env::temp_dir().join(format!(
+                "mixum-criu-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            self.criu
+                .as_ref()
+                .ok_or(CriuError::Unavailable)?
+                .dump_roots(&dump_roots, &dir, false)?;
+            let (m, stats) = Manifest::pack_directory(&dir, &self.store, &[])?;
+            node.size_bytes += stats.bytes_logical;
+            node.chunks += m.chunks().len();
+            node.memory = Some(m);
+            let _ = fs::remove_dir_all(dir);
         }
         if let Some(m) = &node.disk {
             for h in m.chunks() {
@@ -268,44 +268,42 @@ impl Engine {
         // 若有进程仍在读写就是数据竞争。freeze 回调由宿主注入
         // （agentd 里是 Sandbox::freeze_all → SIGSTOP/SIGCONT）。
         let memory = node.memory.clone();
-        let criu = self.criu.as_ref();
+        let criu = self.criu.clone();
         let manifest = node.disk.clone();
         let root = &self.root;
         let store = &self.store;
         let skip = &self.skip;
-        let mut action = || -> Result<(), EngineError> {
+        let mut disk_action = || -> Result<(), EngineError> {
             if let Some(manifest) = &manifest {
                 clear_root(root, skip)?;
                 manifest.materialize(store, root)?;
             }
-            if let Some(memory) = &memory {
-                let dir = std::env::temp_dir().join(format!(
-                    "mixum-restore-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_default()
-                ));
-                fs::create_dir_all(&dir)?;
-                memory.materialize(store, &dir)?;
-                let result = criu
-                    .ok_or(EngineError::Criu(CriuError::Unavailable))?
-                    .restore(&dir);
-                let _ = fs::remove_dir_all(&dir);
-                result?;
-            }
             Ok(())
         };
-        // Memory-only restore has nothing to clear on disk; pre-freezing the
-        // cgroup makes CRIU block when it moves the restored task back in.
-        if node.disk.is_some() {
+        if manifest.is_some() {
             if let Some(freeze) = self.freeze.as_mut() {
-                freeze(&mut action)?;
+                freeze(&mut disk_action)?;
             } else {
-                action()?;
+                disk_action()?;
             }
         } else {
-            action()?;
+            disk_action()?;
+        }
+        if let Some(memory) = &memory {
+            let dir = std::env::temp_dir().join(format!(
+                "mixum-restore-{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            fs::create_dir_all(&dir)?;
+            memory.materialize(store, &dir)?;
+            let result = criu
+                .ok_or(EngineError::Criu(CriuError::Unavailable))?
+                .restore(&dir);
+            let _ = fs::remove_dir_all(&dir);
+            result?;
         }
         if strategy == "fork" {
             let default_label = format!("{}-fork", node.branch);
