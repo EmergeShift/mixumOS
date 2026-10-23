@@ -26,7 +26,7 @@ export REDESIGN_MODELS_PATH="${REDESIGN_MODELS_PATH:-/etc/redesign/models.json}"
 export REDESIGN_MODEL="${REDESIGN_MODEL:-gpt-6-astra}"
 
 # 1. mixumd（读 agents 配置；后台；证书自签、管理令牌落盘）
-mixumd --config /etc/mixum/mixumd.json &
+mixumd --config /etc/mixum/mixumd.json --enable-privilege &
 MIXUMD_PID=$!
 
 for i in $(seq 1 50); do

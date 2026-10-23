@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut gateway_name = String::new();
     let mut gateway_token = String::new();
     let mut gateway_fingerprint = String::new();
+    let mut enable_privilege = std::env::var("MIXUM_ENABLE_PRIVILEGE").is_ok_and(|value| value == "1");
     while let Some(arg) = args.next() {
         if let Some(value) = arg.strip_prefix("--config=") {
             config_path = value.to_owned();
@@ -57,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if let Some(value) = args.next() {
                 gateway_token = value;
             }
+        } else if arg == "--enable-privilege" {
+            enable_privilege = true;
         }
     }
     // 空文件与缺失同义:使用默认配置(沿用 Go 参考实现 mixumd 的 /dev/null 用法)。
@@ -226,15 +229,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         assembled.sync = sync_backend;
     }
 
-    let privilege = server.privilege();
-    tokio::spawn(async move {
-        if let Err(error) = privilege
-            .serve_socket("/run/mixum/sudo.sock", task_uid, task_gid)
-            .await
-        {
-            eprintln!("sudo socket 启动失败: {error}");
-        }
-    });
+    if enable_privilege {
+        let privilege = server.privilege();
+        tokio::spawn(async move {
+            if let Err(error) = privilege
+                .serve_socket("/run/mixum/sudo.sock", task_uid, task_gid)
+                .await
+            {
+                eprintln!("sudo socket 启动失败: {error}");
+            }
+        });
+    } else {
+        eprintln!(
+            "privilege broker 未启用(公开版本默认关闭;需要时显式 --enable-privilege 或 MIXUM_ENABLE_PRIVILEGE=1)"
+        );
+    }
     let token_path = std::path::Path::new(&config.data_dir).join("admin-token");
     let token = match std::fs::read_to_string(&token_path) {
         Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),

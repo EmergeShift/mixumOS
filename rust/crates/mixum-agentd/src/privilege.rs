@@ -278,7 +278,36 @@ impl PrivilegeBroker {
     }
 
     async fn execute(&self, plan: &ExecPlan) -> Result<Outcome, String> {
-        let mut cmd = tokio::process::Command::new(&plan.resolved);
+        // 审批哈希与 exec 之间仍有路径替换窗口:把已校验字节复制到
+        // root-only 目录并执行副本,确保“执行对象”就是哈希覆盖的字节。
+        let pin_dir = self
+            .audit_path
+            .parent()
+            .ok_or("audit 路径无父目录")?
+            .join("privilege-pins");
+        fs::create_dir_all(&pin_dir).map_err(|error| format!("创建 privilege pin 目录: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{chown, PermissionsExt};
+            fs::set_permissions(&pin_dir, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("设置 privilege pin 目录权限: {error}"))?;
+            chown(&pin_dir, Some(0), Some(0))
+                .map_err(|error| format!("privilege pin 目录 chown: {error}"))?;
+        }
+        let pinned = pin_dir.join(format!("{}.bin", new_id()));
+        fs::copy(&plan.resolved, &pinned).map_err(|error| format!("复制可执行文件: {error}"))?;
+        let pinned_hash = hash_file(&pinned)?;
+        if pinned_hash != plan.sha256 {
+            let _ = fs::remove_file(&pinned);
+            return Err("可执行文件在审批后被修改（哈希不一致）".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&pinned, fs::Permissions::from_mode(0o500))
+                .map_err(|error| format!("设置 privilege pin 文件权限: {error}"))?;
+        }
+        let mut cmd = tokio::process::Command::new(&pinned);
         // 固化路径会解开符号链接（Alpine 的 /usr/bin/id -> /bin/busybox）；
         // 保留原始 argv[0] 才能让 busybox applet 按审批时的名字分发。
         use std::os::unix::process::CommandExt;
@@ -296,9 +325,15 @@ impl PrivilegeBroker {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         set_process_group(&mut cmd);
-        let mut child = cmd
-            .spawn()
-            .map_err(|error| format!("启动 root 命令: {error}"))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_file(&pinned);
+                return Err(format!("启动 root 命令: {error}"));
+            }
+        };
+        // 子进程已 exec,立即解除目录项;即使后续路径被替换也不会影响本次执行。
+        let _ = fs::remove_file(&pinned);
         // process_group(0) 让 pid 同时是进程组 id；超时要连同子孙一起杀。
         let pgid = child.id();
         let mut stdout = child.stdout.take().ok_or("缺少 stdout 管道")?;
@@ -383,14 +418,28 @@ impl PrivilegeBroker {
         allowed_uid: u32,
         allowed_gid: u32,
     ) -> std::io::Result<()> {
+        let socket_path = std::path::Path::new(path);
+        if let Some(parent) = socket_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{chown, PermissionsExt};
+                // 目录必须 root 所有、组可执行但不可写;否则 mixum 用户可替换 socket。
+                tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750)).await?;
+                chown(parent, Some(0), Some(allowed_gid)).map_err(|error| {
+                    std::io::Error::other(format!("sudo socket 目录 chown 失败: {error}"))
+                })?;
+            }
+        }
         let _ = tokio::fs::remove_file(path).await;
         let listener = UnixListener::bind(path)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660)).await;
-            use std::os::unix::fs::chown;
-            let _ = chown(std::path::Path::new(path), None, Some(allowed_gid));
+            use std::os::unix::fs::{chown, PermissionsExt};
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660)).await?;
+            chown(socket_path, None, Some(allowed_gid)).map_err(|error| {
+                std::io::Error::other(format!("sudo socket chown 失败: {error}"))
+            })?;
         }
         loop {
             let (stream, _) = listener.accept().await?;

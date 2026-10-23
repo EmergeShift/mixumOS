@@ -81,6 +81,22 @@
   Landlock 时退回容器边界（非特权 + 独立工作区卷）。高危命令的语义
   拦截在 MixumART 侧做，OS 层只负责兜底回滚与资源边界。
 
+## 5.1 sudo / privilege broker(默认关闭)
+
+- **默认不启动**:只有显式 `--enable-privilege` 或
+  `MIXUM_ENABLE_PRIVILEGE=1` 才创建 `/run/mixum/sudo.sock`;公开版本/
+  默认配置不暴露提权入口;
+- 仅建议在**单租户、可信节点**上开启;它不能消除容器内提权风险,
+  也不等价于通用 sudo;
+- 残余风险(已知,未收口):
+  - 禁止的 shell/wrapper 列表不可能穷尽(解释器、`xargs`、`find -exec`、
+    `make`/`git` hooks 等仍可能间接执行任意代码);
+  - `sha256` 记录与“实际执行对象”之间仍有路径替换的 TOCTOU 窗口,
+    哈希记录不等于执行锁定;
+  - socket 目录/组权限依赖部署方;错误权限会让同组用户可替换 socket;
+- 因此公开版本默认关闭,待 shell 绕过面、fd 级执行锁定与 socket 目录
+  权限全部收口后再评估默认开启。
+
 ## 6. 演进位(阶段标记)
 
 - [阶段 4] 令牌吊销列表(jti → 嵌入式 KV(与快照树同用 sled)或 redis);
