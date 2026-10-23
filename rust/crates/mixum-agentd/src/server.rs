@@ -1595,14 +1595,7 @@ impl Session {
                     event = clipboard.recv() => match event {
                         Ok(value) => {
                             // 剪贴板比画面敏感:在 display.view 之外再按窗口 ACL 过滤。
-                            let window = value
-                                .get("window")
-                                .and_then(Value::as_u64)
-                                .unwrap_or_default() as u32;
-                            let allowed = claims.as_ref().is_some_and(|claims| {
-                                mixum_protocol::token::window_allowed(claims, window)
-                            });
-                            if !allowed {
+                            if !clipboard_event_allowed(claims.as_ref(), &value) {
                                 continue;
                             }
                             (ops::op::DISPLAY_CLIPBOARD_CHANGED, value)
@@ -2155,6 +2148,18 @@ async fn sha256_file(path: &Path) -> std::io::Result<String> {
 fn payload_value(env: &Envelope) -> Value {
     env.payload.clone().unwrap_or_else(|| json!({}))
 }
+
+/// 剪贴板事件只发给令牌窗口 ACL 覆盖该窗口的会话。
+fn clipboard_event_allowed(claims: Option<&Claims>, value: &Value) -> bool {
+    let window = value.get("window").and_then(Value::as_u64);
+    window.is_some_and(|window| {
+        u32::try_from(window).is_ok_and(|window| {
+            claims.is_some_and(|claims| {
+                mixum_protocol::token::window_allowed(claims, window)
+            })
+        })
+    })
+}
 /// 可选字符串数组字段(mem.search 的 kinds/providers)。
 fn string_list(value: Option<&Value>) -> Option<Vec<String>> {
     value.and_then(Value::as_array).map(|items| {
@@ -2245,6 +2250,37 @@ mod tests {
     }
 
     /// 断开的会话按 TTL 过期;仍连接的会话不因 TTL 被回收。
+    #[test]
+    fn clipboard_event_requires_window_acl() {
+        let restricted = Claims {
+            sub: "restricted".into(),
+            caps: vec![Cap::DisplayView],
+            iat: 0,
+            exp: 0,
+            jti: String::new(),
+            task_id: String::new(),
+            windows: vec![2],
+        };
+        assert!(clipboard_event_allowed(
+            Some(&restricted),
+            &json!({"window": 2, "text": "ok"})
+        ));
+        assert!(!clipboard_event_allowed(
+            Some(&restricted),
+            &json!({"window": 3, "text": "no"})
+        ));
+        let all = Claims {
+            windows: vec![],
+            ..restricted.clone()
+        };
+        assert!(clipboard_event_allowed(
+            Some(&all),
+            &json!({"window": 3, "text": "ok"})
+        ));
+        assert!(!clipboard_event_allowed(None, &json!({"window": 2})));
+        assert!(!clipboard_event_allowed(Some(&all), &json!({"text": "no window"})));
+    }
+
     #[tokio::test]
     async fn session_ttl_applies_only_after_disconnect() {
         let store = SessionStore::new(4);
