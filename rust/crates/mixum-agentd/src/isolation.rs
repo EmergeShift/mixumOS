@@ -148,7 +148,9 @@ pub fn apply_spawn_isolation(
     home: Option<&Path>,
     credentials: Option<(u32, u32)>,
 ) {
+    let disable_landlock = std::env::var("MIXUM_DISABLE_LANDLOCK").ok().as_deref() == Some("1");
     let prepared = match workspace.as_deref() {
+        Some(_) if disable_landlock => Ok(None),
         Some(workspace) => PreparedLandlock::build(workspace, home).map(Some),
         None => Ok(None),
     };
