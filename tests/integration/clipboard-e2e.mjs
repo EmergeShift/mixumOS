@@ -18,6 +18,14 @@ function sh(cmd) {
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).replace(/\r?\n$/, "");
 }
 
+// 拉起第二个 GUI 窗口，用于验证上行文本的窗口归属。
+function spawnFoot() {
+  execFileSync("docker", ["exec", "-d", container, "sh", "-c",
+    "export XDG_RUNTIME_DIR=/run/mixum WAYLAND_DISPLAY=wayland-0; " +
+    "exec foot --override=main.initial-window-size-pixels=300x200 --hold cat /etc/alpine-release"],
+    { stdio: "ignore" });
+}
+
 function frame(op, payload) {
   return JSON.stringify({ v: 1, id: crypto.randomUUID(), op, ts: Date.now(), ...(payload ? { payload } : {}) });
 }
@@ -80,6 +88,17 @@ try {
 }
 console.log(`空串拒绝:${emptyRejected ? "是" : "否(异常)"}`);
 
+let oversizedRejected = false;
+try {
+  await s.call("display.clipboard.set", {
+    window: win,
+    text: "x".repeat(4 * 1024 * 1024 + 1),
+  });
+} catch {
+  oversizedRejected = true;
+}
+console.log(`4MiB+1 拒绝:${oversizedRejected ? "是" : "否(异常)"}`);
+
 // 2. 上行:容器 wl-copy → display.clipboard 推送。
 const up = `mixum-clip-up-${crypto.randomUUID().slice(0, 8)}`;
 sh(`printf %s "${up}" | wl-copy`);
@@ -89,6 +108,32 @@ for (let i = 0; i < 50 && !received; i++) {
   received = s.clips.find((item) => item.text === up) ?? null;
 }
 console.log(`上行:wl-copy ${JSON.stringify(up)} → 事件 ${s.clips.length} 条${received ? `,命中 ${JSON.stringify(received)}` : ""}`);
+
+// 2b. 多窗口归属：注入焦点后再复制，事件必须带对应窗口 id。
+spawnFoot();
+let windows = [];
+for (let i = 0; i < 50 && windows.length < 2; i++) {
+  await new Promise((r) => setTimeout(r, 100));
+  windows = (await s.call("display.list", {})).windows ?? [];
+}
+const winA = windows[0]?.id;
+const winB = windows[1]?.id;
+const route = async (windowId) => {
+  const text = `mixum-clip-route-${windowId}-${crypto.randomUUID().slice(0, 8)}`;
+  await s.call("display.input", { window: windowId, type: "pointer_motion", x: 5, y: 5 });
+  sh(`printf %s "${text}" | wl-copy`);
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    const hit = s.clips.find((item) => item.text === text) ?? null;
+    if (hit) return hit;
+  }
+  return null;
+};
+const routedA = winA != null ? await route(winA) : null;
+const routedB = winB != null ? await route(winB) : null;
+console.log(
+  `多窗口归属:A=${winA}→${routedA?.window ?? "无事件"},B=${winB}→${routedB?.window ?? "无事件"}`,
+);
 
 // 3. 归属:用户接管(claim)后与 input 同规放行;agent 持有拒绝由
 //    display.rs 单测覆盖(容器内无运行中任务,不重复构造)。
@@ -102,6 +147,14 @@ await s.call("display.takeover", { window: win, action: "release" });
 console.log(`归属:user 接管下下行${userOk ? "放行(与 input 同规)" : "被拒(异常)"}`);
 s.close();
 
-const ok = pasted === down && received?.text === up && received?.window === win && emptyRejected && userOk;
-console.log(ok ? "PASS 剪贴板:下行入选区/上行出事件/归属同规/空串拒绝" : "FAIL 剪贴板双向同步不符");
+const ok =
+  pasted === down &&
+  received?.text === up &&
+  received?.window === win &&
+  emptyRejected &&
+  oversizedRejected &&
+  routedA?.window === winA &&
+  routedB?.window === winB &&
+  userOk;
+console.log(ok ? "PASS 剪贴板:下行入选区/上行出事件/归属同规/边界与多窗口" : "FAIL 剪贴板双向同步不符");
 process.exit(ok ? 0 : 1);
