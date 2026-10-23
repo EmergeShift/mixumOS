@@ -15,8 +15,8 @@ linked below.
 
 ## Coverage (2026-10-24)
 
-- English default: 7 of 21 pages (`agent-bridge`, `agent-driver`, `backends`,
-  `clipboard`, `console`, `macOS verification`, `security`).
+- English default: 8 of 21 pages (`agent-bridge`, `agent-driver`, `architecture`,
+  `backends`, `clipboard`, `console`, `macOS verification`, `security`).
 - Architecture translation is still pending; the remaining pages are Chinese or
   mixed. The map below is the queue, not a claim that the work is done.
 
