@@ -43,7 +43,7 @@ registry.register(MyAgent)?;
 
 ## 接入方式二：子进程桥接（不改代码）
 
-agent 独立成进程，按 `docs/agent-bridge.md` 的桥协议读写 stdio
+agent 独立成进程，按 `docs/agent-bridge.zh-CN.md` 的桥协议读写 stdio
 （hello/log/progress/exec/fail/done），由内建 `external`/命名 external
 驱动经 `agents` 配置拉起。适合 agent 已有独立发布物的场景。
 
