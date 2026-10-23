@@ -1,69 +1,82 @@
-# PoC：CRIU + Wayland 会话快照/恢复
+> English translation of the Chinese document. Original: [poc-criu-wayland.zh-CN.md](poc-criu-wayland.zh-CN.md). Technical review pending.
 
-> **状态：PoC 记录，不是产品路径。** 仅同机同内核；跨设备迁移未验证。
-> **Status: PoC, not a product path.** Same machine and kernel only; cross-device migration is not verified.
-> 结论：在 Apple Container 1.5.0 + `linux-mixum-micro`（6.18.35）上，
-> 用 CRIU 3.17.1 对 **Sway（headless）+ foot** 整个会话树做 checkpoint，
-> kill 后 restore，Sway IPC 正常，`swaymsg -t get_tree` 里仍能看到 `app_id: foot`。
-> 这是“同机同内核”的 PoC，不是跨设备迁移。
+# PoC: CRIU + Wayland session checkpoint/restore
 
-## 环境
+> **Status: PoC record, not a product path.** Same machine and kernel only;
+> cross-device migration is not verified.
+> Result: on Apple Container 1.5.0 + `linux-mixum-micro` (6.18.35), CRIU 3.17.1
+> checkpointed the whole **Sway (headless) + foot** session tree, killed it and
+> restored it; Sway IPC still responds and `swaymsg -t get_tree` still shows
+> `app_id: foot`. This is a same-machine, same-kernel PoC, not cross-device
+> migration.
 
-| 项 | 值 |
+## Environment
+
+| Item | Value |
 |---|---|
-| 宿主 | macOS 27.0.1 / arm64 / Apple Container 1.5.0 |
-| 内核 | `6.18.35-mixum-micro`（kata 6.18 基底，48-bit VA/PA，CRIU+Landlock+diag） |
-| 镜像 | Debian bookworm-slim |
-| CRIU | 3.17.1（Debian 包） |
-| 合成器/客户端 | Sway 1.7 headless + foot 1.13.1 |
-| 容器 | `--cap-add ALL`，PID 1 = tini |
+| Host | macOS 27.0.1 / arm64 / Apple Container 1.5.0 |
+| Kernel | `6.18.35-mixum-micro` (kata 6.18 base, 48-bit VA/PA, CRIU+Landlock+diag) |
+| Image | Debian bookworm-slim |
+| CRIU | 3.17.1 (Debian package) |
+| Compositor/client | Sway 1.7 headless + foot 1.13.1 |
+| Container | `--cap-add ALL`, PID 1 = tini |
 
-## 关键步骤
+## Key steps
 
 ```sh
-# 1) 容器 PID 1 用 tini，保证 kill 后僵尸被回收（否则 restore 会 “Can't fork: File exists”）
+# 1) PID 1 is tini so zombies are reaped after kill (otherwise restore says "Can't fork: File exists")
 container run -d --name criu-poc --cap-add ALL criu-poc:1
 
-# 2) 会话脚本（demo 用户）：sway + foot 同属一个 shell 树
-#    两端都在 dump 树里，才能避免 “Can't dump half of stream unix connection”
+# 2) Session script (demo user): sway + foot in the same shell tree
+#    Both ends must be in the dump tree, or "Can't dump half of stream unix connection"
 container exec criu-poc su -s /bin/sh demo -c \
   'nohup /usr/local/bin/session.sh >/tmp/session.log 2>&1 &'
 
-# 3) dump 整个会话树（不是单个 task）
+# 3) Dump the whole session tree (not a single task)
 criu dump --tree <session-shell-pid> --images-dir /tmp/d \
   --shell-job --ext-unix-sk --ghost-limit 2147483648 --file-locks -v3
 
-# 4) kill 会话，等 tini 回收 pid
+# 4) Kill the session and wait for tini to reap pids
 kill -9 <shell> <sway> <foot>
 
-# 5) restore
+# 5) Restore
 criu restore --images-dir /tmp/d --shell-job --ext-unix-sk -v3
 
-# 6) 验证
+# 6) Verify
 SWAYSOCK=/tmp/xdg/sway-ipc.1000.<sway-pid>.sock swaymsg -t get_tree
 # => "app_id": "foot"
 ```
 
-## 结果
+## Results
 
-- `criu dump`：`Dumping finished successfully`；
-- `criu restore`：`Restore finished successfully. Tasks resumed.`；
-- 恢复后 Sway 进程、foot 进程 PID 与快照一致，Sway IPC 可查询，窗口树里 `app_id: foot`。
+- `criu dump`: `Dumping finished successfully`;
+- `criu restore`: `Restore finished successfully. Tasks resumed.`；
+- After restore, the Sway and foot PIDs match the snapshot, Sway IPC answers, and
+  the window tree contains `app_id: foot`.
 
-## 踩过的坑
+## Pitfalls
 
-1. **只 dump 任务子树会失败**：`unix: Can't dump half of stream unix connection`。
-   Wayland 连接的另一端（合成器）必须在 dump 树里；要么 dump 整个容器树，要么把任务与合成器一起 `--tree`。
-2. **外部 unix socket**：`--ext-unix-sk` 放行；没有 `CONFIG_UNIX_DIAG/INET_DIAG` 时 CRIU 连 socket 都收集不到。
-3. **wlroots 共享内存**：需要 `--ghost-limit` 放大（示例 2 GiB）。
-4. **文件锁**：`--file-locks`。
-5. **PID 复用**：dump 后必须让旧进程被真正回收；PID 1 不回收僵尸时 restore 会 `Can't fork: File exists`。
-6. **CRIU 版本**：Arch 的 CRIU 4.2.1 在本内核上 parasite 注入 SIGSEGV；Debian 3.17.1 正常。
-7. `criu check` 仍报 `ns_last_pid` 只读（Apple Container 的 /proc/sys 只读），但本次 dump/restore 未受影响。
+1. **Dumping only the task subtree fails** with `unix: Can't dump half of stream unix
+   connection`. The other end of the Wayland connection (the compositor) must be in
+   the dump tree; dump the whole container tree, or pass the task and compositor
+   together with `--tree`.
+2. **External Unix sockets**: `--ext-unix-sk`; without `CONFIG_UNIX_DIAG/INET_DIAG`
+   CRIU cannot even collect the socket.
+3. **wlroots shared memory**: enlarge `--ghost-limit` (2 GiB in the example).
+4. **File locks**: `--file-locks`.
+5. **PID reuse**: the old processes must actually be reaped after dump; if PID 1 does
+   not reap zombies, restore fails with `Can't fork: File exists`.
+6. **CRIU version**: Arch's CRIU 4.2.1 SIGSEGVs during parasite injection on this
+   kernel; Debian 3.17.1 works.
+7. `criu check` still reports `ns_last_pid` read-only (Apple Container's `/proc/sys`
+   is read-only), but this dump/restore was not affected.
 
-## 对 mixumOS 的要求
+## Requirements for mixumOS
 
-- 引擎的 memory/hybrid 快照应 dump **整个容器进程树**（或任务 + mixcomp 两端），而不是单个 task leader；
-- dump 参数带上 `--ext-unix-sk --file-locks --ghost-limit`，restore 带 `--ext-unix-sk`；
-- agentd 需要在快照前拿到合成器 pid，或直接以 entrypoint/PID 1 为根；
-- 跨设备仍然禁止 memory/hybrid（CRIU 镜像依赖同内核与同设备）。
+- The engine's memory/hybrid snapshot should dump the **whole container process tree**
+  (or both task and mixcomp), not a single task leader.
+- Pass `--ext-unix-sk --file-locks --ghost-limit` to dump and `--ext-unix-sk` to restore.
+- agentd needs the compositor pid before snapshotting, or should root the tree at the
+  entrypoint/PID 1.
+- Cross-device memory/hybrid remains disallowed (CRIU images depend on the same kernel
+  and devices).

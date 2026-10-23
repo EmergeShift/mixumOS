@@ -15,8 +15,8 @@ linked below.
 
 ## Coverage (2026-10-24)
 
-- English default: 8 of 21 pages (`agent-bridge`, `agent-driver`, `architecture`,
-  `backends`, `clipboard`, `console`, `macOS verification`, `security`).
+- English default: 9 of 21 pages (`agent-bridge`, `agent-driver`, `architecture`,
+  `backends`, `clipboard`, `console`, `macOS verification`, `poc-criu-wayland`, `security`).
 - Architecture translation is still pending; the remaining pages are Chinese or
   mixed. The map below is the queue, not a claim that the work is done.
 
@@ -37,7 +37,7 @@ linked below.
 | [host-integration](docs/host-integration.md) | current | pending | [中文](docs/host-integration.md) |
 | [macOS verification](docs/macos-verification.md) | current | [English](docs/macos-verification.md) | [中文](docs/macos-verification.zh-CN.md) |
 | [migration](docs/migration.md) | current | pending | [中文](docs/migration.md) |
-| [CRIU + Wayland PoC](docs/poc-criu-wayland.md) | PoC | pending | [中文](docs/poc-criu-wayland.md) |
+| [CRIU + Wayland PoC](docs/poc-criu-wayland.md) | PoC | [English](docs/poc-criu-wayland.md) | [中文](docs/poc-criu-wayland.zh-CN.md) |
 | [protocol](docs/protocol.md) | current | pending | [中文](docs/protocol.md) |
 | [security](docs/security.md) | current | [English](docs/security.md) | [中文](docs/security.zh-CN.md) |
 | [snapshots](docs/snapshots.md) | current | pending | [中文](docs/snapshots.md) |
