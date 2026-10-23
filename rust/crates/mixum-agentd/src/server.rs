@@ -21,7 +21,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::{rustls, TlsAcceptor};
-use tokio_tungstenite::{accept_hdr_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{
+    accept_hdr_async_with_config, tungstenite::protocol::WebSocketConfig,
+    tungstenite::Message, WebSocketStream,
+};
 
 /// session.hello.ok / sys.info / session.resume.ok 的实现标识。
 pub const SERVER_NAME: &str = concat!("mixum-agentd/", env!("CARGO_PKG_VERSION"));
@@ -40,6 +43,7 @@ const SESSION_TTL: Duration = Duration::from_secs(3600);
 #[allow(clippy::result_large_err)]
 fn accept_with_subprotocol<S>(
     stream: S,
+    max_frame: usize,
 ) -> impl std::future::Future<
     Output = Result<WebSocketStream<S>, Box<tokio_tungstenite::tungstenite::Error>>,
 >
@@ -77,7 +81,14 @@ where
         }
         Ok(Response::from_parts(parts, body))
     };
-    async move { accept_hdr_async(stream, cb).await.map_err(Box::new) }
+    let mut config = WebSocketConfig::default();
+    config.max_message_size = Some(max_frame);
+    config.max_frame_size = Some(max_frame);
+    async move {
+        accept_hdr_async_with_config(stream, cb, Some(config))
+            .await
+            .map_err(Box::new)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -434,8 +445,9 @@ impl Server {
             let (stream, _) = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
+                let max = this.config.max_message_size;
                 let _ = this
-                    .handle_stream(accept_with_subprotocol(stream).await)
+                    .handle_stream(accept_with_subprotocol(stream, max).await)
                     .await;
             });
         }
@@ -454,7 +466,10 @@ impl Server {
             let this = self.clone();
             tokio::spawn(async move {
                 if let Ok(tls) = acceptor.accept(stream).await {
-                    let _ = this.handle_stream(accept_with_subprotocol(tls).await).await;
+                    let max = this.config.max_message_size;
+                    let _ = this
+                        .handle_stream(accept_with_subprotocol(tls, max).await)
+                        .await;
                 }
             });
         }
@@ -1799,6 +1814,11 @@ impl Session {
         };
         if text.is_empty() || text.len() > crate::display::MAX_CLIPBOARD_BYTES {
             self.err(env, ErrCode::BadRequest, "text 长度须为 1..=4MiB")
+                .await;
+            return;
+        }
+        if !crate::display::clipboard_fits_control_frame(text) {
+            self.err(env, ErrCode::BadRequest, "text 转义后超过控制通道上限")
                 .await;
             return;
         }

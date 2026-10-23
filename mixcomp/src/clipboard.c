@@ -16,8 +16,9 @@
 
 #include "mixcomp.h"
 
-// 单次读回上限 4MiB：JSON 转义最坏 6 倍膨胀仍远低于公有 WS 32MiB 上限。
+// 单次读回上限 4MiB：JSON 转义最坏 6 倍膨胀仍低于 16MiB 控制帧。
 #define CLIP_MAX (4u << 20)
+#define CLIP_CONTROL_MAX ((16u << 20) - 1024)
 
 struct clip_source {
 	struct wlr_data_source base;
@@ -117,6 +118,20 @@ void clipboard_set(struct mixcomp_server *s, const char *text) {
 	wlr_log(WLR_INFO, "剪贴板下行 %zu 字节已设为选区", len);
 }
 
+// clip_json_escaped_len —— 估算 json-c 字符串转义后长度；含 NUL 时返回
+// (size_t)-1（二进制内容不能作为 JSON 文本上行）。
+static size_t clip_json_escaped_len(const uint8_t *buf, size_t len) {
+	size_t total = 0;
+	for (size_t i = 0; i < len; i++) {
+		uint8_t b = buf[i];
+		if (b == '\0') {
+			return (size_t)-1;
+		}
+		total += (b == '"' || b == '\\') ? 2 : (b < 0x20 ? 6 : 1);
+	}
+	return total;
+}
+
 // clip_read_finish —— 读回收尾：send=true 时把累积文本上行。
 static void clip_read_finish(struct clip_read *cr, bool send) {
 	wlr_log(WLR_INFO, "选区读回收尾:%zu 字节,上行=%d", cr->len, send);
@@ -127,6 +142,13 @@ static void clip_read_finish(struct clip_read *cr, bool send) {
 		wl_event_source_remove(cr->src);
 	}
 	close(cr->fd);
+	if (send && cr->len > 0 && cr->len <= CLIP_MAX) {
+		size_t escaped = clip_json_escaped_len(cr->buf, cr->len);
+		if (escaped == (size_t)-1 || escaped > CLIP_CONTROL_MAX) {
+			wlr_log(WLR_INFO, "选区上行丢弃:%zu 字节转义后超过控制帧", cr->len);
+			send = false;
+		}
+	}
 	if (send && cr->len > 0 && cr->len <= CLIP_MAX) {
 		cr->buf[cr->len] = '\0';
 		stream_send_clipboard(cr->server, cr->window_id,

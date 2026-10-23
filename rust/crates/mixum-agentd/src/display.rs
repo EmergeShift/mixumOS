@@ -14,6 +14,23 @@ pub const MODE_AGENT: &str = "agent";
 pub const MODE_USER: &str = "user";
 pub const MODE_FREE: &str = "free";
 pub const MAX_CLIPBOARD_BYTES: usize = 4 << 20;
+
+/// JSON 字符串转义后的字节数（与 serde_json/json-c 的转义规则一致）：
+/// 引号/反斜杠 2 字节，控制字符 6 字节，其余按 UTF-8 字节数。
+fn json_escaped_len(text: &str) -> usize {
+    text.chars()
+        .map(|ch| match ch {
+            '"' | '\\' => 2,
+            ch if (ch as u32) < 0x20 => 6,
+            ch => ch.len_utf8(),
+        })
+        .sum()
+}
+
+/// 下行文本必须能装进 agentd↔comp 的 16MiB 控制帧（留少量头部余量）。
+pub fn clipboard_fits_control_frame(text: &str) -> bool {
+    json_escaped_len(text) + 1024 <= MAX_COMP_FRAME
+}
 pub const CODEC_JPEG: &str = "jpeg";
 pub const CODEC_H264: &str = "h264";
 /// 无损 PNG + damage 补丁流（订阅者按需协商；旧客户端不受影响）。
@@ -911,6 +928,14 @@ mod tests {
             broker.takeover(1, "release", false).await.unwrap(),
             MODE_FREE
         );
+    }
+
+    #[test]
+    fn clipboard_control_frame_bound() {
+        assert!(clipboard_fits_control_frame(&"a".repeat(4 << 20)));
+        assert!(clipboard_fits_control_frame(&"\"".repeat(4 << 20)));
+        // 3MiB 控制字符 JSON 转义后 18MiB，超过 16MiB 控制帧。
+        assert!(!clipboard_fits_control_frame(&"\u{1}".repeat(3 << 20)));
     }
 
     #[tokio::test]
