@@ -82,6 +82,7 @@ mixum-ctl agent template codex       # 打印可复制到任意 agent 的提示�
 - 默认以**任务用户**（通常是 `mixum`，非 root）运行：npm 包安装到
   `$HOME/.local`，并把 `$HOME/.local/bin`、`$HOME/.opencode/bin` 加入 PATH；
   不会写系统目录；
+- mixumOS 基础镜像已内置 `nodejs`/`npm`/`curl`；自定义镜像需自行预装；
 - 若容器缺少 `npm`/`curl` 且当前不是 root，安装会明确报错并提示管理员预装，
   不再尝试 `pacman -Sy` / `apt-get install`；
 - opencode 使用官方远程安装脚本（`curl -fsSL https://opencode.ai/install | bash`），

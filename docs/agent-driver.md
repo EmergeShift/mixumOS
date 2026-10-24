@@ -93,6 +93,8 @@ mixum-ctl agent template codex       # print a prompt that can be copied into an
 - By default it runs as the **task user** (usually `mixum`, not root): npm
   packages are installed to `$HOME/.local`, and `$HOME/.local/bin` and
   `$HOME/.opencode/bin` are added to PATH; system directories are never written;
+- The mixumOS base image ships `nodejs`/`npm`/`curl`; custom images must
+  pre-install them;
 - If the container lacks `npm`/`curl` and the current user is not root, the
   installation fails with an explicit error and asks the administrator to
   pre-install them; it no longer attempts `pacman -Sy` / `apt-get install`;
