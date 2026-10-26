@@ -23,6 +23,9 @@ prepare() {
 build() {
 	export CARGO_HOME="${MIXUM_CARGO_HOME:-$startdir/.cargo-home}"
 	export CARGO_TARGET_DIR="${MIXUM_CARGO_TARGET_DIR:-$startdir/rust/target}"
+	# 同 mixum-agentd:makepkg 注入的 CFLAGS/LDFLAGS(含 LTO)会破坏 ring 的
+	# 汇编链接;清掉后由 crate 自管编译参数。
+	unset CFLAGS CXXFLAGS LDFLAGS
 	cd "$startdir/rust"
 	cargo build --release --locked -p mixum-ctl
 }
@@ -30,6 +33,7 @@ build() {
 check() {
 	export CARGO_HOME="${MIXUM_CARGO_HOME:-$startdir/.cargo-home}"
 	export CARGO_TARGET_DIR="${MIXUM_CARGO_TARGET_DIR:-$startdir/rust/target}"
+	unset CFLAGS CXXFLAGS LDFLAGS
 	cd "$startdir/rust"
 	cargo test --release -p mixum-ctl -q
 }
