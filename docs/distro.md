@@ -42,7 +42,7 @@ packages are repackaged, not rebuilt into a new world.
 | mixum-agentd | /usr/bin/mixum-agentd, mixumd.service, sysusers | no Rust runtime; wlroots0.18 (mixcomp links at runtime, only filesystem interaction); criu (optional) |
 | mixcomp | /usr/bin/mixcomp, README | wlroots0.18, libjpeg-turbo, json-c, libxkbcommon |
 | mixum-ctl | /usr/bin/mixum-ctl, completions | none (Rust dynamically links the usual libraries) |
-| mixum-base (meta) | default config, /var/lib/mixum layout | the three above |
+| mixum-base (meta) | default config, /var/lib/mixum layout | the three above, nodejs, npm, curl (one-click agent install) |
 
 - Build matrix: one PKGBUILD per `dist/pkgs/<pkg>/`; `makechrootpkg` produces one in
   each arm64/x86_64 chroot; when there is no x86_64 hardware, use qemu-user-static +

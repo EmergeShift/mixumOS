@@ -36,7 +36,7 @@ mkosi(pacman 从仓库组装)
 | mixum-agentd | /usr/bin/mixum-agentd、mixumd.service、sysusers | rust 运行时无需、wlroots0.18(运行时链接 mixcomp 协议无依赖,仅文件系统交互)、criu(可选) |
 | mixcomp | /usr/bin/mixcomp、README | wlroots0.18、libjpeg-turbo、json-c、libxkbcommon |
 | mixum-ctl | /usr/bin/mixum-ctl、补全 | 无(rust 动态链接常规库) |
-| mixum-base(元包) | 默认配置、/var/lib/mixum 布局 | 上述三者 |
+| mixum-base(元包) | 默认配置、/var/lib/mixum 布局 | 上述三者、nodejs、npm、curl(Agent 一键安装) |
 
 - 构建矩阵:`dist/pkgs/<pkg>/` 一份 PKGBUILD,`makechrootpkg` 在
   arm64 与 x86_64 的 chroot 里各出一份;x86_64 无真机时用

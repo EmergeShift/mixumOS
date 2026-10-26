@@ -3,12 +3,14 @@
 # 镜像组装时以本包为装配锚点(pacstrap base + mixum-base)。
 pkgname=mixum-base
 pkgver=0.1.5
-pkgrel=1
+pkgrel=2
 pkgdesc="mixumOS 元包:mixum 组件集合 + 系统用户/目录/默认配置"
 arch=(aarch64 x86_64)
 url="https://github.com/EmergeShift/mixumOS"
 license=('Apache-2.0')
-depends=(mixum-agentd mixcomp mixum-ctl xorg-xwayland pulseaudio)
+# nodejs/npm/curl:Agent 一键安装依赖 npm(npm 包)或 curl(opencode 安装脚本);
+# 任务在 Landlock 沙箱内只能写 HOME,无法自行补装系统包。
+depends=(mixum-agentd mixcomp mixum-ctl xorg-xwayland pulseaudio nodejs npm curl)
 checkdepends=(python)  # check() 用 python 做 JSON 语法校验
 backup=('etc/mixum/mixumd.json')
 source=()
