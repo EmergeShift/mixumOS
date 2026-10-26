@@ -12,13 +12,13 @@
   <p><strong>简体中文</strong> · <a href="README.md">English</a></p>
 </div>
 
-> **状态：v0.1.5，alpha。** 这是一个早期版本的操作系统，不是完成的发行版。本次验证的是 Apple Silicon；x86_64 构建路径存在，但未随 0.1.5 发布。接口会变，文档还不完整，很多地方仍在补。已知限制如实列在[下方](#状态与路线图)。
+> **状态：v0.1.6，alpha。** 这是一个早期版本的操作系统，不是完成的发行版。已在 Apple Silicon 验证；x86_64 镜像已构建并随版本发布，但还需要 Docker/硬件验证。接口会变，文档还不完整，很多地方仍在补。已知限制如实列在[下方](#状态与路线图)。
 
 ---
 
 ## 先说清楚：这是 alpha
 
-mixumOS 是 alpha。它能启动、快照、串流窗口、在机器之间搬状态，但还不是一个能日常使用的操作系统：控制台还早，CRIU 不是开箱即用，x86_64 不在这次镜像里，部分文档跑在代码前面。
+mixumOS 是 alpha。它能启动、快照、串流窗口、在机器之间搬状态，但还不是一个能日常使用的操作系统：控制台还早，CRIU 还不是开箱即用，部分文档跑在代码前面。
 
 我们是一个没有融资的小团队。与其假装没有缝，不如现在就把缝露出来。遇到问题请开 issue，附上命令、版本和日志；“跑不起来”本身也有用，我们会再问细节。
 
@@ -91,8 +91,8 @@ container system kernel set --binary /tmp/vmlinux-original
 | 磁盘快照、快照树、fork、回退 | ✅ | ✅ |
 | `.mart` 跨设备迁移（文件层） | ✅ | ✅ |
 | `mixcomp` GUI 流 / 窗口重放 | ✅ | ✅ |
-| **memory / hybrid 快照（CRIU dump）** | ❌ | ✅（需容器内安装 `criu`） |
-| **同机进程级回退（CRIU restore）** | ❌ | ✅（需容器内安装 `criu`） |
+| **memory / hybrid 快照（CRIU dump）** | ❌ | ✅（aarch64 镜像内置 CRIU 4.1；自定义镜像需自行安装） |
+| **同机进程级回退（CRIU restore）** | ❌ | ✅（aarch64 镜像内置 CRIU 4.1；自定义镜像需自行安装） |
 | Landlock / FUSE / cgroup freezer / diag socket | 取决于原内核配置 | ✅ |
 
 切回原内核**不会**丢失磁盘快照、`.mart` 迁移或窗口流；丢的是基于 CRIU 的 memory/hybrid 能力，切回 `linux-mixum-micro` 后恢复。细节与实测见 [docs/apple-container.zh-CN.md](docs/apple-container.zh-CN.md)。
@@ -154,10 +154,10 @@ cd mixumOS
 DOCKER_CONTEXT=default make dist ARCH=aarch64
 
 # 导入 rootfs 并启动节点。
-docker import --platform linux/arm64 dist/out/rootfs-aarch64.tar mixumos:0.1.5-dev
+docker import --platform linux/arm64 dist/out/rootfs-aarch64.tar mixumos:0.1.6-dev
 docker run -d --name mixum-node \
   -p 127.0.0.1:17601:7601 \
-  mixumos:0.1.5-dev /entrypoint.sh
+  mixumos:0.1.6-dev /entrypoint.sh
 
 # 首次启动会打印带 map1. bootstrap 令牌的 READY 行。
 docker logs mixum-node | grep READY
@@ -241,16 +241,16 @@ main:  genesis ── n1 ── n2 ── n3
 | Apple Container + `linux-mixum-micro` | ✅ M1 验证；guest 内核开启 CRIU/Landlock |
 | Docker / OCI | ✅ 验证通过；x86_64 走 qemu-user 构建 |
 | WSL 2 | ✅ rootfs 导入 + systemd 服务；GUI 流有已知 foot/WSL 问题 |
-| 发行版（`make dist`） | ✅ 双架构包、仓库、rootfs、OCI；v0.1.5 发布 aarch64 资产 |
+| 发行版（`make dist`） | ✅ 双架构包、仓库、rootfs、OCI；v0.1.6 同时发布两个架构 |
 | PWA 控制台 | 🚧 早期；任务、快照、窗口画布可用，细节待打磨 |
 | Gateway / Kubernetes operator | ✅ Gateway M1–M3；operator 处于早期 |
-| 内存快照（CRIU） | ⚠️ 内核能力已开，但镜像**未内置** `criu`。Arch 的 CRIU 4.2.1 在此内核上会崩；PoC 使用 Debian CRIU 3.17.1 |
+| 内存快照（CRIU） | ⚠️ 内核能力已开；aarch64 镜像内置 patched CRIU 4.1，x86_64 暂未包含。memory/hybrid 仍为 pre-release |
 | GPU / dmabuf 零拷贝 | ⏳ 等待稳定的 virtio-gpu/venus 通路；当前全部是 CPU `wl_shm` + damage |
 
 **如实说明的已知限制：**
 
-- v0.1.5 只发布 **aarch64** 镜像；x86_64 构建通路已验证，但不在本次发布资产中。
-- 在 CRIU 打包问题解决前，memory/hybrid 快照还不是开箱即用。磁盘快照、迁移和 GUI 重放不依赖 CRIU。
+- v0.1.6 同时发布 **aarch64 和 x86_64** 镜像；x86_64 已构建，Docker/硬件验证仍待补。
+- memory/hybrid 快照仍是 pre-release；aarch64 镜像已内置 CRIU 4.1，x86_64 暂未包含。磁盘快照、迁移和 GUI 重放不依赖 CRIU。
 - Apple Container 的内核是**宿主级**设置，切换会影响机器上所有容器；[Apple Container 指南](docs/apple-container.zh-CN.md)写明了如何切回以及会失去什么。
 - 项目明确不追求“单一静态二进制”的 unikernel 叙事；这是一个发行版，依赖与安全更新交给 pacman。
 
@@ -284,7 +284,7 @@ mixumOS/
 | [迁移](docs/migration.zh-CN.md) | `.mart` 包与跨设备恢复 |
 | [发行版构建](docs/distro.zh-CN.md) | 包、仓库、镜像构建与踩坑 |
 | [控制台](console/README.md) | PWA 架构与本地开发 |
-| [0.1.5 发布说明](docs/release-notes-0.1.5.zh-CN.md) | 当前版本改了什么 |
+| [0.1.6 发布说明](docs/release-notes-0.1.6.zh-CN.md) | 当前版本改了什么 |
 | [路线图](docs/roadmap.zh-CN.md) | 阶段与完成标准 |
 
 设计文档目前以中文为主；英文入口是这份 README 与 MAP 规范。欢迎帮忙翻译，不需要改代码。

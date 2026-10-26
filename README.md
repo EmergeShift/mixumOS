@@ -12,7 +12,7 @@
   <p><a href="README.zh-CN.md">简体中文</a> · <strong>English</strong></p>
 </div>
 
-> **Status: v0.1.5, alpha.** This is an early build of an operating system, not a finished distro. Apple Silicon is the validated path in this release; x86_64 builds exist but are not shipped. Interfaces will move, docs are incomplete, and several pieces are still being filled in. The honest limitations are listed [below](#status-and-roadmap).
+> **Status: v0.1.6, alpha.** This is an early build of an operating system, not a finished distro. Apple Silicon is the validated path; the x86_64 image is built and shipped for Docker but still needs hardware validation. Interfaces will move, docs are incomplete, and several pieces are still being filled in. The honest limitations are listed [below](#status-and-roadmap).
 
 ---
 
@@ -20,7 +20,7 @@
 
 mixumOS is an alpha. It boots, snapshots, streams windows and moves state between
 machines, but it is not a daily-driver OS yet: the console is early, CRIU is not
-turnkey, x86_64 is not in this image, and some docs are ahead of the code.
+turnkey, the x86_64 image still needs validation, and some docs are ahead of the code.
 
 We are a small, unfunded team. We would rather show the seams now than pretend
 they are not there. If something breaks, open an issue with the command, the
@@ -51,7 +51,7 @@ Our attempt is to treat the workspace as an **event-sourced filesystem**. Every 
 | **State that travels** | `snap.push` moves the tree peer-to-peer. The receiver reports missing chunks; re-pushing is **zero bytes**. A lid-close migration can resume a task in the cloud. |
 | **GUI sessions that replay** | Snapshots record `guiSessions`; after a restore or a `.mart` migration, applications are relaunched with their windows. |
 | **Agents as first-class citizens** | Rust `AgentDriver` SPI for embedded agents; the tiny line-delimited JSON **MAP-Bridge** for everything else. |
-| **A real distribution** | `make dist` produces pacman packages, a pacman repository, rootfs and OCI images for `aarch64` and `x86_64` (0.1.5 ships aarch64). Components upgrade independently with `pacman -S mixum-agentd`. |
+| **A real distribution** | `make dist` produces pacman packages, a pacman repository, rootfs and OCI images for `aarch64` and `x86_64` (0.1.6 ships both). Components upgrade independently with `pacman -S mixum-agentd`. |
 
 ### Rust at the core
 
@@ -95,8 +95,8 @@ New containers use the selected kernel; running containers keep the kernel they 
 | Disk snapshots, snapshot tree, fork, rollback | ✅ | ✅ |
 | `.mart` cross-device migration (files) | ✅ | ✅ |
 | `mixcomp` GUI stream / window replay | ✅ | ✅ |
-| **Memory / hybrid snapshots (CRIU dump)** | ❌ | ✅ (with `criu` installed) |
-| **Same-host process-level rollback (CRIU restore)** | ❌ | ✅ (with `criu` installed) |
+| **Memory / hybrid snapshots (CRIU dump)** | ❌ | ✅ (aarch64 image bundles CRIU 4.1; custom images need it) |
+| **Same-host process-level rollback (CRIU restore)** | ❌ | ✅ (aarch64 image bundles CRIU 4.1; custom images need it) |
 | Landlock / FUSE / cgroup freezer / diag sockets | Depends on the original config | ✅ |
 
 Reverting the kernel does **not** lose disk snapshots, `.mart` migration or window streaming. It loses the CRIU-based memory/hybrid capabilities until you switch back. Details and measured results: [docs/apple-container.md](docs/apple-container.md).
@@ -159,10 +159,10 @@ cd mixumOS
 DOCKER_CONTEXT=default make dist ARCH=aarch64
 
 # Import the rootfs and start a Node.
-docker import --platform linux/arm64 dist/out/rootfs-aarch64.tar mixumos:0.1.5-dev
+docker import --platform linux/arm64 dist/out/rootfs-aarch64.tar mixumos:0.1.6-dev
 docker run -d --name mixum-node \
   -p 127.0.0.1:17601:7601 \
-  mixumos:0.1.5-dev /entrypoint.sh
+  mixumos:0.1.6-dev /entrypoint.sh
 
 # The first start prints a READY line containing a map1. bootstrap token.
 docker logs mixum-node | grep READY
@@ -249,19 +249,19 @@ issue is enough; we will do the reading.
 | Snapshot tree (restore / fork / GC / sync) | ✅ Double-node e2e, idempotent re-push |
 | Display: per-window stream, input, takeover | ✅ 30 fps; png damage patches and H.264 negotiation |
 | Apple Container + `linux-mixum-micro` | ✅ Verified on M1; CRIU/Landlock enabled in the guest kernel |
-| Docker / OCI | ✅ aarch64 verified; the x86_64 build path exists but is not shipped in 0.1.5 |
+| Docker / OCI | ✅ aarch64 verified; ✅ x86_64 image built, Docker validation pending |
 | WSL 2 | ✅ Rootfs import + systemd service; GUI streaming has known foot/WSL caveats |
-| Distribution (`make dist`) | ✅ Dual-arch packages, repo, rootfs, OCI; v0.1.5 ships aarch64 assets |
+| Distribution (`make dist`) | ✅ Dual-arch packages, repo, rootfs, OCI; v0.1.6 ships both archives |
 | Console PWA | 🚧 Early; tasks, snapshots and window canvas work, polish pending |
 | Gateway / Kubernetes operator | ✅ Gateway M1–M3; operator is early |
-| Memory snapshots (CRIU) | ⚠️ Kernel support is there; `criu` is **not bundled** in the image. Arch's CRIU 4.2.1 crashes on this kernel; the PoC uses Debian CRIU 3.17.1 |
+| Memory snapshots (CRIU) | ⚠️ Kernel support is there; the aarch64 image bundles patched CRIU 4.1, while x86_64 does not yet. Memory/hybrid remains pre-release |
 | GPU / dmabuf zero-copy | ⏳ Waiting on stable virtio-gpu/venus paths; everything today is CPU `wl_shm` + damage |
 
 **Known limitations, stated plainly:**
 
-- v0.1.5 publishes **aarch64** images only; the x86_64 build path exists but has not been validated for this release.
+- v0.1.6 publishes **aarch64 and x86_64** images; x86_64 is built but Docker/hardware validation is still pending.
 - Node-to-node `snap.push` uses TLS 1.3 but does not pin the peer certificate yet. Push only to nodes you trust or over a private network; client and gateway-relay connections do pin.
-- Memory/hybrid snapshots are not turnkey until CRIU packaging is resolved. Disk snapshots, migration and GUI replay do not depend on CRIU.
+- Memory/hybrid snapshots are still pre-release; aarch64 bundles CRIU 4.1, x86_64 does not yet. Disk snapshots, migration and GUI replay do not depend on CRIU.
 - Apple Container's kernel is a **host-wide** setting. Switching it affects every container on the machine; the [Apple Container guide](docs/apple-container.md) documents how to switch back and what you lose.
 - The unikernel-style "one binary" story is explicitly not a goal; this is a distribution, with pacman doing dependency and security updates.
 
@@ -296,7 +296,7 @@ mixumOS/
 | [Migration](docs/migration.md) | `.mart` bundles and cross-device restore |
 | [Distribution](docs/distro.md) | Packages, repo, image build and known pits |
 | [Console](console/README.md) | PWA architecture and local dev |
-| [Release notes 0.1.5](docs/release-notes-0.1.5.md) | What changed in the current release |
+| [Release notes 0.1.6](docs/release-notes-0.1.6.md) | What changed in the current release |
 | [Roadmap](docs/roadmap.md) | Stages and exit criteria |
 
 Most design documents are currently written in Chinese; this README and the MAP specification are the English entry points. Translation help is welcome and does not require code changes.
