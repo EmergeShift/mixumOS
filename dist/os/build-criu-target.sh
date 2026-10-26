@@ -16,18 +16,19 @@ SRC_TAR=/tmp/criu-${VERSION}.tar.gz
 [ -f "$SRC_TAR" ] || curl -fsSL -o "$SRC_TAR" \
   "https://github.com/checkpoint-restore/criu/archive/refs/tags/v${VERSION}.tar.gz"
 cp /etc/resolv.conf "$TARGET/etc/resolv.conf"
-# pacman inside the chroot needs /etc/mtab; the minimal pacstrap target does not
-# always create the usual /proc/self/mounts symlink.
-ln -sfn /proc/self/mounts "$TARGET/etc/mtab"
-# A chroot does not inherit the host procfs. Mount a private /proc so the
-# symlink resolves; if mounting is unavailable, fall back to a minimal mtab.
+# pacman inside the chroot needs a mount table. A procfs mounted only at
+# /target/proc lists just itself, so write a minimal static table while the
+# target is being assembled and restore the normal symlink before packaging.
+rm -f "$TARGET/etc/mtab"
+printf 'overlay / overlay rw 0 0\nproc /proc proc rw 0 0\n' > "$TARGET/etc/mtab"
 install -d "$TARGET/proc"
-if ! mount -t proc proc "$TARGET/proc" 2>/dev/null; then
+mount -t proc proc "$TARGET/proc" 2>/dev/null || true
+cleanup_criu_target() {
+  umount "$TARGET/proc" 2>/dev/null || true
   rm -f "$TARGET/etc/mtab"
-  printf 'rootfs / rootfs rw 0 0\n' > "$TARGET/etc/mtab"
-else
-  trap 'umount "$TARGET/proc" 2>/dev/null || true' EXIT
-fi
+  ln -s /proc/self/mounts "$TARGET/etc/mtab"
+}
+trap cleanup_criu_target EXIT
 mkdir -p "$TARGET/tmp/criu-build"
 cp "$SRC_TAR" "$TARGET/tmp/criu-build/criu.tar.gz"
 chroot "$TARGET" /bin/sh -c '
