@@ -16,6 +16,9 @@ SRC_TAR=/tmp/criu-${VERSION}.tar.gz
 [ -f "$SRC_TAR" ] || curl -fsSL -o "$SRC_TAR" \
   "https://github.com/checkpoint-restore/criu/archive/refs/tags/v${VERSION}.tar.gz"
 cp /etc/resolv.conf "$TARGET/etc/resolv.conf"
+# pacman inside the chroot needs /etc/mtab; the minimal pacstrap target does not
+# always create the usual /proc/self/mounts symlink.
+ln -sfn /proc/self/mounts "$TARGET/etc/mtab"
 mkdir -p "$TARGET/tmp/criu-build"
 cp "$SRC_TAR" "$TARGET/tmp/criu-build/criu.tar.gz"
 chroot "$TARGET" /bin/sh -c '
