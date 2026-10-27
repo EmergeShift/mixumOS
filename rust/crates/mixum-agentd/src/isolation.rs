@@ -213,7 +213,14 @@ pub fn apply_spawn_isolation(
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn home_tool_dirs_from(home: &Path) -> Vec<PathBuf> {
     [
-        ".cache", ".local", ".config", ".npm", ".cargo", ".rustup", ".mixum",
+        ".cache",
+        ".local",
+        ".config",
+        ".npm",
+        ".cargo",
+        ".rustup",
+        ".mixum",
+        ".opencode",
     ]
     .iter()
     .map(|name| home.join(name))
@@ -351,6 +358,7 @@ mod tests {
         let dirs = home_tool_dirs_from(Path::new("/var/lib/mixum"));
         assert!(dirs.contains(&PathBuf::from("/var/lib/mixum/.cache")));
         assert!(dirs.contains(&PathBuf::from("/var/lib/mixum/.npm")));
+        assert!(dirs.contains(&PathBuf::from("/var/lib/mixum/.opencode")));
         assert!(!dirs.contains(&PathBuf::from("/var/lib/mixum")));
     }
 
