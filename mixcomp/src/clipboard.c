@@ -45,13 +45,13 @@ struct clip_write {
 
 // 写端在独立线程:客户端不读时不能让单线程 compositor 卡住。
 static void *clip_write_main(void *arg) {
-	struct clip_write *write = arg;
-	int flags = fcntl(write->fd, F_GETFL);
-	if (flags >= 0) (void)fcntl(write->fd, F_SETFL, flags | O_NONBLOCK);
+	struct clip_write *job = arg;
+	int flags = fcntl(job->fd, F_GETFL);
+	if (flags >= 0) (void)fcntl(job->fd, F_SETFL, flags | O_NONBLOCK);
 	size_t off = 0;
 	int stalls = 0;
-	while (off < write->len) {
-		ssize_t n = write(write->fd, write->text + off, write->len - off);
+	while (off < job->len) {
+		ssize_t n = write(job->fd, job->text + off, job->len - off);
 		if (n > 0) {
 			off += (size_t)n;
 			stalls = 0;
@@ -61,7 +61,7 @@ static void *clip_write_main(void *arg) {
 			continue;
 		}
 		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			struct pollfd pfd = { .fd = write->fd, .events = POLLOUT };
+			struct pollfd pfd = { .fd = job->fd, .events = POLLOUT };
 			if (poll(&pfd, 1, 100) > 0) {
 				stalls = 0;
 				continue;
@@ -71,9 +71,9 @@ static void *clip_write_main(void *arg) {
 		}
 		break;
 	}
-	close(write->fd);
-	free(write->text);
-	free(write);
+	close(job->fd);
+	free(job->text);
+	free(job);
 	return NULL;
 }
 
