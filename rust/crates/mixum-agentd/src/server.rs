@@ -22,8 +22,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::{rustls, TlsAcceptor};
 use tokio_tungstenite::{
-    accept_hdr_async_with_config, tungstenite::protocol::WebSocketConfig,
-    tungstenite::Message, WebSocketStream,
+    accept_hdr_async_with_config, tungstenite::protocol::WebSocketConfig, tungstenite::Message,
+    WebSocketStream,
 };
 
 /// session.hello.ok / sys.info / session.resume.ok 的实现标识。
@@ -164,6 +164,9 @@ struct SessionRecord {
     claims: Option<Claims>,
     task_events: bool,
     display_windows: bool,
+    display_clipboard: bool,
+    /// 剪贴板订阅代次:resume 会作废旧订阅泵，避免恢复隐式同意。
+    clipboard_epoch: u64,
     /// 当前绑定该会话的连接 id:旧连接关闭时不得清掉新连接的 tx。
     conn: String,
     last_seen: Instant,
@@ -217,6 +220,8 @@ impl SessionStore {
                 claims: Some(claims),
                 task_events: false,
                 display_windows: false,
+                display_clipboard: false,
+                clipboard_epoch: 0,
                 conn: conn.to_owned(),
                 last_seen: Instant::now(),
             },
@@ -262,6 +267,10 @@ impl SessionStore {
         record.conn = conn.to_owned();
         record.tx = Some(tx.clone());
         record.last_seen = Instant::now();
+        // MAP: clipboard subscriptions are not restored by session.resume.
+        // Bump the epoch so any old pump exits and a new subscribe is required.
+        record.display_clipboard = false;
+        record.clipboard_epoch = record.clipboard_epoch.wrapping_add(1);
         let claims = record.claims.clone();
         let replay: Vec<Envelope> = record
             .ring
@@ -362,6 +371,28 @@ impl SessionStore {
             }
             _ => false,
         }
+    }
+
+    /// Opt a session into clipboard change events. Returns the epoch for the
+    /// new pump; None means the session is already subscribed.
+    pub async fn subscribe_display_clipboard(&self, id: &str) -> Option<u64> {
+        let mut records = self.records.lock().await;
+        match records.get_mut(id) {
+            Some(record) if !record.display_clipboard => {
+                record.display_clipboard = true;
+                record.clipboard_epoch = record.clipboard_epoch.wrapping_add(1);
+                Some(record.clipboard_epoch)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the clipboard pump for `epoch` may keep delivering to this session.
+    pub async fn clipboard_pump_active(&self, id: &str, epoch: u64) -> bool {
+        let records = self.records.lock().await;
+        records.get(id).is_some_and(|record| {
+            record.display_clipboard && record.clipboard_epoch == epoch && record.tx.is_some()
+        })
     }
 
     /// 连接断开:仅当它仍是当前连接时解绑(保留环供 resume)。
@@ -693,6 +724,7 @@ impl Session {
             ops::op::PRIVILEGE_DECISION => self.privilege_decision(&env).await,
             ops::op::PRIVILEGE_LIST => self.privilege_list(&env).await,
             ops::op::DISPLAY_CLIPBOARD_SET => self.display_clipboard_set(&env).await,
+            ops::op::DISPLAY_CLIPBOARD_SUBSCRIBE => self.display_clipboard_subscribe(&env).await,
             ops::op::AUDIO_ATTACH => self.audio_attach(&env).await,
             ops::op::AUDIO_DETACH => self.audio_detach(&env).await,
             ops::op::FILE_PUT => self.file_put(&env).await,
@@ -1593,42 +1625,66 @@ impl Session {
             return;
         }
         let mut windows = self.server.broker.subscribe_windows();
+        let sessions = self.server.sessions.clone();
+        let session_id = self.id.clone();
+        tokio::spawn(async move {
+            loop {
+                match windows.recv().await {
+                    Ok(window) => {
+                        let envelope = Envelope::new(
+                            ops::op::DISPLAY_WINDOWS,
+                            Some(serde_json::to_value(window).unwrap_or(Value::Null)),
+                        );
+                        if !sessions.push(&session_id, envelope).await {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("窗口事件积压,丢弃 {skipped} 条");
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    async fn display_clipboard_subscribe(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::DisplayView).await {
+            return;
+        }
+        let epoch = self
+            .server
+            .sessions
+            .subscribe_display_clipboard(&self.id)
+            .await;
+        self.reply(env, json!({"subscribed": true})).await;
+        let Some(epoch) = epoch else {
+            return;
+        };
         let mut clipboard = self.server.broker.subscribe_clipboard();
         let claims = self.claims.clone();
         let sessions = self.server.sessions.clone();
         let session_id = self.id.clone();
         tokio::spawn(async move {
             loop {
-                let (op, payload) = tokio::select! {
-                    event = windows.recv() => match event {
-                        Ok(window) => (
-                            ops::op::DISPLAY_WINDOWS,
-                            serde_json::to_value(window).unwrap_or(Value::Null),
-                        ),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            eprintln!("窗口事件积压,丢弃 {skipped} 条");
+                match clipboard.recv().await {
+                    Ok(value) => {
+                        if !sessions.clipboard_pump_active(&session_id, epoch).await {
+                            break;
+                        }
+                        // 剪贴板比画面敏感:在 display.view 之外再按窗口 ACL 过滤。
+                        if !clipboard_event_allowed(claims.as_ref(), &value) {
                             continue;
                         }
-                        Err(_) => break,
-                    },
-                    event = clipboard.recv() => match event {
-                        Ok(value) => {
-                            // 剪贴板比画面敏感:在 display.view 之外再按窗口 ACL 过滤。
-                            if !clipboard_event_allowed(claims.as_ref(), &value) {
-                                continue;
-                            }
-                            (ops::op::DISPLAY_CLIPBOARD_CHANGED, value)
+                        let envelope =
+                            Envelope::new(ops::op::DISPLAY_CLIPBOARD_CHANGED, Some(value));
+                        if !sessions.push(&session_id, envelope).await {
+                            break;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            eprintln!("剪贴板事件积压,丢弃 {skipped} 条");
-                            continue;
-                        }
-                        Err(_) => break,
-                    },
-                };
-                let envelope = Envelope::new(op, Some(payload));
-                if !sessions.push(&session_id, envelope).await {
-                    break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("剪贴板事件积压,丢弃 {skipped} 条");
+                    }
+                    Err(_) => break,
                 }
             }
         });
@@ -1831,8 +1887,7 @@ impl Session {
             .authorizer
             .window_allowed(self.claims.as_ref().unwrap(), id)
         {
-            self.err(env, ErrCode::Forbidden, "令牌未授权该窗口")
-                .await;
+            self.err(env, ErrCode::Forbidden, "令牌未授权该窗口").await;
             return;
         }
         // 与 input 同规:agent 持有窗口时拒绝。
@@ -2178,9 +2233,7 @@ fn clipboard_event_allowed(claims: Option<&Claims>, value: &Value) -> bool {
     let window = value.get("window").and_then(Value::as_u64);
     window.is_some_and(|window| {
         u32::try_from(window).is_ok_and(|window| {
-            claims.is_some_and(|claims| {
-                mixum_protocol::token::window_allowed(claims, window)
-            })
+            claims.is_some_and(|claims| mixum_protocol::token::window_allowed(claims, window))
         })
     })
 }
@@ -2302,7 +2355,10 @@ mod tests {
             &json!({"window": 3, "text": "ok"})
         ));
         assert!(!clipboard_event_allowed(None, &json!({"window": 2})));
-        assert!(!clipboard_event_allowed(Some(&all), &json!({"text": "no window"})));
+        assert!(!clipboard_event_allowed(
+            Some(&all),
+            &json!({"text": "no window"})
+        ));
     }
 
     #[tokio::test]

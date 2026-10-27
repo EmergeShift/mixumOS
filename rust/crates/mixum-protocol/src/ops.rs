@@ -53,6 +53,7 @@ pub mod op {
     pub const PRIVILEGE_DECISION: &str = "privilege.decision";
     pub const PRIVILEGE_LIST: &str = "privilege.list";
     pub const DISPLAY_CLIPBOARD_SET: &str = "display.clipboard.set";
+    pub const DISPLAY_CLIPBOARD_SUBSCRIBE: &str = "display.clipboard.subscribe";
     pub const DISPLAY_CLIPBOARD_CHANGED: &str = "display.clipboard.changed";
     pub const AUDIO_ATTACH: &str = "audio.attach";
     pub const AUDIO_DETACH: &str = "audio.detach";

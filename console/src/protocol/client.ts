@@ -237,7 +237,11 @@ export class MixumClient {
 
   private async resubscribe(): Promise<void> {
     try {
-      await Promise.all([this.request('task.events'), this.request('display.windows')])
+      await Promise.all([
+        this.request('task.events'),
+        this.request('display.windows'),
+        this.request('display.clipboard.subscribe'),
+      ])
       for (const [win, sub] of this.attached) {
         await this.request<DisplayAttachResponse>('display.attach', {
           window: win,
@@ -433,6 +437,10 @@ export class MixumClient {
 
   clipboardSet(windowId: number, text: string): Promise<{ ok: boolean }> {
     return this.request('display.clipboard.set', { window: windowId, text })
+  }
+
+  clipboardSubscribe(): Promise<{ subscribed: boolean }> {
+    return this.request('display.clipboard.subscribe', {})
   }
 
   // ── gateway M2:节点列表 / 设备配对 / 吊销 ──

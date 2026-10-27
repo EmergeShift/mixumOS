@@ -69,7 +69,14 @@ const s = {
 };
 
 await s.connect();
-await s.call("display.windows", {}); // 同时开通剪贴板推送
+await s.call("display.windows", {});
+// 显式订阅门控：未订阅前容器选区变化不应产生事件。
+const pre = `mixum-clip-pre-${crypto.randomUUID().slice(0, 8)}`;
+sh(`printf %s "${pre}" | wl-copy`);
+await new Promise((r) => setTimeout(r, 800));
+const preReceived = s.clips.some((item) => item.text === pre);
+console.log(`未订阅时不推送:${preReceived ? "否(异常)" : "是"}`);
+await s.call("display.clipboard.subscribe", {});
 const list = await s.call("display.list", {});
 const win = list.windows[0].id;
 
@@ -196,6 +203,7 @@ s.close();
 
 const ok =
   pasted === down &&
+  !preReceived &&
   received?.text === up &&
   received?.window === win &&
   emptyRejected &&

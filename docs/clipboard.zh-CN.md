@@ -1,10 +1,7 @@
-# 剪贴板同步（A 路线）设计草案
+# 剪贴板同步（A 路线）
 
-> **状态：设计稿，未实现。** 本文只描述协议与实现边界；代码尚未合并，参考实现只在 fork 中。
-> **Status: design / not implemented.** The protocol is described here; the code is not merged.
-状态：草案，待上游评审。本文只描述协议与实现边界，不包含代码改动。
-参考实现位于 fork（`1179e72`，sync 后恢复于 `475da2c`），e2e 见
-`tests/integration/clipboard-e2e.mjs`。
+> **状态：已在 mixumOS 实现；MAP 剪贴板契约仍为 Draft（RFC 0004）。**
+> 实现位于本仓库，e2e 见 `tests/integration/clipboard-e2e.mjs`。
 
 ## 1. 背景
 
@@ -74,11 +71,12 @@
 {"op":"display.clipboard.changed","payload":{"window":3,"text":"hello"}}
 ```
 
-推送给已订阅 `display.windows` **且令牌窗口 ACL 覆盖 `window`** 的会话
-（订阅本身要求 `display.view`）。仅 `display.view` 不够：剪贴板内容比
-窗口画面更敏感，不能因为能看全屏就默认能读所有窗口的剪贴板。`window`
-用于客户端做窗口级同步与回声抑制；不携带 comp id（客户端不感知）。
-超过 4 MiB 的上行内容截断并丢弃，不推送部分文本。
+只推送给显式发送 `display.clipboard.subscribe`（要求 `display.view`）
+**且令牌窗口 ACL 覆盖 `window`** 的会话。仅订阅 `display.windows` 不算同意：
+看窗口元数据不等于读剪贴板内容。`window` 用于客户端做窗口级同步与回声抑制；
+不携带 comp id（客户端不感知）。v1 只同步非空文本——清空 selection 不产生事件。
+超过 4 MiB 的上行内容截断并丢弃，不推送部分文本。`session.resume` 不重放
+剪贴板事件，客户端恢复后需重新订阅。
 
 命名说明：**定为 `display.clipboard.changed`**。上游已有同名的
 `display.clipboard` 请求，若复用它作为推送事件，同一 op 会同时表示
@@ -108,7 +106,8 @@ fork 参考实现复用了 `display.clipboard`，落地前必须改名。
 2. comp 读取数据管道直到 EOF（上限 4 MiB，建议加 2s 读超时）；
 3. comp 上报 `{"type":"clipboard","id":3,"text":"..."}`；
 4. broker 校验该窗口 owner 与消息来源 comp 一致，广播事件；
-5. 订阅 `display.windows` 的会话收到 `display.clipboard.changed`；
+5. 已发送 `display.clipboard.subscribe` 的会话收到 `display.clipboard.changed`
+   （再按令牌窗口 ACL 过滤）；
 6. console 写入浏览器剪贴板；用"最近一轮文本"做回声抑制，避免
    console→容器→console 的无限往返。
 
@@ -148,7 +147,7 @@ fork 参考实现复用了 `display.clipboard`，落地前必须改名。
 ## 8. 安全与隐私
 
 - `set` 复用 `display.input`，不新增能力位；事件仅发给已通过
-  `display.view` 的 `display.windows` 订阅者；
+  `display.view` 和窗口 ACL 的 `display.clipboard.subscribe` 订阅者；
 - 窗口 ACL 与 agent 模式门控先于投递；被拒绝的请求不触发 comp 副作用；
 - 双向 4 MiB 上限，按字节计（UTF-8），超限在协议层拒绝/截断；
 - 服务端与 comp 日志只记录长度与结果，不记录内容；
@@ -187,8 +186,7 @@ e2e（容器内真实 Wayland 客户端）：
 4. `console`：`clipboardSet`、事件监听与回声抑制；
 5. `tests/integration/clipboard-e2e.mjs` 与文档回写。
 
-参考实现：fork `1179e72`（原始）、`475da2c`（sync 后恢复 A 路线）、
-`tests/integration/clipboard-e2e.mjs`。
+实现：本仓库；e2e：`tests/integration/clipboard-e2e.mjs`。
 
 ## 11. 评审结论（2026-10-22）
 
@@ -199,3 +197,6 @@ e2e（容器内真实 Wayland 客户端）：
 4. 事件必须按令牌窗口 ACL 再过滤，不能只依赖 `display.view`。
 5. 仍待排期：B compositor 的 A 路线实现；在此之前其窗口 `set` 返回
    `conflict`。富 MIME（`text/html`/图片）留 v2。
+6. （2026-10-26）剪贴板事件必须显式 `display.clipboard.subscribe`；
+   仅订阅 `display.windows` 不算同意。v1 空选区不产生事件，且剪贴板事件
+   不进入重放环。
