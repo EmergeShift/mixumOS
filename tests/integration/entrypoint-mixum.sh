@@ -5,6 +5,11 @@
 # external agent），并把 redesign-cli 的模型配置挂进环境。
 set -e
 
+# 任务身份默认 mixum;镜像里没有该用户时显式使用 root(agentd 不再静默回退)。
+if ! id mixum >/dev/null 2>&1; then
+	export MIXUM_TASK_USER="${MIXUM_TASK_USER:-root}"
+fi
+
 DATA=/var/lib/mixum
 WORK=/var/lib/mixum/work
 HOME_DIR=/var/lib/mixum/home
@@ -21,7 +26,7 @@ export REDESIGN_MODELS_PATH="${REDESIGN_MODELS_PATH:-/etc/redesign/models.json}"
 export REDESIGN_MODEL="${REDESIGN_MODEL:-gpt-6-astra}"
 
 # 1. mixumd（读 agents 配置；后台；证书自签、管理令牌落盘）
-mixumd --config /etc/mixum/mixumd.json &
+mixumd --config /etc/mixum/mixumd.json --enable-privilege &
 MIXUMD_PID=$!
 
 for i in $(seq 1 50); do

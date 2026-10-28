@@ -26,6 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut gateway_name = String::new();
     let mut gateway_token = String::new();
     let mut gateway_fingerprint = String::new();
+    let mut enable_privilege =
+        std::env::var("MIXUM_ENABLE_PRIVILEGE").is_ok_and(|value| value == "1");
     while let Some(arg) = args.next() {
         if let Some(value) = arg.strip_prefix("--config=") {
             config_path = value.to_owned();
@@ -57,6 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if let Some(value) = args.next() {
                 gateway_token = value;
             }
+        } else if arg == "--enable-privilege" {
+            enable_privilege = true;
         }
     }
     // 空文件与缺失同义:使用默认配置(沿用 Go 参考实现 mixumd 的 /dev/null 用法)。
@@ -101,7 +105,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let leader = Arc::new(std::sync::atomic::AtomicI32::new(0));
     // 系统级隔离：cgroup freezer 可用时优先，Landlock 限制文件系统写入。
-    let task_identity = task_identity_from_env();
+    let task_identity = match task_identity_from_env() {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("拒绝启动: {error}（用 MIXUM_TASK_USER 显式指定任务身份）");
+            std::process::exit(1);
+        }
+    };
     let task_uid = task_identity.uid;
     let task_gid = task_identity.gid;
     eprintln!(
@@ -221,14 +231,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let privilege = server.privilege();
-    tokio::spawn(async move {
-        if let Err(error) = privilege
-            .serve_socket("/run/mixum/sudo.sock", task_uid, task_gid)
-            .await
-        {
-            eprintln!("sudo socket 启动失败: {error}");
+    if enable_privilege {
+        if !nix::unistd::Uid::current().is_root() {
+            eprintln!("privilege broker: agentd 非 root，批准的命令将以当前用户执行");
         }
-    });
+        tokio::spawn(async move {
+            if let Err(error) = privilege
+                .serve_socket("/run/mixum/sudo.sock", task_uid, task_gid)
+                .await
+            {
+                eprintln!("sudo socket 启动失败: {error}");
+            }
+        });
+    } else {
+        eprintln!(
+            "privilege broker 未启用(默认关闭;需要时显式 --enable-privilege 或 MIXUM_ENABLE_PRIVILEGE=1)"
+        );
+    }
     let token_path = std::path::Path::new(&config.data_dir).join("admin-token");
     let token = match std::fs::read_to_string(&token_path) {
         Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),

@@ -15,7 +15,7 @@ Environment=XDG_RUNTIME_DIR=/run/mixum
 Environment=PULSE_SERVER=unix:/run/mixum/pulse/native
 StateDirectory=mixum
 WorkingDirectory=/var/lib/mixum
-ExecStart=/usr/bin/mixumd --config /etc/mixum/mixumd.json
+ExecStart=/usr/bin/mixumd --config /etc/mixum/mixumd.json --enable-privilege
 Restart=on-failure
 RestartSec=2
 
