@@ -21,7 +21,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::{rustls, TlsAcceptor};
-use tokio_tungstenite::{accept_hdr_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{
+    accept_hdr_async_with_config, tungstenite::protocol::WebSocketConfig, tungstenite::Message,
+    WebSocketStream,
+};
 
 /// session.hello.ok / sys.info / session.resume.ok 的实现标识。
 pub const SERVER_NAME: &str = concat!("mixum-agentd/", env!("CARGO_PKG_VERSION"));
@@ -40,6 +43,7 @@ const SESSION_TTL: Duration = Duration::from_secs(3600);
 #[allow(clippy::result_large_err)]
 fn accept_with_subprotocol<S>(
     stream: S,
+    max_frame: usize,
 ) -> impl std::future::Future<
     Output = Result<WebSocketStream<S>, Box<tokio_tungstenite::tungstenite::Error>>,
 >
@@ -77,7 +81,14 @@ where
         }
         Ok(Response::from_parts(parts, body))
     };
-    async move { accept_hdr_async(stream, cb).await.map_err(Box::new) }
+    let mut config = WebSocketConfig::default();
+    config.max_message_size = Some(max_frame);
+    config.max_frame_size = Some(max_frame);
+    async move {
+        accept_hdr_async_with_config(stream, cb, Some(config))
+            .await
+            .map_err(Box::new)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -153,6 +164,9 @@ struct SessionRecord {
     claims: Option<Claims>,
     task_events: bool,
     display_windows: bool,
+    display_clipboard: bool,
+    /// 剪贴板订阅代次:resume 会作废旧订阅泵，避免恢复隐式同意。
+    clipboard_epoch: u64,
     /// 当前绑定该会话的连接 id:旧连接关闭时不得清掉新连接的 tx。
     conn: String,
     last_seen: Instant,
@@ -206,6 +220,8 @@ impl SessionStore {
                 claims: Some(claims),
                 task_events: false,
                 display_windows: false,
+                display_clipboard: false,
+                clipboard_epoch: 0,
                 conn: conn.to_owned(),
                 last_seen: Instant::now(),
             },
@@ -251,6 +267,10 @@ impl SessionStore {
         record.conn = conn.to_owned();
         record.tx = Some(tx.clone());
         record.last_seen = Instant::now();
+        // MAP: clipboard subscriptions are not restored by session.resume.
+        // Bump the epoch so any old pump exits and a new subscribe is required.
+        record.display_clipboard = false;
+        record.clipboard_epoch = record.clipboard_epoch.wrapping_add(1);
         let claims = record.claims.clone();
         let replay: Vec<Envelope> = record
             .ring
@@ -292,10 +312,14 @@ impl SessionStore {
         };
         record.seq += 1;
         envelope.seq = record.seq;
-        if record.ring.len() >= self.capacity {
-            record.ring.pop_front();
+        // 剪贴板帧最大 4 MiB,不能进 512 条 replay ring(否则单会话可放大到 2 GiB)。
+        let transient = envelope.op == ops::op::DISPLAY_CLIPBOARD_CHANGED;
+        if !transient {
+            if record.ring.len() >= self.capacity {
+                record.ring.pop_front();
+            }
+            record.ring.push_back(envelope.clone());
         }
-        record.ring.push_back(envelope.clone());
         if let Some(tx) = &record.tx {
             let _ = tx.send(Message::Text(envelope.to_json().into())).await;
         }
@@ -347,6 +371,28 @@ impl SessionStore {
             }
             _ => false,
         }
+    }
+
+    /// Opt a session into clipboard change events. Returns the epoch for the
+    /// new pump; None means the session is already subscribed.
+    pub async fn subscribe_display_clipboard(&self, id: &str) -> Option<u64> {
+        let mut records = self.records.lock().await;
+        match records.get_mut(id) {
+            Some(record) if !record.display_clipboard => {
+                record.display_clipboard = true;
+                record.clipboard_epoch = record.clipboard_epoch.wrapping_add(1);
+                Some(record.clipboard_epoch)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the clipboard pump for `epoch` may keep delivering to this session.
+    pub async fn clipboard_pump_active(&self, id: &str, epoch: u64) -> bool {
+        let records = self.records.lock().await;
+        records.get(id).is_some_and(|record| {
+            record.display_clipboard && record.clipboard_epoch == epoch && record.tx.is_some()
+        })
     }
 
     /// 连接断开:仅当它仍是当前连接时解绑(保留环供 resume)。
@@ -434,8 +480,9 @@ impl Server {
             let (stream, _) = listener.accept().await?;
             let this = self.clone();
             tokio::spawn(async move {
+                let max = this.config.max_message_size;
                 let _ = this
-                    .handle_stream(accept_with_subprotocol(stream).await)
+                    .handle_stream(accept_with_subprotocol(stream, max).await)
                     .await;
             });
         }
@@ -454,7 +501,10 @@ impl Server {
             let this = self.clone();
             tokio::spawn(async move {
                 if let Ok(tls) = acceptor.accept(stream).await {
-                    let _ = this.handle_stream(accept_with_subprotocol(tls).await).await;
+                    let max = this.config.max_message_size;
+                    let _ = this
+                        .handle_stream(accept_with_subprotocol(tls, max).await)
+                        .await;
                 }
             });
         }
@@ -673,6 +723,8 @@ impl Session {
             ops::op::DISPLAY_CLIPBOARD => self.display_clipboard(&env).await,
             ops::op::PRIVILEGE_DECISION => self.privilege_decision(&env).await,
             ops::op::PRIVILEGE_LIST => self.privilege_list(&env).await,
+            ops::op::DISPLAY_CLIPBOARD_SET => self.display_clipboard_set(&env).await,
+            ops::op::DISPLAY_CLIPBOARD_SUBSCRIBE => self.display_clipboard_subscribe(&env).await,
             ops::op::AUDIO_ATTACH => self.audio_attach(&env).await,
             ops::op::AUDIO_DETACH => self.audio_detach(&env).await,
             ops::op::FILE_PUT => self.file_put(&env).await,
@@ -1595,6 +1647,48 @@ impl Session {
             }
         });
     }
+    async fn display_clipboard_subscribe(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::DisplayView).await {
+            return;
+        }
+        let epoch = self
+            .server
+            .sessions
+            .subscribe_display_clipboard(&self.id)
+            .await;
+        self.reply(env, json!({"subscribed": true})).await;
+        let Some(epoch) = epoch else {
+            return;
+        };
+        let mut clipboard = self.server.broker.subscribe_clipboard();
+        let claims = self.claims.clone();
+        let sessions = self.server.sessions.clone();
+        let session_id = self.id.clone();
+        tokio::spawn(async move {
+            loop {
+                match clipboard.recv().await {
+                    Ok(value) => {
+                        if !sessions.clipboard_pump_active(&session_id, epoch).await {
+                            break;
+                        }
+                        // 剪贴板比画面敏感:在 display.view 之外再按窗口 ACL 过滤。
+                        if !clipboard_event_allowed(claims.as_ref(), &value) {
+                            continue;
+                        }
+                        let envelope =
+                            Envelope::new(ops::op::DISPLAY_CLIPBOARD_CHANGED, Some(value));
+                        if !sessions.push(&session_id, envelope).await {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("剪贴板事件积压,丢弃 {skipped} 条");
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
     async fn display_takeover(&mut self, env: &Envelope) {
         if !self.require(env, Cap::DisplayInput).await {
             return;
@@ -1759,6 +1853,58 @@ impl Session {
             _ => String::new(),
         };
         self.reply(env, json!({"text": text})).await;
+    }
+    /// 下行剪贴板:console → 窗口所属 comp 的 Wayland 选区。
+    async fn display_clipboard_set(&mut self, env: &Envelope) {
+        if !self.require(env, Cap::DisplayInput).await {
+            return;
+        }
+        let p = payload_value(env);
+        let Some(id) = p
+            .get("window")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            self.err(env, ErrCode::BadRequest, "缺少 window").await;
+            return;
+        };
+        let Some(text) = p.get("text").and_then(Value::as_str) else {
+            self.err(env, ErrCode::BadRequest, "缺少 text").await;
+            return;
+        };
+        if text.is_empty() || text.len() > crate::display::MAX_CLIPBOARD_BYTES {
+            self.err(env, ErrCode::BadRequest, "text 长度须为 1..=4MiB")
+                .await;
+            return;
+        }
+        if !crate::display::clipboard_fits_control_frame(text) {
+            self.err(env, ErrCode::BadRequest, "text 转义后超过控制通道上限")
+                .await;
+            return;
+        }
+        if !self
+            .server
+            .authorizer
+            .window_allowed(self.claims.as_ref().unwrap(), id)
+        {
+            self.err(env, ErrCode::Forbidden, "令牌未授权该窗口").await;
+            return;
+        }
+        // 与 input 同规:agent 持有窗口时拒绝。
+        if self.server.broker.window_mode(id).await.as_deref() == Some("agent") {
+            self.err(env, ErrCode::Conflict, "agent 正持有输入,无法写入剪贴板")
+                .await;
+            return;
+        }
+        let text = p.get("text").and_then(Value::as_str).unwrap_or_default();
+        match self.server.broker.clipboard_set(id, text).await {
+            Ok(()) => self.reply(env, json!({"ok": true})).await,
+            Err(DisplayError::NotFound(_)) => {
+                self.err(env, ErrCode::NotFound, &format!("窗口不存在: {id}"))
+                    .await;
+            }
+            Err(e) => self.err(env, ErrCode::Conflict, &e.to_string()).await,
+        }
     }
     async fn require(&mut self, env: &Envelope, cap: Cap) -> bool {
         match self.claims.as_ref() {
@@ -2081,6 +2227,16 @@ async fn sha256_file(path: &Path) -> std::io::Result<String> {
 fn payload_value(env: &Envelope) -> Value {
     env.payload.clone().unwrap_or_else(|| json!({}))
 }
+
+/// 剪贴板事件只发给令牌窗口 ACL 覆盖该窗口的会话。
+fn clipboard_event_allowed(claims: Option<&Claims>, value: &Value) -> bool {
+    let window = value.get("window").and_then(Value::as_u64);
+    window.is_some_and(|window| {
+        u32::try_from(window).is_ok_and(|window| {
+            claims.is_some_and(|claims| mixum_protocol::token::window_allowed(claims, window))
+        })
+    })
+}
 /// 可选字符串数组字段(mem.search 的 kinds/providers)。
 fn string_list(value: Option<&Value>) -> Option<Vec<String>> {
     value.and_then(Value::as_array).map(|items| {
@@ -2171,6 +2327,40 @@ mod tests {
     }
 
     /// 断开的会话按 TTL 过期;仍连接的会话不因 TTL 被回收。
+    #[test]
+    fn clipboard_event_requires_window_acl() {
+        let restricted = Claims {
+            sub: "restricted".into(),
+            caps: vec![Cap::DisplayView],
+            iat: 0,
+            exp: 0,
+            jti: String::new(),
+            task_id: String::new(),
+            windows: vec![2],
+        };
+        assert!(clipboard_event_allowed(
+            Some(&restricted),
+            &json!({"window": 2, "text": "ok"})
+        ));
+        assert!(!clipboard_event_allowed(
+            Some(&restricted),
+            &json!({"window": 3, "text": "no"})
+        ));
+        let all = Claims {
+            windows: vec![],
+            ..restricted.clone()
+        };
+        assert!(clipboard_event_allowed(
+            Some(&all),
+            &json!({"window": 3, "text": "ok"})
+        ));
+        assert!(!clipboard_event_allowed(None, &json!({"window": 2})));
+        assert!(!clipboard_event_allowed(
+            Some(&all),
+            &json!({"text": "no window"})
+        ));
+    }
+
     #[tokio::test]
     async fn session_ttl_applies_only_after_disconnect() {
         let store = SessionStore::new(4);

@@ -13,6 +13,24 @@ use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 pub const MODE_AGENT: &str = "agent";
 pub const MODE_USER: &str = "user";
 pub const MODE_FREE: &str = "free";
+pub const MAX_CLIPBOARD_BYTES: usize = 4 << 20;
+
+/// JSON 字符串转义后的字节数（与 serde_json/json-c 的转义规则一致）：
+/// 引号/反斜杠 2 字节，控制字符 6 字节，其余按 UTF-8 字节数。
+fn json_escaped_len(text: &str) -> usize {
+    text.chars()
+        .map(|ch| match ch {
+            '"' | '\\' => 2,
+            ch if (ch as u32) < 0x20 => 6,
+            ch => ch.len_utf8(),
+        })
+        .sum()
+}
+
+/// 下行文本必须能装进 agentd↔comp 的 16MiB 控制帧（留少量头部余量）。
+pub fn clipboard_fits_control_frame(text: &str) -> bool {
+    json_escaped_len(text) + 1024 <= MAX_COMP_FRAME
+}
 pub const CODEC_JPEG: &str = "jpeg";
 pub const CODEC_H264: &str = "h264";
 /// 无损 PNG + damage 补丁流（订阅者按需协商；旧客户端不受影响）。
@@ -151,6 +169,8 @@ pub struct Broker {
     comp: Arc<Mutex<HashMap<u64, CompConn>>>,
     comp_seq: Arc<std::sync::atomic::AtomicU64>,
     window_events: broadcast::Sender<Window>,
+    /// 容器选区变化(mixcomp 上行),payload = {window, text}。
+    clipboard_events: broadcast::Sender<serde_json::Value>,
     socket_path: PathBuf,
     /// 任务引擎是否活跃:活跃时新窗口归 agent 模式(用户接管需 claim)。
     tasks_active: Arc<std::sync::atomic::AtomicBool>,
@@ -164,6 +184,8 @@ pub struct Broker {
 #[derive(Clone)]
 struct CompConn {
     tx: mpsc::Sender<CompMessage>,
+    /// comp 是否声明了 clipboard 能力（capabilities 握手）；未声明不发 set。
+    clipboard: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -174,11 +196,13 @@ enum CompMessage {
 impl Broker {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let (window_events, _) = broadcast::channel(128);
+        let (clipboard_events, _) = broadcast::channel(8);
         Self {
             windows: Arc::new(Mutex::new(HashMap::new())),
             comp: Arc::new(Mutex::new(HashMap::new())),
             comp_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             window_events,
+            clipboard_events,
             pids: Arc::new(Mutex::new(HashMap::new())),
             socket_path: path.into(),
             tasks_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -235,6 +259,53 @@ impl Broker {
     }
     pub fn subscribe_windows(&self) -> broadcast::Receiver<Window> {
         self.window_events.subscribe()
+    }
+
+    pub fn subscribe_clipboard(&self) -> broadcast::Receiver<serde_json::Value> {
+        self.clipboard_events.subscribe()
+    }
+
+    pub async fn window_mode(&self, id: u32) -> Option<String> {
+        self.windows
+            .lock()
+            .await
+            .get(&id)
+            .map(|state| state.window.mode.clone())
+    }
+
+    /// 下行剪贴板:把文本发给窗口所属 comp(多 comp 源按 owner 路由)。
+    pub async fn clipboard_set(&self, id: u32, text: &str) -> Result<(), DisplayError> {
+        let owner = {
+            let all = self.windows.lock().await;
+            all.get(&id).ok_or(DisplayError::NotFound(id))?.owner
+        };
+        let (tx, supported) = {
+            let comps = self.comp.lock().await;
+            match comps.get(&owner) {
+                Some(conn) => (
+                    conn.tx.clone(),
+                    conn.clipboard.load(std::sync::atomic::Ordering::Relaxed),
+                ),
+                None => {
+                    return Err(DisplayError::Protocol(format!(
+                        "窗口 {id} 的 comp 连接已断开"
+                    )))
+                }
+            }
+        };
+        if !supported {
+            return Err(DisplayError::Protocol(
+                "窗口所属 comp 未声明剪贴板能力".into(),
+            ));
+        }
+        tx.send(CompMessage::Json(serde_json::json!({
+            "type": "clipboard.set",
+            "id": id,
+            "text": text,
+        })))
+        .await
+        .map_err(|_| DisplayError::Protocol("comp 控制通道已关闭".into()))?;
+        Ok(())
     }
     /// 任务引擎活跃状态切换:开始→现有 free 窗口转 agent;结束→agent 窗口回 free。
     /// 用户已接管(user)的窗口不受影响。
@@ -532,7 +603,13 @@ impl Broker {
             .comp_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, mut rx) = mpsc::channel(64);
-        self.comp.lock().await.insert(id, CompConn { tx });
+        self.comp.lock().await.insert(
+            id,
+            CompConn {
+                tx,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
         let write_task = tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 let (kind, payload) = match message {
@@ -706,6 +783,34 @@ impl Broker {
                         );
                     }
                 }
+                // comp 能力握手（clipboard 等）：记录后决定是否接受对应操作。
+                "capabilities" => {
+                    if let Some(clipboard) = message.clipboard {
+                        if let Some(conn) = self.comp.lock().await.get(&comp_id) {
+                            conn.clipboard
+                                .store(clipboard, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+                // 容器选区变化(mixcomp 上行):校验能力与 owner 后广播。
+                "clipboard" => {
+                    let supported = self.comp.lock().await.get(&comp_id).is_some_and(|conn| {
+                        conn.clipboard.load(std::sync::atomic::Ordering::Relaxed)
+                    });
+                    if !supported || self.window_owner(message.id).await != Some(comp_id) {
+                        self.protocol_errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                    if let Some(text) = message.text {
+                        if !text.is_empty() && text.len() <= MAX_CLIPBOARD_BYTES {
+                            let _ = self.clipboard_events.send(serde_json::json!({
+                                "window": message.id,
+                                "text": text,
+                            }));
+                        }
+                    }
+                }
                 // mixcomp 能力回告:该窗口实际的流编码(如请求 h264 但
                 // openh264 缺失时回 jpeg),更新订阅者与窗口并广播
                 "stream.info" => {
@@ -757,6 +862,10 @@ struct CompMessageWire {
     pid: Option<i32>,
     #[serde(default)]
     codec: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    clipboard: Option<bool>,
 }
 
 /// 把 spawn_gui 记录的启动信息与 broker 当前窗口按 pid 合并成快照元数据。
@@ -819,6 +928,79 @@ mod tests {
             broker.takeover(1, "release", false).await.unwrap(),
             MODE_FREE
         );
+    }
+
+    #[test]
+    fn clipboard_control_frame_bound() {
+        assert!(clipboard_fits_control_frame(&"a".repeat(4 << 20)));
+        assert!(clipboard_fits_control_frame(&"\"".repeat(4 << 20)));
+        // 3MiB 控制字符 JSON 转义后 18MiB，超过 16MiB 控制帧。
+        assert!(!clipboard_fits_control_frame(&"\u{1}".repeat(3 << 20)));
+    }
+
+    #[tokio::test]
+    async fn clipboard_requires_capability_and_owner() {
+        let broker = Broker::new("/tmp/mixum-agentd-test-clip.sock");
+        let (tx1, mut rx1) = mpsc::channel(8);
+        broker.comp.lock().await.insert(
+            1,
+            CompConn {
+                tx: tx1,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let (tx2, _rx2) = mpsc::channel(8);
+        broker.comp.lock().await.insert(
+            2,
+            CompConn {
+                tx: tx2,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        );
+        broker
+            .open_or_update(
+                Window {
+                    id: 5,
+                    app_id: "a".into(),
+                    title: "A".into(),
+                    width: 10,
+                    height: 10,
+                    focused: true,
+                    mode: MODE_FREE.into(),
+                    codec: None,
+                },
+                1,
+            )
+            .await;
+
+        // 未握手 → 拒绝，不下发假成功。
+        assert!(broker.clipboard_set(5, "x").await.is_err());
+        let cap = serde_json::to_vec(&serde_json::json!({
+            "type": "capabilities", "clipboard": true
+        }))
+        .unwrap();
+        broker.handle_comp(&cap, 1).await;
+        broker.clipboard_set(5, "down").await.unwrap();
+        let sent = rx1.recv().await.unwrap();
+        assert!(matches!(sent, CompMessage::Json(v) if v["type"] == "clipboard.set"));
+
+        let mut events = broker.subscribe_clipboard();
+        // 非 owner 上报丢弃。
+        let foreign = serde_json::to_vec(&serde_json::json!({
+            "type": "clipboard", "id": 5, "text": "foreign"
+        }))
+        .unwrap();
+        broker.handle_comp(&foreign, 2).await;
+        assert!(events.try_recv().is_err());
+        // owner 上报广播，payload 带窗口 id。
+        let owned = serde_json::to_vec(&serde_json::json!({
+            "type": "clipboard", "id": 5, "text": "up"
+        }))
+        .unwrap();
+        broker.handle_comp(&owned, 1).await;
+        let event = events.try_recv().unwrap();
+        assert_eq!(event["window"], 5);
+        assert_eq!(event["text"], "up");
     }
 
     #[tokio::test]
@@ -936,7 +1118,13 @@ mod tests {
     async fn attach_is_atomic_and_reports_not_found_without_stream_start() {
         let broker = Broker::new("/tmp/mixum-agentd-test-attach.sock");
         let (tx, mut rx) = mpsc::channel(8);
-        broker.comp.lock().await.insert(1, CompConn { tx });
+        broker.comp.lock().await.insert(
+            1,
+            CompConn {
+                tx,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        );
         assert!(matches!(
             broker.attach(42, "s", 30, CODEC_JPEG, 0).await,
             Err(DisplayError::NotFound(42))
@@ -990,7 +1178,13 @@ mod tests {
             )
             .await;
         let (tx, mut rx) = mpsc::channel(8);
-        broker.comp.lock().await.insert(1, CompConn { tx });
+        broker.comp.lock().await.insert(
+            1,
+            CompConn {
+                tx,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        );
         let (_, _, _, subscription) = broker.attach(3, "s-png", 10, CODEC_PNG, 90).await.unwrap();
         assert_eq!(subscription.codec, CODEC_PNG);
         match rx.recv().await.expect("stream.start") {
@@ -1034,8 +1228,20 @@ mod tests {
         let broker = Broker::new("/tmp/mixum-agentd-test-owners.sock");
         let (tx_a, mut rx_a) = mpsc::channel(8);
         let (tx_b, mut rx_b) = mpsc::channel(8);
-        broker.comp.lock().await.insert(10, CompConn { tx: tx_a });
-        broker.comp.lock().await.insert(20, CompConn { tx: tx_b });
+        broker.comp.lock().await.insert(
+            10,
+            CompConn {
+                tx: tx_a,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        );
+        broker.comp.lock().await.insert(
+            20,
+            CompConn {
+                tx: tx_b,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        );
         broker.open_or_update(window(1, "A"), 10).await;
         broker.open_or_update(window(1000, "B"), 20).await;
 
@@ -1190,7 +1396,13 @@ mod tests {
     async fn sync_notify_reaches_comp_queue() {
         let broker = Broker::new("/tmp/mixum-agentd-test-notify.sock");
         let (tx, mut rx) = mpsc::channel(4);
-        broker.comp.lock().await.insert(7, CompConn { tx });
+        broker.comp.lock().await.insert(
+            7,
+            CompConn {
+                tx,
+                clipboard: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        );
         broker.try_notify_comps(serde_json::json!({"type": "snapshot.freeze"}));
         match rx.recv().await.expect("应收到冻结通知") {
             CompMessage::Json(value) => assert_eq!(value["type"], "snapshot.freeze"),

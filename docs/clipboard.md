@@ -1,12 +1,9 @@
 > English translation of the Chinese document. Original: [clipboard.zh-CN.md](clipboard.zh-CN.md). Technical review pending.
 
-# Clipboard Sync (Route A) Design Draft
+# Clipboard Sync (Route A)
 
-> **Status: design draft, not implemented.** This document only describes the protocol and implementation boundaries; the code has not been merged, and the reference implementation exists only in a fork.
-> **Status: design / not implemented.** The protocol is described here; the code is not merged.
-Status: draft, pending upstream review. This document only describes the protocol and implementation boundaries and contains no code changes.
-The reference implementation is in the fork (`1179e72`, restored after sync at `475da2c`); see
-`tests/integration/clipboard-e2e.mjs` for the e2e test.
+> **Status: implemented in mixumOS; the MAP clipboard contract is still a Draft (RFC 0004).**
+> The implementation is in this tree; e2e is `tests/integration/clipboard-e2e.mjs`.
 
 ## 1. Background
 
@@ -84,13 +81,15 @@ Replies `{ "ok": true }`. Rules:
 {"op":"display.clipboard.changed","payload":{"window":3,"text":"hello"}}
 ```
 
-Pushed to sessions that have subscribed to `display.windows` **and whose token window ACL
-covers `window`** (the subscription itself requires `display.view`). `display.view` alone is
-not enough: clipboard contents are more sensitive than window imagery, and being able to see
-the full screen must not imply being able to read the clipboard of every window. `window` lets
-clients do window-level synchronization and echo suppression; it carries no comp id (clients
-are unaware of comps). Upstream content over 4 MiB is truncated and discarded; no partial text
-is pushed.
+Pushed only to sessions that explicitly opt in with `display.clipboard.subscribe`
+(requires `display.view`) **and whose token window ACL covers `window`**. A
+`display.windows` subscription alone must not deliver clipboard text: watching
+window metadata is not consent for clipboard content. `window` lets clients do
+window-level synchronization and echo suppression; it carries no comp id
+(clients are unaware of comps). v1 synchronizes non-empty text only — clearing a
+selection does not emit an event. Upstream content over 4 MiB is truncated and
+discarded; no partial text is pushed. Changed events are never replayed by
+`session.resume`; clients re-subscribe after resuming.
 
 Naming note: **it is named `display.clipboard.changed`**. Upstream already has a request of
 the same name, `display.clipboard`; reusing it as a push event would make the same op mean both
@@ -125,7 +124,8 @@ Upstream (container application → console):
 3. The comp reports `{"type":"clipboard","id":3,"text":"..."}`;
 4. The broker verifies that the window owner matches the comp the message came from, and
    broadcasts the event;
-5. Sessions subscribed to `display.windows` receive `display.clipboard.changed`;
+5. Sessions that called `display.clipboard.subscribe` receive `display.clipboard.changed`
+   (then filtered by the token window ACL);
 6. The console writes to the browser clipboard; it uses "the most recent round of text" for
    echo suppression, avoiding an infinite console→container→console round trip.
 
@@ -172,7 +172,8 @@ compositor implements the same semantics:
 ## 8. Security and Privacy
 
 - `set` reuses `display.input` and adds no new capability bit; events go only to
-  `display.windows` subscribers that already passed `display.view`;
+  `display.clipboard.subscribe` sessions that already passed `display.view` and the
+  per-window ACL;
 - Window ACL and agent-mode gating happen before delivery; a rejected request triggers no comp
   side effects;
 - A 4 MiB limit in both directions, counted in bytes (UTF-8); over-limit content is
@@ -219,8 +220,7 @@ Recommended split into commits within a single upstream PR:
 4. `console`: `clipboardSet`, event listeners, and echo suppression;
 5. `tests/integration/clipboard-e2e.mjs` and documentation write-back.
 
-Reference implementation: fork `1179e72` (original), `475da2c` (Route A restored after sync),
-`tests/integration/clipboard-e2e.mjs`.
+Implementation: this tree; e2e: `tests/integration/clipboard-e2e.mjs`.
 
 ## 11. Review Conclusions (2026-10-22)
 
@@ -234,3 +234,6 @@ Reference implementation: fork `1179e72` (original), `475da2c` (Route A restored
    `display.view` alone.
 5. Still to be scheduled: the Route A implementation for the B compositor; until then, `set`
    on its windows returns `conflict`. Rich MIME (`text/html`/images) is left for v2.
+6. (2026-10-26) Clipboard events require an explicit `display.clipboard.subscribe`;
+   `display.windows` alone is not consent. v1 does not emit events for empty
+   selections and never replays clipboard events.

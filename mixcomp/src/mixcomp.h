@@ -62,6 +62,10 @@ unsigned char *h264_encode(struct h264_encoder *enc, const unsigned char *bgra,
 
 struct mixcomp_server;
 
+// clipboard.c 的内部类型（服务器持有指针，定义在 clipboard.c）。
+struct clip_source;
+struct clip_read;
+
 // window —— 一个被隔离流送的顶层窗口。
 struct mixcomp_window {
 	struct mixcomp_server *server;
@@ -149,6 +153,12 @@ struct mixcomp_server {
 
 	int jpeg_quality;
 
+	// 剪贴板同步（clipboard.c）：内建 selection source + 选区读回。
+	struct clip_source *clip_source;
+	struct clip_read *clip_read;
+	struct wl_listener clip_sel_req;  // seat request_set_selection
+	struct wl_listener clip_sel_set;  // seat set_selection（外部替换自清理）
+
 	// 文本提交（text_input.c）：客户端 text-input-v3 对象与焦点窗口。
 	struct wlr_text_input_manager_v3 *text_input_mgr;
 	struct wl_list text_inputs; // struct mixcomp_text_input::link
@@ -169,6 +179,15 @@ void stream_send_frame(struct mixcomp_server *s, struct mixcomp_window *w,
 		const unsigned char *rgba, int stride, int width, int height,
 		uint32_t drm_format);
 void stream_poll_control(struct mixcomp_server *s);
+// 上行容器剪贴板文本（JSON 控制消息，type=clipboard）。
+void stream_send_clipboard(struct mixcomp_server *s, uint32_t window_id,
+		const char *text);
+// 控制通道就绪后上报 comp 能力（剪贴板握手）。
+void stream_send_capabilities(struct mixcomp_server *s);
+
+// clipboard.c —— 剪贴板同步（console ↔ 容器 Wayland 选区）。
+void clipboard_init(struct mixcomp_server *s);
+void clipboard_set(struct mixcomp_server *s, const char *text);
 
 // input.c —— 内建注入客户端。
 bool input_init(struct mixcomp_server *s);

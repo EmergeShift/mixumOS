@@ -13,6 +13,7 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_shm.h>
 #include <wlr/types/wlr_subcompositor.h>
@@ -264,6 +265,10 @@ int main(int argc, char **argv) {
 
 	// 数据设备（剪贴板转发的基础，v1 仅挂载）。
 	wlr_data_device_manager_create(server.display);
+	// data-control：wl-copy/wl-paste 等剪贴板工具走此协议（不依赖焦点）。
+	wlr_data_control_manager_v1_create(server.display);
+	// 剪贴板同步：console 推送设选区 + 容器复制读回上行。
+	clipboard_init(&server);
 
 	// text-input-v3：宿主输入法提交成串文本（中文等）到焦点窗口。
 	text_input_init(&server);

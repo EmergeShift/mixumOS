@@ -73,6 +73,7 @@ export class MixumClient {
   onTaskEvent: (e: TaskEvent) => void = () => {}
   onWindowPush: (w: WindowInfo) => void = () => {}
   onFrame: (f: VideoFrame) => void = () => {}
+  onClipboard: (window: number, text: string) => void = () => {}
   onAudio: (chunk: AudioChunk) => void = () => {}
 
   get connected(): boolean {
@@ -236,7 +237,11 @@ export class MixumClient {
 
   private async resubscribe(): Promise<void> {
     try {
-      await Promise.all([this.request('task.events'), this.request('display.windows')])
+      await Promise.all([
+        this.request('task.events'),
+        this.request('display.windows'),
+        this.request('display.clipboard.subscribe'),
+      ])
       for (const [win, sub] of this.attached) {
         await this.request<DisplayAttachResponse>('display.attach', {
           window: win,
@@ -280,6 +285,11 @@ export class MixumClient {
       case 'display.windows':
         this.onWindowPush(env.payload as WindowInfo)
         break
+      case 'display.clipboard.changed': {
+        const payload = env.payload as { window?: number; text?: string } | null
+        this.onClipboard(payload?.window ?? 0, payload?.text ?? '')
+        break
+      }
       default:
         break
     }
@@ -423,6 +433,14 @@ export class MixumClient {
 
   takeover(windowId: number, action: 'claim' | 'release', force = false): Promise<{ mode: string }> {
     return this.request<{ mode: string }>('display.takeover', { window: windowId, action, force })
+  }
+
+  clipboardSet(windowId: number, text: string): Promise<{ ok: boolean }> {
+    return this.request('display.clipboard.set', { window: windowId, text })
+  }
+
+  clipboardSubscribe(): Promise<{ subscribed: boolean }> {
+    return this.request('display.clipboard.subscribe', {})
   }
 
   // ── gateway M2:节点列表 / 设备配对 / 吊销 ──

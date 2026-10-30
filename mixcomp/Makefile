@@ -11,18 +11,18 @@ XKB_LIBS     := $(shell pkg-config --libs xkbcommon 2>/dev/null || echo -lxkbcom
 HAVE_OPENH264 := $(shell pkg-config --exists openh264 2>/dev/null && echo 1)
 WAYLAND_SCANNER := wayland-scanner
 
-CFLAGS  := -std=c11 -g -O2 -Wall -Wextra -Wno-unused-parameter -Isrc \
+CFLAGS  := -std=c11 -g -O2 -pthread -Wall -Wextra -Wno-unused-parameter -Isrc \
 	$(shell pkg-config --cflags $(WLROOTS_PC) wayland-server xkbcommon 2>/dev/null) \
 	$(JSONC_CFLAGS) $(PNG_CFLAGS) -D_GNU_SOURCE -DWLR_USE_UNSTABLE
 LDLIBS  := $(shell pkg-config --libs $(WLROOTS_PC) wayland-server xkbcommon 2>/dev/null) \
-	$(JSONC_LIBS) $(JPEG_LIBS) $(PNG_LIBS) $(XKB_LIBS) -lwayland-client -lrt
+	$(JSONC_LIBS) $(JPEG_LIBS) $(PNG_LIBS) $(XKB_LIBS) -lwayland-client -lrt -pthread
 
 ifeq ($(HAVE_OPENH264),1)
 CFLAGS += -DHAVE_OPENH264 $(shell pkg-config --cflags openh264 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs openh264 2>/dev/null)
 endif
 
-SRCS := src/main.c src/window.c src/stream.c src/input.c src/text_input.c src/encoder_h264.c
+SRCS := src/main.c src/window.c src/stream.c src/input.c src/text_input.c src/clipboard.c src/encoder_h264.c
 OBJS := $(SRCS:.c=.o)
 # 协议文件现场生成（发行版打包时 build() 会装 wayland-protocols，无需补丁）：
 # - xdg-shell 头供 wlroots 头文件引用（wlr_xdg_shell.h）；

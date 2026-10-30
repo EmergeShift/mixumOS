@@ -105,8 +105,9 @@
 `session.resume`:`{ "sessionId", "lastSeq" }` →
 `{ "resumed": true, "replayed": N, sessionId, server, arch, kernel, caps,
 profiles, versions, heartbeat }`。服务端每会话保留 ≥256 条推送 envelope
-的环形缓冲,重放 `seq > lastSeq` 的消息后才发新推送;订阅状态与 claims
-随会话恢复,客户端无需重新 hello/`task.events`。未知或过期会话回
+的环形缓冲,重放 `seq > lastSeq` 的消息后才发新推送;task/window 订阅状态与
+claims 随会话恢复;剪贴板订阅不随 resume 恢复,客户端须重新
+`display.clipboard.subscribe`,且剪贴板事件不入重放环。未知或过期会话回
 `not_found`,客户端应退回完整握手。
 
 ### 4.2 任务
@@ -171,6 +172,17 @@ snapshots.md §4。`guiSessions` 是 OS 侧扩展（restore 后重放窗口）�
 | display.input | `{ window, type, … }`;type = `pointer_motion`/`pointer_button`/`pointer_axis`/`key`/`text`;`text` 为宿主输入法已提交的字符串(≤8192 字节),经服务端 text-input-v3 交给焦点窗口 | `{ ok: true }` |
 | display.takeover | `{ window, action: claim\|release, force? }` | `{ mode }` |
 | display.windows | — | `{ subscribed }`(此后推送窗口增删/改名) |
+| display.clipboard.set | `{ window, text }` | `{ ok: true }` |
+| display.clipboard.subscribe | — | `{ subscribed }`(显式开通剪贴板变化推送) |
+
+display.clipboard.set 把 console 侧文本设为窗口所属 comp 的 seat selection
+(容器应用可直接粘贴);需 display.input 能力,窗口归 agent 时拒绝(与注入同规),
+text 1..=4MiB、空串拒绝。客户端必须显式发送 `display.clipboard.subscribe`
+(需 display.view)后,服务器才以 op `display.clipboard.changed`(payload
+`{ window, text }`)推送容器侧剪贴板变化;事件再次按令牌的窗口 ACL 过滤,
+空选区不产生事件,且不进入 session.resume 重放环。未声明剪贴板能力的 comp
+返回 conflict。console 写入浏览器剪贴板并以“最近一轮文本”做回声抑制,浏览器
+focus/paste 时反向推送。
 
 ### 4.5 文件传输
 
