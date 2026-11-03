@@ -1,7 +1,7 @@
 use crate::{Store, StoreError, CHUNK_SIZE};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
@@ -49,6 +49,12 @@ pub struct FileEntry {
     pub dev: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub ino: u64,
+    /// 纳秒级 mtime，只用于复用判定（`dev`/`ino` 同理）。
+    ///
+    /// 0 表示"未知"：老 manifest 和 Go 参考实现产出的清单都没有这个字段，
+    /// 这类条目一律当作不可复用，宁可多读一遍也不能错用旧块。
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub mtime: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,9 +75,15 @@ pub struct PackStats {
     pub files: usize,
     pub chunks: usize,
     pub bytes_logical: u64,
+    /// 复用上一条 manifest 的条目数：这些文件只做了 `stat`，没有读内容。
+    pub reused_files: usize,
 }
 
 fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_i64(value: &i64) -> bool {
     *value == 0
 }
 
@@ -89,10 +101,29 @@ impl Manifest {
         store: &Store,
         skip: &[String],
     ) -> Result<(Self, PackStats), ManifestError> {
+        Self::pack_directory_reusing(root, store, skip, None)
+    }
+
+    /// 打包目录，并尽量复用 `previous` 里未变化文件的块列表。
+    ///
+    /// 无变更快照原来要把每个文件完整读一遍再逐块哈希，50 MiB 工作区光这一
+    /// 步就是几十毫秒。`dev`/`ino`/`size`/`mtime` 全对上时内容不可能变（和
+    /// restic 同一套假设），直接沿用旧块列表，这一轮只剩 `stat`。
+    ///
+    /// 复用是**保守**的：任一条件不满足、或旧块已被 GC 掉，就退回读文件。
+    pub fn pack_directory_reusing(
+        root: impl AsRef<Path>,
+        store: &Store,
+        skip: &[String],
+        previous: Option<&Manifest>,
+    ) -> Result<(Self, PackStats), ManifestError> {
         let root = root.as_ref();
         let mut manifest = Self::empty();
         let mut stats = PackStats::default();
-        walk(root, root, store, skip, &mut manifest, &mut stats)?;
+        let index: HashMap<&str, &FileEntry> = previous
+            .map(|m| m.files.iter().map(|f| (f.path.as_str(), f)).collect())
+            .unwrap_or_default();
+        walk(root, root, store, skip, &mut manifest, &mut stats, &index)?;
         manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
         manifest.dirs.sort_by(|a, b| a.path.cmp(&b.path));
         Ok((manifest, stats))
@@ -204,6 +235,7 @@ fn walk(
     skip: &[String],
     m: &mut Manifest,
     stats: &mut PackStats,
+    index: &HashMap<&str, &FileEntry>,
 ) -> Result<(), ManifestError> {
     let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
@@ -232,12 +264,32 @@ fn walk(
                 chunks: Vec::new(),
                 dev: 0,
                 ino: 0,
+                mtime: 0,
             });
             stats.files += 1;
         } else if meta.is_dir() {
             m.dirs.push(DirEntry { path: rel, mode });
-            walk(root, &path, store, skip, m, stats)?;
+            walk(root, &path, store, skip, m, stats, index)?;
         } else if meta.is_file() {
+            let stat = FileStat::of(&meta);
+            if let Some(entry) = index.get(rel.as_str()) {
+                if let Some(chunks) = reusable_chunks(entry, &stat, store) {
+                    m.files.push(FileEntry {
+                        path: rel,
+                        mode,
+                        size: stat.size as i64,
+                        symlink: String::new(),
+                        chunks,
+                        dev: stat.dev,
+                        ino: stat.ino,
+                        mtime: stat.mtime,
+                    });
+                    stats.files += 1;
+                    stats.reused_files += 1;
+                    stats.bytes_logical += stat.size;
+                    continue;
+                }
+            }
             let mut file = fs::File::open(&path)?;
             let mut chunks = Vec::new();
             let mut size = 0u64;
@@ -258,8 +310,9 @@ fn walk(
                 size: size as i64,
                 symlink: String::new(),
                 chunks,
-                dev: 0,
-                ino: 0,
+                dev: stat.dev,
+                ino: stat.ino,
+                mtime: stat.mtime,
             });
             stats.files += 1;
             stats.bytes_logical += size;
@@ -272,11 +325,82 @@ fn walk(
                 chunks: Vec::new(),
                 dev: 0,
                 ino: 0,
+                mtime: 0,
             });
             stats.files += 1;
         }
     }
     Ok(())
+}
+
+/// 复用判定要用的元数据快照。
+struct FileStat {
+    size: u64,
+    mtime: i64,
+    dev: u64,
+    ino: u64,
+}
+
+impl FileStat {
+    fn of(meta: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                size: meta.len(),
+                mtime: mtime_nanos(meta),
+                dev: meta.dev(),
+                ino: meta.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                size: meta.len(),
+                mtime: mtime_nanos(meta),
+                dev: 0,
+                ino: 0,
+            }
+        }
+    }
+}
+
+fn mtime_nanos(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|delta| delta.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+/// 旧条目能不能直接沿用。任一条件不满足就返回 `None`，调用方退回读文件。
+///
+/// 判定沿用 restic 的假设：`ino`+`dev`+`size`+`mtime` 都没变，内容就没变。
+/// 反例是"改完内容再把 mtime 改回去"，这种只有真读一遍才看得出来——代价是
+/// 每次快照都退化成全量读取，不划算。
+fn reusable_chunks(entry: &FileEntry, stat: &FileStat, store: &Store) -> Option<Vec<String>> {
+    // 只复用普通文件：符号链接、管道、设备节点没有内容。
+    if entry.mode & GO_MODE_TYPE != 0 {
+        return None;
+    }
+    if entry.mtime == 0 || entry.mtime != stat.mtime {
+        return None;
+    }
+    if entry.size != stat.size as i64 {
+        return None;
+    }
+    if entry.ino != 0 && entry.ino != stat.ino {
+        return None;
+    }
+    if entry.dev != 0 && entry.dev != stat.dev {
+        return None;
+    }
+    // 上一条 manifest 所属的节点可能已经被裁剪，块对象不在了。这时沿用旧块
+    // 会让恢复拿不到数据，只能重读。
+    if !entry.chunks.iter().all(|hash| store.has(hash)) {
+        return None;
+    }
+    Some(entry.chunks.clone())
 }
 
 #[cfg(unix)]

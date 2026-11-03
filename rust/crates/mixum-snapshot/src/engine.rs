@@ -187,7 +187,13 @@ impl Engine {
         // pre-frozen cgroup/task makes parasite injection hang.
         let mut disk_action = || {
             if do_disk {
-                let (m, stats) = Manifest::pack_directory(&self.root, &self.store, &self.skip)?;
+                // 父节点的 disk 清单是这一轮复用的依据：没变的文件连读都不用读。
+                let (m, stats) = Manifest::pack_directory_reusing(
+                    &self.root,
+                    &self.store,
+                    &self.skip,
+                    parent.disk.as_ref(),
+                )?;
                 node.size_bytes += stats.bytes_logical;
                 node.chunks += m.chunks().len();
                 node.disk = Some(m);
