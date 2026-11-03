@@ -1769,6 +1769,7 @@ version = "0.1.6"
 dependencies = [
  "aes-gcm",
  "hkdf",
+ "libc",
  "mixum-protocol",
  "rand 0.8.8",
  "serde",

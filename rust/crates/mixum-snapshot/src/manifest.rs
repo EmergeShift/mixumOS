@@ -1,4 +1,4 @@
-use crate::{Store, StoreError, CHUNK_SIZE};
+use crate::{store::sync_dir, Store, StoreError, CHUNK_SIZE};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -93,6 +93,8 @@ impl Manifest {
         let mut manifest = Self::empty();
         let mut stats = PackStats::default();
         walk(root, root, store, skip, &mut manifest, &mut stats)?;
+        // 块是 `put_deferred` 写的（逐块不 fsync），这里一次落盘。
+        store.sync()?;
         manifest.files.sort_by(|a, b| a.path.cmp(&b.path));
         manifest.dirs.sort_by(|a, b| a.path.cmp(&b.path));
         Ok((manifest, stats))
@@ -170,7 +172,7 @@ impl Manifest {
                     out.write_all(&store.get(hash)?)?;
                     count += 1;
                 }
-                out.sync_all()?;
+                sync_file(&out)?;
                 drop(out);
                 set_mode(&tmp, f.mode & 0o777)?;
                 fs::rename(tmp, target)?;
@@ -179,6 +181,10 @@ impl Manifest {
         directory_modes.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
         for (path, mode) in directory_modes {
             set_mode(&path, mode)?;
+        }
+        // 一万个文件逐个 fsync 要二十多秒；整批写完刷一次就够。
+        if dst.is_dir() {
+            sync_dir(dst)?;
         }
         Ok(count)
     }
@@ -248,7 +254,7 @@ fn walk(
                     break;
                 }
                 buf.truncate(n);
-                chunks.push(store.put(&buf)?);
+                chunks.push(store.put_deferred(&buf)?);
                 size += n as u64;
                 stats.chunks += 1;
             }
@@ -277,6 +283,17 @@ fn walk(
         }
     }
     Ok(())
+}
+
+/// 单文件落盘策略：Linux 上推迟到 `sync_dir` 一次完成，其他平台当场 fsync。
+#[cfg(target_os = "linux")]
+fn sync_file(_file: &fs::File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_file(file: &fs::File) -> io::Result<()> {
+    file.sync_all()
 }
 
 #[cfg(unix)]
