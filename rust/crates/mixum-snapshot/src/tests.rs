@@ -80,6 +80,7 @@ fn manifest_rejects_unsafe_paths() {
             chunks: vec![],
             dev: 0,
             ino: 0,
+            mtime: 0,
         }],
         dirs: vec![],
     };
@@ -265,6 +266,7 @@ fn materialize_rejects_symlink_parent() {
             chunks: vec![hash],
             dev: 0,
             ino: 0,
+            mtime: 0,
         }],
     };
     #[cfg(unix)]
@@ -477,4 +479,109 @@ fn metadata_hook_attaches_gui_sessions() {
 
     let stored = e.tree.get(&node.id).unwrap();
     assert_eq!(stored.gui_sessions[0].args, vec!["--hold"]);
+}
+
+fn pack(root: &Path, store: &Store, previous: Option<&Manifest>) -> (Manifest, PackStats) {
+    Manifest::pack_directory_reusing(root, store, &[], previous).unwrap()
+}
+
+fn chunk_of<'a>(manifest: &'a Manifest, path: &str) -> &'a Vec<String> {
+    &manifest
+        .files
+        .iter()
+        .find(|f| f.path == path)
+        .unwrap_or_else(|| panic!("missing {path}"))
+        .chunks
+}
+
+#[test]
+fn manifest_reuse_skips_unchanged_files() {
+    let data = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let store = Store::open(data.path(), None, "reuse").unwrap();
+    fs::write(root.path().join("a.txt"), "alpha").unwrap();
+    fs::write(root.path().join("b.txt"), "bravo").unwrap();
+
+    let (first, stats) = pack(root.path(), &store, None);
+    assert_eq!(stats.reused_files, 0);
+    assert_eq!(stats.files, 2);
+
+    let (second, stats) = pack(root.path(), &store, Some(&first));
+    assert_eq!(stats.reused_files, 2, "两个文件都该命中复用");
+    assert_eq!(stats.chunks, 0, "复用时不应该再产生块");
+    assert_eq!(second, first, "复用出来的清单要和重新打包完全一致");
+}
+
+#[test]
+fn manifest_reuse_rereads_changed_files() {
+    let data = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let store = Store::open(data.path(), None, "reuse").unwrap();
+    fs::write(root.path().join("a.txt"), "alpha").unwrap();
+    fs::write(root.path().join("b.txt"), "bravo").unwrap();
+    let (first, _) = pack(root.path(), &store, None);
+
+    fs::write(root.path().join("b.txt"), "bravo but longer").unwrap();
+    let (second, stats) = pack(root.path(), &store, Some(&first));
+
+    assert_eq!(stats.reused_files, 1, "只有 a.txt 该被复用");
+    assert_eq!(chunk_of(&second, "a.txt"), chunk_of(&first, "a.txt"));
+    assert_ne!(chunk_of(&second, "b.txt"), chunk_of(&first, "b.txt"));
+}
+
+#[test]
+fn manifest_reuse_rejects_same_size_with_new_mtime() {
+    let data = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let store = Store::open(data.path(), None, "reuse").unwrap();
+    fs::write(root.path().join("a.txt"), "alpha").unwrap();
+    let (first, _) = pack(root.path(), &store, None);
+
+    // 等长但内容不同：size 和 ino 都不变，只有 mtime 能区分。
+    fs::write(root.path().join("a.txt"), "beta!").unwrap();
+    let (second, stats) = pack(root.path(), &store, Some(&first));
+
+    assert_eq!(stats.reused_files, 0);
+    assert_ne!(chunk_of(&second, "a.txt"), chunk_of(&first, "a.txt"));
+}
+
+#[test]
+fn manifest_reuse_ignores_entries_without_mtime() {
+    let data = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let store = Store::open(data.path(), None, "reuse").unwrap();
+    fs::write(root.path().join("a.txt"), "alpha").unwrap();
+    let (first, _) = pack(root.path(), &store, None);
+
+    // 老 manifest 和 Go 参考实现都没有 mtime 字段，反序列化后是 0。
+    let mut legacy = first.clone();
+    for file in &mut legacy.files {
+        file.mtime = 0;
+    }
+    let (second, stats) = pack(root.path(), &store, Some(&legacy));
+
+    assert_eq!(stats.reused_files, 0, "mtime 未知就不能复用");
+    assert_eq!(second, first);
+}
+
+#[test]
+fn manifest_reuse_falls_back_when_chunks_are_gone() {
+    let data = TempDir::new().unwrap();
+    let root = TempDir::new().unwrap();
+    let store = Store::open(data.path(), None, "reuse").unwrap();
+    fs::write(root.path().join("a.txt"), "alpha").unwrap();
+    let (first, _) = pack(root.path(), &store, None);
+
+    // 模拟父节点被裁剪：块对象被 sweep 掉。
+    for hash in chunk_of(&first, "a.txt") {
+        let object = data.path().join("objects").join(&hash[..2]).join(&hash[2..]);
+        fs::remove_file(object).unwrap();
+    }
+
+    let (second, stats) = pack(root.path(), &store, Some(&first));
+    assert_eq!(stats.reused_files, 0, "块没了必须重读");
+    assert_eq!(second, first, "重读出来的内容应当和原来一致");
+    for hash in chunk_of(&second, "a.txt") {
+        assert!(store.has(hash), "块对象应当被重新写回");
+    }
 }
