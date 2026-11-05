@@ -83,6 +83,16 @@ physical attacks, and sensitive data residency in memory snapshots (CRIU image e
   Landlock, it falls back to the container boundary (unprivileged + separate workspace volume). Semantic interception of
   high-risk commands is performed on the MixumART side; the OS layer is responsible only for last-resort rollback and resource boundaries.
 
+### 5.1 sudo / privilege broker (opt-in)
+
+- Disabled by default: `/run/mixum/sudo.sock` is created only with `--enable-privilege` or `MIXUM_ENABLE_PRIVILEGE=1`.
+- Intended for single-tenant, trusted nodes only; it is not a general-purpose sudo and does not remove the need for container isolation.
+- Before approval the broker resolves the executable to a canonical absolute path in a fixed root-owned PATH (or requires an absolute path), rejects relative paths/cwd and shell/wrapper entry points, verifies that the file and its whole ancestor chain are root-owned and not group/other-writable, and records the SHA-256 together with the command in the approval event and audit log.
+- After approval it executes a root-only pinned copy of those exact bytes when agentd runs as root, keeps `argv[0]`, runs in its own process group, caps output, and kills the whole group on timeout.
+- Pending requests and request rates are bounded; peer credentials are mandatory (the connection is refused if they cannot be read); audit records approver, resolved path, hash and result.
+- If agentd itself runs as a non-root user (the distribution unit runs as `mixum`), approved commands run as that user; the broker does not elevate. Treat it as an approval/audit layer unless the daemon runs as root.
+- Known residual risks: the denylist cannot be exhaustive (interpreters, `xargs`, `find -exec`, build hooks), and the hash/pin path still leaves a small TOCTOU window; the socket directory must be owned by a trusted account.
+
 ## 6. Evolution Slots (Phase Markers)
 
 - [Phase 4] Token revocation list (jti → embedded KV (same sled as the snapshot tree) or redis);

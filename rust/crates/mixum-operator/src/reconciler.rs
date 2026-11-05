@@ -143,6 +143,7 @@ fn task_pod(task: &MixumTask) -> Result<k8s_openapi::api::core::v1::Pod, Error> 
             "/usr/bin/mixumd".into(),
             "--config".into(),
             "/dev/null".into(),
+            "--enable-privilege".into(),
         ]),
         args: Some(Vec::new()),
         ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
@@ -400,7 +401,7 @@ mod tests {
         assert_eq!(
             container.command.as_deref(),
             Some(
-                ["/usr/bin/mixumd", "--config", "/dev/null"]
+                ["/usr/bin/mixumd", "--config", "/dev/null", "--enable-privilege"]
                     .map(String::from)
                     .as_slice()
             )
