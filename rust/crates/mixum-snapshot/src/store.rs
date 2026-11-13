@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
 };
 use thiserror::Error;
 
@@ -38,6 +41,9 @@ pub struct Store {
     store_id: String,
     cipher: Option<Aes256Gcm>,
     marks: Mutex<std::collections::HashSet<String>>,
+    /// 有没有走 `put_deferred` 写过新块。`sync` 据此决定要不要真的刷盘：
+    /// 无变更快照一个块都不写，这时 syncfs 只会白白刷一遍整个文件系统。
+    deferred_writes: AtomicBool,
 }
 
 impl Store {
@@ -68,6 +74,7 @@ impl Store {
             store_id,
             cipher,
             marks: Mutex::new(Default::default()),
+            deferred_writes: AtomicBool::new(false),
         })
     }
 
@@ -88,6 +95,38 @@ impl Store {
     }
 
     pub fn put(&self, plain: &[u8]) -> Result<String, StoreError> {
+        self.put_inner(plain, true)
+    }
+
+    /// 批量写入用：跳过每块的 fsync，由调用方整批写完后调 [`Store::sync`]。
+    ///
+    /// 一万个小文件逐个 fsync 是 O(n) 次往返（容器里一次约 2 ms，一次冷快照
+    /// 就是二十多秒），而这批块的落盘只需要一次 `syncfs`。
+    ///
+    /// 没有 `syncfs` 的平台退回 `put`，语义不变。
+    pub fn put_deferred(&self, plain: &[u8]) -> Result<String, StoreError> {
+        #[cfg(target_os = "linux")]
+        {
+            self.put_inner(plain, false)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.put_inner(plain, true)
+        }
+    }
+
+    /// 把此前 `put_deferred` 写入的块一次性落盘。
+    ///
+    /// 一个块都没写就不刷——无变更快照走的正是这条路径，而 `syncfs` 会把整个
+    /// 文件系统的脏页都刷一遍，白花几十毫秒。
+    pub fn sync(&self) -> Result<(), StoreError> {
+        if !self.deferred_writes.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
+        sync_dir(&self.dir).map_err(StoreError::Io)
+    }
+
+    fn put_inner(&self, plain: &[u8], durable: bool) -> Result<String, StoreError> {
         let hash = hash_bytes(plain);
         let path = self.path(&hash)?;
         if path.is_file() {
@@ -129,7 +168,11 @@ impl Store {
             .open(&tmp)?;
         use std::io::Write;
         file.write_all(&blob)?;
-        file.sync_all()?;
+        if durable {
+            file.sync_all()?;
+        } else {
+            self.deferred_writes.store(true, Ordering::SeqCst);
+        }
         drop(file);
         match fs::rename(&tmp, &path) {
             Ok(()) => Ok(hash),
@@ -247,5 +290,29 @@ fn validate_hash(hash: &str) -> Result<(), StoreError> {
     if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(StoreError::InvalidHash(hash.into()));
     }
+    Ok(())
+}
+
+/// 把 `dir` 所在文件系统上此前写入的内容刷到磁盘。
+///
+/// 逐文件 fsync 在「一万个小文件」这种轮廓下是 O(n) 次往返；`syncfs(2)` 一次
+/// 调用就覆盖同一文件系统上的全部写入，返回时调用前的写入都已落盘，语义等价。
+/// 代价是它也会刷掉同一文件系统上别人的脏页——对快照这种批量写场景仍然划算。
+#[cfg(target_os = "linux")]
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let handle = fs::File::open(dir)?;
+    // SAFETY: `handle` 在整个调用期间有效，syncfs 只读这个 fd。
+    let rc = unsafe { libc::syncfs(handle.as_raw_fd()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// 没有 `syncfs` 的平台不做批量落盘：调用方在这些平台上仍然逐文件 fsync。
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
