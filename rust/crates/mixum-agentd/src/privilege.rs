@@ -313,11 +313,35 @@ impl PrivilegeBroker {
                     .map_err(|error| format!("privilege pin 目录 chown: {error}"))?;
             }
         }
-        let pinned = pin_dir.join(format!("{}.bin", new_id()));
+        // 固定化副本必须按「程序名」命名，不能叫 `<ULID>.bin`：
+        // Ubuntu 的 rust-coreutils 带 `require-utility` 补丁（LP#2137745），
+        // argv[0] 与可执行文件名对不上时直接报 "Security violation" 并以 1 退出。
+        // 同时保留原始程序名也让 busybox 这类多调用二进制能按 basename 分发
+        // applet（Alpine 的 /usr/bin/id -> /bin/busybox）。
+        let name = Path::new(&plan.program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("程序名非法")?;
+        // 每次请求一个独立子目录：同名文件不能互相覆盖，也不能被并发请求抢走。
+        let pin_root = pin_dir.join(new_id());
+        fs::create_dir_all(&pin_root)
+            .map_err(|error| format!("创建 privilege pin 目录: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{chown, PermissionsExt};
+            fs::set_permissions(&pin_root, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("设置 privilege pin 目录权限: {error}"))?;
+            if nix::unistd::Uid::current().is_root() {
+                chown(&pin_root, Some(0), Some(0))
+                    .map_err(|error| format!("privilege pin 目录 chown: {error}"))?;
+            }
+        }
+        let pinned = pin_root.join(name);
         fs::copy(&plan.resolved, &pinned).map_err(|error| format!("复制可执行文件: {error}"))?;
         let pinned_hash = hash_file(&pinned)?;
         if pinned_hash != plan.sha256 {
             let _ = fs::remove_file(&pinned);
+            let _ = fs::remove_dir(&pin_root);
             return Err("可执行文件在审批后被修改（哈希不一致）".into());
         }
         #[cfg(unix)]
@@ -326,11 +350,9 @@ impl PrivilegeBroker {
             fs::set_permissions(&pinned, fs::Permissions::from_mode(0o500))
                 .map_err(|error| format!("设置 privilege pin 文件权限: {error}"))?;
         }
+        // argv[0] 用默认值（固定化后的完整路径）：basename 就是程序名，
+        // busybox 能分发，require-utility 补丁也不会因为名字不符而拒绝。
         let mut cmd = tokio::process::Command::new(&pinned);
-        // 固化路径会解开符号链接（Alpine 的 /usr/bin/id -> /bin/busybox）；
-        // 保留原始 argv[0] 才能让 busybox applet 按审批时的名字分发。
-        use std::os::unix::process::CommandExt;
-        cmd.as_std_mut().arg0(&plan.program);
         cmd.args(&plan.args)
             .current_dir(&plan.cwd)
             .env_clear()
@@ -348,11 +370,13 @@ impl PrivilegeBroker {
             Ok(child) => child,
             Err(error) => {
                 let _ = fs::remove_file(&pinned);
+                let _ = fs::remove_dir(&pin_root);
                 return Err(format!("启动 root 命令: {error}"));
             }
         };
-        // 子进程已 exec,立即解除目录项;即使后续路径被替换也不会影响本次执行。
-        let _ = fs::remove_file(&pinned);
+        // 不在 exec 后立刻 unlink：进程启动时还会读 /proc/self/exe（见上面的
+        // require-utility 说明），提前删掉会让它看到 "id (deleted)"，名字又对不上。
+        // 清理挪到命令结束之后，pin 目录本身是 0700 root-only，窗口期不放开权限。
         // process_group(0) 让 pid 同时是进程组 id；超时要连同子孙一起杀。
         let pgid = child.id();
         let mut stdout = child.stdout.take().ok_or("缺少 stdout 管道")?;
@@ -367,7 +391,7 @@ impl PrivilegeBroker {
             let status = child.wait().await?;
             Ok::<_, std::io::Error>((status, out, err, a?, b?))
         });
-        match tokio::time::timeout(EXEC_TIMEOUT, collector).await {
+        let result = match tokio::time::timeout(EXEC_TIMEOUT, collector).await {
             Ok(joined) => {
                 let (status, out, err, out_overflow, err_overflow) = joined
                     .map_err(|error| format!("root 命令任务失败: {error}"))?
@@ -384,7 +408,10 @@ impl PrivilegeBroker {
                 }
                 Err("root 命令超时（已终止进程组）".into())
             }
-        }
+        };
+        let _ = fs::remove_file(&pinned);
+        let _ = fs::remove_dir(&pin_root);
+        result
     }
 
     async fn audit(
@@ -761,6 +788,32 @@ mod approval_tests {
         }
     }
 
+    /// 通过 broker 执行 `id -u` 在 CI 上出现过 exit=1 且 stdout 为空。
+    /// 失败时把执行现场拼进断言消息：broker 看到的 stdout/stderr、当前 uid、
+    /// 以及同进程直接执行 `id -u` 的结果——一眼能分清是环境跑不了还是执行路径坏了。
+    fn exec_report(label: &str, outcome: &Outcome) -> String {
+        let direct = std::process::Command::new("id").arg("-u").output();
+        let direct_text = match direct {
+            Ok(out) => format!(
+                "exit={:?} stdout={:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            ),
+            Err(error) => format!("启动失败: {error}"),
+        };
+        format!(
+            "{}: exit={} stdout={:?} stderr={:?} | uid={} euid={} | 直接执行 id -u: {} | tmp={:?}",
+            label,
+            outcome.exit_code,
+            outcome.stdout,
+            outcome.stderr,
+            nix::unistd::Uid::current().as_raw(),
+            nix::unistd::Uid::effective().as_raw(),
+            direct_text,
+            std::env::temp_dir(),
+        )
+    }
+
     #[tokio::test]
     async fn approval_executes_and_denial_blocks() {
         let sessions = Arc::new(SessionStore::new(16));
@@ -797,10 +850,12 @@ mod approval_tests {
             .await
             .expect("decide");
         let outcome = request.await.unwrap().expect("approved command");
-        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.exit_code, 0, "{}", exec_report("approved id -u", &outcome));
         assert_eq!(
             outcome.stdout.trim(),
-            nix::unistd::Uid::current().as_raw().to_string()
+            nix::unistd::Uid::current().as_raw().to_string(),
+            "{}",
+            exec_report("approved id -u stdout", &outcome)
         );
 
         let request = {
@@ -1068,10 +1123,14 @@ mod socket_tests {
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
         let value: Value = serde_json::from_str(reply.trim()).unwrap();
-        assert_eq!(value["ok"], true);
+        assert_eq!(value["ok"], true, "socket reply: {}", value);
         assert_eq!(
             value["stdout"].as_str().unwrap().trim(),
-            nix::unistd::Uid::current().as_raw().to_string()
+            nix::unistd::Uid::current().as_raw().to_string(),
+            "socket reply: {} (uid={} tmp={:?})",
+            value,
+            nix::unistd::Uid::current().as_raw(),
+            std::env::temp_dir(),
         );
         server.abort();
     }
