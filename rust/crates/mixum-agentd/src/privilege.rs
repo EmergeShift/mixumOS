@@ -761,6 +761,32 @@ mod approval_tests {
         }
     }
 
+    /// 通过 broker 执行 `id -u` 在 CI 上出现过 exit=1 且 stdout 为空。
+    /// 失败时把执行现场拼进断言消息：broker 看到的 stdout/stderr、当前 uid、
+    /// 以及同进程直接执行 `id -u` 的结果——一眼能分清是环境跑不了还是执行路径坏了。
+    fn exec_report(label: &str, outcome: &Outcome) -> String {
+        let direct = std::process::Command::new("id").arg("-u").output();
+        let direct_text = match direct {
+            Ok(out) => format!(
+                "exit={:?} stdout={:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            ),
+            Err(error) => format!("启动失败: {error}"),
+        };
+        format!(
+            "{}: exit={} stdout={:?} stderr={:?} | uid={} euid={} | 直接执行 id -u: {} | tmp={:?}",
+            label,
+            outcome.exit_code,
+            outcome.stdout,
+            outcome.stderr,
+            nix::unistd::Uid::current().as_raw(),
+            nix::unistd::Uid::effective().as_raw(),
+            direct_text,
+            std::env::temp_dir(),
+        )
+    }
+
     #[tokio::test]
     async fn approval_executes_and_denial_blocks() {
         let sessions = Arc::new(SessionStore::new(16));
@@ -797,10 +823,12 @@ mod approval_tests {
             .await
             .expect("decide");
         let outcome = request.await.unwrap().expect("approved command");
-        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.exit_code, 0, "{}", exec_report("approved id -u", &outcome));
         assert_eq!(
             outcome.stdout.trim(),
-            nix::unistd::Uid::current().as_raw().to_string()
+            nix::unistd::Uid::current().as_raw().to_string(),
+            "{}",
+            exec_report("approved id -u stdout", &outcome)
         );
 
         let request = {
@@ -1068,10 +1096,14 @@ mod socket_tests {
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
         let value: Value = serde_json::from_str(reply.trim()).unwrap();
-        assert_eq!(value["ok"], true);
+        assert_eq!(value["ok"], true, "socket reply: {}", value);
         assert_eq!(
             value["stdout"].as_str().unwrap().trim(),
-            nix::unistd::Uid::current().as_raw().to_string()
+            nix::unistd::Uid::current().as_raw().to_string(),
+            "socket reply: {} (uid={} tmp={:?})",
+            value,
+            nix::unistd::Uid::current().as_raw(),
+            std::env::temp_dir(),
         );
         server.abort();
     }
