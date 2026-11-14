@@ -442,6 +442,11 @@ impl SnapshotEngine for RealSnapshotEngine {
     ) -> Result<RestoreResult, SnapshotError> {
         let (branch, selected) = {
             let mut engine = self.engine.lock().expect("快照引擎锁");
+            if let Ok(target) = engine.tree.get(node) {
+                if target.memory.is_some() {
+                    stop_compositors();
+                }
+            }
             engine
                 .restore(node, strategy, label.unwrap_or_default())
                 .map_err(Self::map_error)?
@@ -536,7 +541,7 @@ impl SnapshotEngine for RealSnapshotEngine {
     }
 }
 
-fn compositor_pids() -> Vec<i32> {
+pub fn compositor_pids() -> Vec<i32> {
     #[cfg(target_os = "linux")]
     {
         let mut out = Vec::new();
@@ -551,7 +556,8 @@ fn compositor_pids() -> Vec<i32> {
             let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
                 continue;
             };
-            if comm.trim() == "mixcomp" {
+            let trimmed = comm.trim();
+            if trimmed == "mixcomp" || trimmed == "mixum-env-compo" {
                 out.push(pid);
             }
         }
@@ -561,6 +567,48 @@ fn compositor_pids() -> Vec<i32> {
     #[cfg(not(target_os = "linux"))]
     {
         Vec::new()
+    }
+}
+
+/// 终止运行中的合成器实例（避免快照恢复后出现双实例竞态导致显存/EGL 句柄泄漏）。
+/// 先发 SIGTERM 允许优雅退出并释放 DRM/EGL 资源，超时后再 SIGKILL 强制回收。
+pub fn stop_compositors() {
+    stop_compositors_with(compositor_pids);
+}
+
+pub fn stop_compositors_with<F>(mut list_pids: F)
+where
+    F: FnMut() -> Vec<i32>,
+{
+    #[cfg(target_os = "linux")]
+    {
+        let pids = list_pids();
+        if pids.is_empty() {
+            return;
+        }
+        for pid in &pids {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(*pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            if list_pids().is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for pid in list_pids() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = list_pids;
     }
 }
 
@@ -730,5 +778,73 @@ mod tests {
         let sessions = seen.lock().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].command, "/usr/bin/foot");
+    }
+
+    #[test]
+    fn stop_compositors_with_empty_pids_is_noop() {
+        let mut called = false;
+        stop_compositors_with(|| {
+            called = true;
+            Vec::new()
+        });
+        assert!(called);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_compositors_with_terminates_injected_process() {
+        use std::process::Command;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep process");
+        let child_pid = child.id() as i32;
+
+        assert!(kill(Pid::from_raw(child_pid), None).is_ok());
+
+        stop_compositors_with(|| {
+            if kill(Pid::from_raw(child_pid), None).is_ok() {
+                vec![child_pid]
+            } else {
+                Vec::new()
+            }
+        });
+
+        let status = child.wait().expect("child wait");
+        assert!(!status.success());
+        assert!(kill(Pid::from_raw(child_pid), None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_compositors_with_kills_stubborn_process() {
+        use std::process::Command;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 60"])
+            .spawn()
+            .expect("spawn stubborn process");
+        let child_pid = child.id() as i32;
+
+        // Allow shell to set the trap
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(kill(Pid::from_raw(child_pid), None).is_ok());
+
+        stop_compositors_with(|| {
+            if kill(Pid::from_raw(child_pid), None).is_ok() {
+                vec![child_pid]
+            } else {
+                Vec::new()
+            }
+        });
+
+        let status = child.wait().expect("child wait");
+        assert!(!status.success());
+        assert!(kill(Pid::from_raw(child_pid), None).is_err());
     }
 }
