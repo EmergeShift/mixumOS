@@ -180,9 +180,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             freeze_broker.try_notify_comps(serde_json::json!({"type": "snapshot.thaw"}));
             result
         }));
-        // 同机回退：CRIU restore 之前先终止当前任务树，避免恢复出重复进程。
+        // 同机回退：CRIU restore 之前先终止当前任务树与旧合成器，避免恢复出重复进程或显存泄露。
         let kill_sandbox = Arc::clone(&sandbox);
         engine.restore_prepare = Some(Box::new(move || {
+            mixum_agentd::snapshot::stop_compositors();
             kill_sandbox.kill_all();
             // A previous failed restore may have left the cgroup frozen; CRIU
             // cannot move a restored task into a frozen cgroup.
